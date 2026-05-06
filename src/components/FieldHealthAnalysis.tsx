@@ -9,15 +9,8 @@ interface FieldHealthAnalysisProps {
       mean: number;
     };
   } | null;
-}
-
-function getStatusLabel(score: number): string {
-  if (score >= 75 && score <= 100) return "Excellent";
-  if (score >= 65 && score <= 74) return "Good";
-  if (score >= 55 && score <= 64) return "Moderate";
-  if (score >= 45 && score <= 54) return "Poor";
-  if (score >= 0 && score <= 44) return "Very Poor";
-  return "Unknown";
+  /** Use a tighter layout for sidebar stacks (FarmerHomeGrid right panel). */
+  compact?: boolean;
 }
 
 // ✅ Updated: Removed arcOpacity, keeping only arc color
@@ -59,6 +52,7 @@ function getHealthColors(score: number) {
 
 export const FieldHealthAnalysis: React.FC<FieldHealthAnalysisProps> = ({
   fieldAnalysisData,
+  compact = false,
 }) => {
   const [animatedPercent, setAnimatedPercent] = useState(0);
   const targetPercent = fieldAnalysisData?.overallHealth ?? 0;
@@ -70,14 +64,15 @@ export const FieldHealthAnalysis: React.FC<FieldHealthAnalysisProps> = ({
     return () => clearTimeout(animationTimeout);
   }, [targetPercent]);
 
-  const computedStatus = getStatusLabel(targetPercent);
   const colors = getHealthColors(targetPercent);
   
   // ✅ Fixed orange color for remaining arc
   const remainingArcColor = "#f59e0b"; // Orange color
 
   return (
-    <div className="card h-full flex flex-col relative p-4 min-h-[320px]">
+    <div
+      className={`card h-full flex flex-col relative ${compact ? "p-3" : "p-4"} ${compact ? "min-h-[220px]" : "min-h-[320px]"}`}
+    >
       <div className="flex justify-between items-start">
         <h2 className="card-title text-lg font-semibold text-gray-800">
           Field Score
@@ -91,11 +86,11 @@ export const FieldHealthAnalysis: React.FC<FieldHealthAnalysisProps> = ({
         )}
       </div>
 
-      <div className="card-body mt-4">
+      <div className={`card-body ${compact ? "mt-2 p-0" : "mt-4"}`}>
         {fieldAnalysisData ? (
           <>
-            <div className="flex justify-center mb-6">
-              <div className="w-60 h-60 relative">
+            <div className={`flex justify-center ${compact ? "mb-2" : "mb-6"}`}>
+              <div className={`${compact ? "w-40 h-40" : "w-60 h-60"} relative`}>
                 <svg viewBox="0 0 36 36" className="w-full h-full">
                   {/* Background circle */}
                   <path

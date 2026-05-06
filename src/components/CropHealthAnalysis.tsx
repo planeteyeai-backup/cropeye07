@@ -12,7 +12,6 @@ import {
   fetchCurrentWeather,
   fetchPestDetectionData,
   RiskAssessmentResult,
-  PestDetectionData,
 } from "./pestt/meter/riskAssessmentService";
 import {
   getCurrentMonthLower,
@@ -230,6 +229,14 @@ const CropHealthAnalysis: React.FC = () => {
     useState<RiskAssessmentResult | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // If there are only a few rows, stretch them so the table visually fills
+  // the available height instead of leaving a large blank area.
+  const stretchRowsStyle = (rows: number) => {
+    if (!rows || rows <= 0) return undefined as React.CSSProperties | undefined;
+    if (rows > 10) return undefined;
+    return { height: `${100 / rows}%` } as React.CSSProperties;
+  };
+
   useEffect(() => {
     loadRiskAssessment();
   }, [selectedPlotName]);
@@ -241,15 +248,13 @@ const CropHealthAnalysis: React.FC = () => {
       // Fetch plantation date, weather data, and pest detection data
       const plantationDate = await fetchPlantationDate();
       const weatherData = await fetchCurrentWeather();
-      const pestData = await fetchPestDetectionData(
-        selectedPlotName || undefined,
-      );
+      await fetchPestDetectionData(selectedPlotName || undefined);
 
       // Generate risk assessment (already includes API data, stage, and month matching)
       const assessment = await generateRiskAssessment(
         plantationDate,
         weatherData,
-        plotId,
+        selectedPlotName || "",
       );
 
       // Assessment already has correct logic: only HIGH if API percentage > 0 AND stage matches AND month matches
@@ -425,7 +430,7 @@ const CropHealthAnalysis: React.FC = () => {
 
   if (loading) {
     return (
-      <div className="card h-full flex flex-col min-h-[350px]">
+      <div className="card h-full flex flex-col min-h-[full]">
         <div className="card-header">
           <h2 className="text-xl font-bold text-green-700">
             Crop Health Analysis
@@ -444,7 +449,7 @@ const CropHealthAnalysis: React.FC = () => {
   }
 
   return (
-    <div className="card h-full flex flex-col min-h-[350px]">
+    <div className="card h-full flex flex-col min-h-[640px]">
       <div className="card-header flex flex-col md:flex-row justify-between items-start md:items-center gap-2">
         <h2 className="text-lg md:text-xl font-bold text-green-700">
           Crop Health Analysis
@@ -486,9 +491,9 @@ const CropHealthAnalysis: React.FC = () => {
 
       <div className="p-2 md:p-4 flex-1 overflow-hidden">
         {activeTab === "pests" && (
-          <div className="overflow-x-auto w-full scroll-hide pest-tab-scroll">
+          <div className="h-full flex flex-col min-h-0">
             {pestControls.length === 0 ? (
-              <div className="text-center py-8">
+              <div className="text-center py-8 flex-1 flex flex-col items-center justify-center">
                 <p className="text-gray-500 font-medium">
                   No pests detected in current conditions
                 </p>
@@ -498,7 +503,8 @@ const CropHealthAnalysis: React.FC = () => {
               </div>
             ) : (
               <>
-                <table className="min-w-full border text-xs md:text-sm">
+                <div className="flex-1 min-h-0 overflow-hidden w-full scroll-hide pest-tab-scroll">
+                  <table className="min-w-full w-full border text-xs md:text-sm min-h-[64vh] max-h-[64vh] overflow-y-auto">
                   <thead className="bg-red-200">
                     <tr>
                       <th className="py-1 md:py-2 px-1 md:px-2 font-bold text-left">
@@ -515,11 +521,12 @@ const CropHealthAnalysis: React.FC = () => {
                       </th>
                     </tr>
                   </thead>
-                  <tbody>
+                  <tbody className="h-full">
                     {pestControls.map((pc, idx) => (
                       <tr
                         key={`${pc.pest}-${idx}`}
                         className="border-b last:border-0 hover:bg-red-50"
+                        style={stretchRowsStyle(pestControls.length)}
                       >
                         <td className="py-1 md:py-2 px-1 md:px-2 font-semibold">
                           {pc.pest}
@@ -546,16 +553,17 @@ const CropHealthAnalysis: React.FC = () => {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                  </table>
+                </div>
               </>
             )}
           </div>
         )}
 
         {activeTab === "diseases" && (
-          <div className="overflow-x-auto w-full">
+          <div className="h-full flex flex-col min-h-0">
             {diseaseRisks.length === 0 ? (
-              <div className="text-center py-8">
+              <div className="text-center py-8 flex-1 flex flex-col items-center justify-center">
                 <p className="text-gray-500 font-medium">
                   No diseases detected in current conditions
                 </p>
@@ -565,7 +573,8 @@ const CropHealthAnalysis: React.FC = () => {
               </div>
             ) : (
               <>
-                <table className="min-w-full border text-xs md:text-sm">
+                <div className="flex-1 min-h-0 overflow-hidden w-full">
+                  <table className="min-w-full w-full min-h-[64vh] max-h-[65vh] overflow-y-auto border text-xs md:text-sm">
                   <thead className="bg-blue-200">
                     <tr>
                       <th className="py-1 md:py-2 px-1 md:px-2 font-bold text-left">
@@ -582,11 +591,12 @@ const CropHealthAnalysis: React.FC = () => {
                       </th>
                     </tr>
                   </thead>
-                  <tbody>
+                  <tbody className="h-full">
                     {diseaseRisks.map((disease, idx) => (
                       <tr
                         key={`${disease.name}-${idx}`}
                         className="border-b last:border-0 hover:bg-blue-50"
+                        style={stretchRowsStyle(diseaseRisks.length)}
                       >
                         <td className="py-1 md:py-3 px-1 md:px-2 font-semibold">
                           {disease.name}
@@ -617,15 +627,17 @@ const CropHealthAnalysis: React.FC = () => {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                  </table>
+                </div>
               </>
             )}
           </div>
         )}
 
         {activeTab === "weeds" && (
-          <div className="overflow-x-auto w-full">
-            <table className="min-w-full table-auto border border-gray-200 rounded-lg text-xs md:text-sm">
+          <div className="h-full flex flex-col min-h-0">
+            <div className="flex-1 min-h-0 overflow-hidden w-full">
+              <table className="min-w-full w-full table-auto border border-gray-200 rounded-lg text-xs md:text-sm min-h-[64vh] max-h-[65vh] overflow-y-auto">
               <thead className="bg-green-100">
                 <tr>
                   <th className="px-1 md:px-2 py-1 md:py-2 border text-left font-bold">
@@ -639,7 +651,7 @@ const CropHealthAnalysis: React.FC = () => {
                   </th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="h-full">
                 {weedsData.map((weed, idx) => {
                   // Get risk level from month-based categorization map
                   // This uses the same logic as Pest & Disease component:
@@ -656,7 +668,11 @@ const CropHealthAnalysis: React.FC = () => {
                   const dosage = chemicalParts[1] || "";
 
                   return (
-                    <tr key={idx} className="border-b hover:bg-green-50">
+                    <tr
+                      key={idx}
+                      className="border-b hover:bg-green-50"
+                      style={stretchRowsStyle(weedsData.length)}
+                    >
                       <td className="px-1 md:px-2 py-1 md:py-2 border font-bold">
                         {weed.name.includes("(")
                           ? weed.name.split("(")[0].trim()
@@ -685,7 +701,8 @@ const CropHealthAnalysis: React.FC = () => {
                   );
                 })}
               </tbody>
-            </table>
+              </table>
+            </div>
           </div>
         )}
       </div>

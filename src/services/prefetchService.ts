@@ -5,6 +5,7 @@ import {
   getTasks,
   getFieldOfficerAgroStats,
 } from '../api';
+import { getFastApiToken } from '../utils/auth';
 import { getCache } from '../components/utils/cache';
 import { getOrFetchJson } from "../utils/requestCache";
 
@@ -306,7 +307,10 @@ export const prefetchAllData = async (
       profile?.plots?.[0]?.id;
     let indicesPromise: Promise<any> | null = null;
     if (plotId) {
-      indicesPromise = fetch(`${EVENTS_BASE_URL}/plots/${plotId}/indices`)
+      const fastToken = getFastApiToken();
+      indicesPromise = fetch(`${EVENTS_BASE_URL}/plots/${plotId}/indices`, {
+        headers: fastToken ? { Authorization: `Bearer ${fastToken}` } : undefined,
+      })
         .then(async (res) => {
           if (res.ok) {
             const data = await res.json();

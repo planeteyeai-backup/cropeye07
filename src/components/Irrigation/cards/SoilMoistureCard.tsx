@@ -8,6 +8,8 @@ interface SoilMoistureCardProps {
   optimalRange: [number, number]; // [min%, max%]
   moistGroundPercent?: number | null;
   targetDate?: string; // Optional date input (format: YYYY-MM-DD)
+  /** Tighter layout for sidebar stacks. */
+  compact?: boolean;
 }
 
 // New 9006 endpoint types
@@ -26,6 +28,7 @@ interface SoilMoistureStackResponse {
 const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
   optimalRange,
   targetDate,
+  compact = false,
 }) => {
   // Use current date if no target date provided
   const currentDate = targetDate || new Date().toISOString().split('T')[0];
@@ -177,12 +180,12 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
       : "text-gray-500";
 
   return (
-    <div className="irrigation-card">
+    <div className={`irrigation-card ${compact ? "irrigation-card--compact" : ""}`}>
       <div className="card-header">
         <Droplets className="card-icon" size={24} />
         <h3 className="font-semibold">Soil Moisture</h3>
       </div>
-      <div className="card-content soil-moisture">
+      <div className="card-content soil-moisture flex flex-row justify-evenly ">
         <div className="moisture-container">
           <div
             className="moisture-level"
@@ -206,31 +209,33 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
             </span>
           </div>
         </div>
-
-        <div
-          className="moisture-info"
-          style={{ textAlign: "center", marginTop: "15px" }}
-        >
+        
+        <div className="moisture-info-container">
           <div
-            className="moisture-percentage-display"
-            style={{ fontSize: "24px", fontWeight: "bold", color: "#333" }}
+            className="moisture-info"
+            style={{ textAlign: "center", marginTop: "15px" }}
           >
-           {/* {loading ? "..." : `${displayMoisture.toFixed(2)}%`} */}
-          
+            <div
+              className="moisture-percentage-display"
+              style={{ fontSize: "24px", fontWeight: "bold", color: "#333" }}
+            >
+            {/* {loading ? "..." : `${displayMoisture.toFixed(2)}%`} */}
+            
+            </div>
+            <small className="text-gray-600">Soil Moisture Level</small>
           </div>
-          <small className="text-gray-600">Soil Moisture Level</small>
-        </div>
 
-        <div className="moisture-status">
-          {error ? (
-            <span className="text-red-500">{error}</span>
-          ) : (
-            <span className={statusColor}>{status}</span>
-          )}
-        </div>
+          <div className="moisture-status">
+            {error ? (
+              <span className="text-red-500">{error}</span>
+            ) : (
+              <span className={statusColor}>{status}</span>
+            )}
+          </div>
 
-        <div className="moisture-range">
-          Range: {optimalRange[0]}–{optimalRange[1]}%
+          <div className="moisture-range">
+            Range: {optimalRange[0]}–{optimalRange[1]}%
+          </div>
         </div>
       </div>
     </div>

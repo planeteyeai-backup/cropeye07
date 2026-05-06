@@ -11,7 +11,7 @@ body {
 }
 
 .card-header {
-  @apply p-4 border-b border-gray-200 flex justify-between items-center;
+  @apply border-gray-200 flex justify-between items-center;
 }
 
 .card-title {

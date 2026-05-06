@@ -1750,90 +1750,6 @@ const CropEyeMap: React.FC<MapProps> = ({
 
   return (
     <div className="map-wrapper">
-      <div className="layer-controls">
-        <div className="layer-buttons">
-          {(["Growth", "Water Uptake", "Soil Moisture", "PEST"] as const).map((layer) => (
-            <button
-              key={layer}
-              onClick={() => setActiveLayer(layer)}
-              className={activeLayer === layer ? "active" : ""}
-              disabled={loading}
-            >
-              {LAYER_LABELS[layer]}
-            </button>
-          ))}
-        </div>
-
-        {profile && !profileLoading && (
-          <div className="plot-selector">
-            <label>Select Plot:</label>
-            <select
-              value={selectedPlotName}
-              onChange={(e) => {
-                const newPlot = e.target.value;
-                setSelectedPlotName(newPlot);
-                localStorage.setItem('selectedPlot', newPlot);
-                // Clear previous plot boundary when selecting a new plot
-                setPlotBoundary(null);
-                // Reset initial fetch flag so all APIs are fetched for the new plot
-                initialFetchDoneRef.current = false;
-                // Fetch ALL 4 APIs when plot changes to ensure all data is available
-                console.log('🔄 Map: Fetching all 4 layer APIs for new plot:', newPlot);
-                Promise.all([
-                  fetchGrowthData(newPlot),
-                  fetchWaterUptakeData(newPlot),
-                  fetchSoilMoistureData(newPlot),
-                  fetchPestData(newPlot),
-                  fetchPlotData(newPlot),
-                  fetchFieldAnalysis(newPlot)
-                ]).then(() => {
-                  console.log('✅ Map: All 4 layer APIs fetched for new plot');
-                  initialFetchDoneRef.current = true;
-                }).catch((err) => {
-                  console.error('❌ Map: Some APIs failed to fetch for new plot:', err);
-                });
-              }}
-              disabled={loading}
-            >
-              {profile.plots?.map(plot => {
-                let displayName = '';
-                
-                if (plot.gat_number && plot.plot_number && 
-                    plot.gat_number.trim() !== "" && plot.plot_number.trim() !== "" &&
-                    !plot.gat_number.startsWith('GAT_') && !plot.plot_number.startsWith('PLOT_')) {
-                  displayName = `${plot.gat_number}_${plot.plot_number}`;
-                } else if (plot.gat_number && plot.gat_number.trim() !== "" && !plot.gat_number.startsWith('GAT_')) {
-                  displayName = plot.gat_number;
-                } else if (plot.plot_number && plot.plot_number.trim() !== "" && !plot.plot_number.startsWith('PLOT_')) {
-                  displayName = plot.plot_number;
-                } else {
-                  const village = plot.address?.village;
-                  const taluka = plot.address?.taluka;
-                  
-                  if (village) {
-                    displayName = `Plot in ${village}`;
-                    if (taluka) displayName += `, ${taluka}`;
-                  } else {
-                    displayName = 'Plot (No GAT/Plot Number)';
-                  }
-                }
-                
-                return (
-                  <option key={plot.fastapi_plot_id} value={plot.fastapi_plot_id}>
-                    {displayName}
-                  </option>
-                );
-              }) || []}
-            </select>
-          </div>
-        )}
-
-        {profileLoading && <div className="loading-indicator">Loading farmer profile...</div>}
-        {!profileLoading && !selectedPlotName && <div className="error-message">No plot data available for this farmer</div>}
-        {loading && <div className="loading-indicator">Loading plot data...</div>}
-        {error && <div className="error-message">{error}</div>}
-      </div>
-
       {/* Enhanced Multi-Layer Tooltip */}
       {pixelTooltip && pixelTooltip.layers.length > 0 && (
         <div 
@@ -1855,6 +1771,133 @@ const CropEyeMap: React.FC<MapProps> = ({
       )}
 
       <div className="map-container" ref={mapWrapperRef}>
+        {/* Map-top controls (no background container) */}
+        <div className="map-overlay map-overlay--left">
+          <div className="layer-buttons">
+            {(["Growth", "Water Uptake", "Soil Moisture", "PEST"] as const).map(
+              (layer) => (
+                <button
+                  key={layer}
+                  onClick={() => setActiveLayer(layer)}
+                  className={activeLayer === layer ? "active" : ""}
+                  disabled={loading}
+                >
+                  {LAYER_LABELS[layer]}
+                </button>
+              ),
+            )}
+          </div>
+        </div>
+
+        <div className="map-overlay map-overlay--right">
+          {profile && !profileLoading && (
+            <div className="plot-selector">
+              <label>Select Plot:</label>
+              <select
+                value={selectedPlotName}
+                onChange={(e) => {
+                  const newPlot = e.target.value;
+                  setSelectedPlotName(newPlot);
+                  localStorage.setItem("selectedPlot", newPlot);
+                  setPlotBoundary(null);
+                  initialFetchDoneRef.current = false;
+                  console.log(
+                    "🔄 Map: Fetching all 4 layer APIs for new plot:",
+                    newPlot,
+                  );
+                  Promise.all([
+                    fetchGrowthData(newPlot),
+                    fetchWaterUptakeData(newPlot),
+                    fetchSoilMoistureData(newPlot),
+                    fetchPestData(newPlot),
+                    fetchPlotData(newPlot),
+                    fetchFieldAnalysis(newPlot),
+                  ])
+                    .then(() => {
+                      console.log("✅ Map: All 4 layer APIs fetched for new plot");
+                      initialFetchDoneRef.current = true;
+                    })
+                    .catch((err) => {
+                      console.error(
+                        "❌ Map: Some APIs failed to fetch for new plot:",
+                        err,
+                      );
+                    });
+                }}
+                disabled={loading}
+              >
+                {profile.plots?.map((plot) => {
+                  let displayName = "";
+
+                  if (
+                    plot.gat_number &&
+                    plot.plot_number &&
+                    plot.gat_number.trim() !== "" &&
+                    plot.plot_number.trim() !== "" &&
+                    !plot.gat_number.startsWith("GAT_") &&
+                    !plot.plot_number.startsWith("PLOT_")
+                  ) {
+                    displayName = `${plot.gat_number}_${plot.plot_number}`;
+                  } else if (
+                    plot.gat_number &&
+                    plot.gat_number.trim() !== "" &&
+                    !plot.gat_number.startsWith("GAT_")
+                  ) {
+                    displayName = plot.gat_number;
+                  } else if (
+                    plot.plot_number &&
+                    plot.plot_number.trim() !== "" &&
+                    !plot.plot_number.startsWith("PLOT_")
+                  ) {
+                    displayName = plot.plot_number;
+                  } else {
+                    const village = plot.address?.village;
+                    const taluka = plot.address?.taluka;
+
+                    if (village) {
+                      displayName = `Plot in ${village}`;
+                      if (taluka) displayName += `, ${taluka}`;
+                    } else {
+                      displayName = "Plot (No GAT/Plot Number)";
+                    }
+                  }
+
+                  return (
+                    <option
+                      key={plot.fastapi_plot_id}
+                      value={plot.fastapi_plot_id}
+                    >
+                      {displayName}
+                    </option>
+                  );
+                }) || []}
+              </select>
+            </div>
+          )}
+        </div>
+
+        {/* Errors/loading (small, no background container) */}
+        {profileLoading && (
+          <div className="map-overlay map-overlay--status loading-indicator">
+            Loading farmer profile...
+          </div>
+        )}
+        {!profileLoading && !selectedPlotName && (
+          <div className="map-overlay map-overlay--status error-message">
+            No plot data available for this farmer
+          </div>
+        )}
+        {loading && (
+          <div className="map-overlay map-overlay--status loading-indicator">
+            Loading plot data...
+          </div>
+        )}
+        {error && (
+          <div className="map-overlay map-overlay--status error-message">
+            {error}
+          </div>
+        )}
+
         {(activeLayer === "Growth" ||
           activeLayer === "Water Uptake" ||
           activeLayer === "Soil Moisture" ||
@@ -1949,7 +1992,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         </button>
 
         {/* Split Screen Button */}
-        {/* {onSplitScreen && (
+       {onSplitScreen && (
           <button
             className="splitscreen-btn"
             title="Split Screen View"
@@ -1957,7 +2000,7 @@ const CropEyeMap: React.FC<MapProps> = ({
           >
             <FaColumns />
           </button>
-        )} */}
+        )} 
 
         {(plotBoundary || currentPlotFeature) && (
           <>
@@ -2046,7 +2089,7 @@ const CropEyeMap: React.FC<MapProps> = ({
                   <div className="timeseries-date-popup-range">
                     {/* Start: {(() => {
                       const endDate = new Date(currentEndDate);
-                      const startDate = new Date(endDate);
+                      const startDate = new Date(endDate);  
                       startDate.setDate(startDate.getDate() - DAYS_STEP);
                       return startDate.toISOString().split('T')[0];
                     })()} */}
@@ -2060,7 +2103,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         <MapContainer
           center={mapCenter}
           zoom={PLOT_VIEW_MAX_ZOOM}
-          style={{ height: "90%", width: "100%" }}
+          style={{ height: "100%", width: "100%" }}
           zoomControl={true}
           maxZoom={22}
           minZoom={10}

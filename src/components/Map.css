@@ -117,6 +117,74 @@
   z-index: 1 !important;
 }
 
+/* ============================================================
+   Map top overlay controls (no background container)
+============================================================ */
+.map-container .map-overlay {
+  position: absolute;
+  z-index: 2000;
+  pointer-events: auto;
+}
+
+.map-container .map-overlay--left {
+  top: 20px;
+  left: 50px;
+}
+
+.map-container .map-overlay--right {
+  top: 22px;
+  right: 64px;
+}
+
+.map-container .map-overlay--status {
+  top: 56px;
+  left: 10px;
+  right: 10px;
+  z-index: 2001;
+  width: max-content;
+  max-width: calc(100% - 20px);
+}
+
+/* Make plot selector readable without a big bar */
+.map-container .map-overlay--right .plot-selector {
+  margin: 0;
+  padding: 0;
+}
+.map-container .map-overlay--right .plot-selector label {
+  display: none;
+}
+.map-container .map-overlay--right .plot-selector select {
+  width: auto;
+  min-width: 100px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.12);
+  border-radius: 12px;
+}
+
+/* keep other absolute UI (fullscreen/date arrows) above map but below this */
+.map-container .fullscreen-btn {
+  z-index: 1900;
+}
+
+@media (max-width: 640px) {
+  .map-container .map-overlay--left {
+    left: 8px;
+    right: 8px;
+  }
+  .map-container .map-overlay--right {
+    top: 56px;
+    left: 8px;
+    right: 8px;
+  }
+  .map-container .map-overlay--right .plot-selector select {
+    width: 100%;
+    min-width: 0;
+  }
+}
+
 .back-btn {
   position: absolute;
   bottom: 10px;
@@ -225,8 +293,8 @@
 /* Split Screen Button */
 .splitscreen-btn {
   position: absolute;
-  top: 10px;
-  right: 54px;
+  top: 50px;
+  right: 10px;
   z-index: 1001;
   background: white;
   border: none;
@@ -629,10 +697,10 @@
 
 .plot-info {
   position: absolute;
-  top: 50px;
-  left: 80%;
+  top: 20px;
+  left: 72%;
   transform: translateX(-50%);
-  z-index: 1000;
+  z-index: 1000;  
 }
 
 .plot-area {
@@ -1709,7 +1777,7 @@
 /* Map legend bottom styles - positioned at bottom of map container */
 .map-legend-bottom {
   position: absolute !important;
-  bottom: 150px;
+  bottom: 35px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 10000 !important;
@@ -2268,7 +2336,7 @@
 /* ── Analysis timeline ribbon (cropeye-database /analysis_timeline) ─────────── */
 .analysis-timeline-ribbon-wrap {
   position: absolute;
-  bottom:110px;
+  bottom: 0;
   left: 1px;
   right: 1px;
   z-index: 1003;

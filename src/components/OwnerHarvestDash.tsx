@@ -1,10 +1,10 @@
 import api from "../api";
 import React, { useState, useRef, useEffect, useMemo } from "react";
-import CommonSpinner from "./CommanSpinner";
 import axios from "axios";
 import {
   MapPin,
   ChevronDown,
+  Loader2,
   Calendar,
   TrendingUp,
   BarChart3,
@@ -73,7 +73,9 @@ interface HarvestData {
   "Sugarcane Status": string;
   "Area (Hect)": number;
   Days: number;
-  "Prediction Yield (T/acer)": number;
+  /** Legacy typo key (kept for safety). */
+  "Prediction Yield (T/acer)"?: number;
+  "Prediction Yield (T/acre)"?: number;
   "Brix (Degree)": number;
   "Recovery (Degree)": number;
   "Distance (km)": number;
@@ -393,7 +395,7 @@ const CombinedChart: React.FC<CombinedChartProps> = ({
               <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
               <XAxis
                 dataKey="stage"
-                tick={{ fontSize: 10, angle: 0, dy: 10 }}
+                tick={{ fontSize: 10, dy: 10 }}
                 axisLine={{ stroke: "#e5e7eb" }}
               />
               <YAxis
@@ -944,10 +946,75 @@ const HarvestDashboard: React.FC = () => {
     </div>
   );
 
-  if (loading || rawData.length === 0) {
+  const isInitialLoad = loading && rawData.length === 0;
+
+  const SkeletonBlock: React.FC<{ className?: string }> = ({ className }) => (
+    <div
+      className={`animate-pulse rounded-xl bg-gray-200/80 ${className || ""}`}
+      aria-hidden
+    />
+  );
+
+  if (isInitialLoad) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <CommonSpinner />
+      <div className="min-h-screen bg-gray-50 p-4 lg:p-6">
+        <div className="max-w-7xl mx-auto">
+          <div className="mb-8">
+            <div className="flex items-center justify-between mb-6">
+              <div className="text-lg font-semibold text-gray-900">
+                Harvest Dashboard
+              </div>
+              <div className="flex items-center gap-2 text-sm text-gray-600">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Loading data…
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 lg:gap-6 mb-8">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div
+                  key={i}
+                  className="bg-white rounded-xl p-6 shadow-sm border border-gray-100"
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <SkeletonBlock className="h-8 w-8 rounded-lg" />
+                  </div>
+                  <SkeletonBlock className="h-8 w-28 mb-2" />
+                  <SkeletonBlock className="h-4 w-36" />
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <div className="lg:col-span-3 space-y-3">
+              <div className="bg-white rounded-xl p-4 border border-gray-100">
+                <SkeletonBlock className="h-5 w-24 mb-2" />
+                <SkeletonBlock className="h-10 w-full" />
+              </div>
+              <div className="bg-white rounded-xl p-4 border border-gray-100">
+                <SkeletonBlock className="h-5 w-24 mb-2" />
+                <SkeletonBlock className="h-10 w-full" />
+              </div>
+              <div className="bg-white rounded-xl p-4 border border-gray-100">
+                <SkeletonBlock className="h-5 w-24 mb-2" />
+                <SkeletonBlock className="h-10 w-full" />
+              </div>
+            </div>
+
+            <div className="lg:col-span-9">
+              <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
+                <div className="p-4 border-b border-gray-100 flex items-center justify-between">
+                  <SkeletonBlock className="h-6 w-40" />
+                  <SkeletonBlock className="h-9 w-28 rounded-lg" />
+                </div>
+                <div className="p-4">
+                  <SkeletonBlock className="h-[420px] w-full" />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
@@ -955,6 +1022,12 @@ const HarvestDashboard: React.FC = () => {
   return (
     <div className="min-h-screen bg-gray-50 p-4 lg:p-6">
       <div className="max-w-7xl mx-auto">
+        {loading && rawData.length > 0 && (
+          <div className="mb-4 flex items-center justify-end gap-2 text-sm text-gray-600">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            Refreshing…
+          </div>
+        )}
         <div className="mb-8">
           {/* <div className="flex flex-wrap items-center gap-4 mb-6">
             <div className="flex items-center gap-2 bg-white px-4 py-2 rounded-lg border shadow-sm">

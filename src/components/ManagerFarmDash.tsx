@@ -24,7 +24,6 @@ import {
   useMap,
 } from "react-leaflet";
 import {
-  Loader2,
   AlertTriangle,
   Calendar,
   Droplets,
@@ -47,9 +46,8 @@ import {
   Maximize2,
 } from "lucide-react";
 import "leaflet/dist/leaflet.css";
-import axios from "axios";
 import { getCache, setCache } from "../utils/cache";
-import api from "../api"; // Import the authenticated api instance
+import api, { eventsApi } from "../api"; // Authenticated Django api + FastAPI events api
 import { useAppContext } from "../context/AppContext";
 
 // Constants (same as FarmerDashboard)
@@ -162,7 +160,8 @@ const ManagerFarmDash: React.FC = () => {
   const [loadingFarmers, setLoadingFarmers] = useState<boolean>(false);
   const [loadingData, setLoadingData] = useState<boolean>(false);
   const [showDebugInfo] = useState(false);
-
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
+    
   const lineStyles: LineStyles = {
     growth: { color: "#16a34a", label: "Growth Index" },
     stress: { color: "#dc2626", label: "Crop Stress Index" },
@@ -310,10 +309,11 @@ const ManagerFarmDash: React.FC = () => {
   }, [selectedFarmerId, farmersForSelectedOfficer]);
 
   useEffect(() => {
-    if (selectedPlotId) {
-      fetchAllData();
-      setPlotCoordinatesFromState(selectedPlotId); // This will now work
-    }
+    if (!selectedPlotId) return;
+    const ac = new AbortController();
+    void fetchAllData(selectedPlotId, ac.signal);
+    setPlotCoordinatesFromState(selectedPlotId);
+    return () => ac.abort();
   }, [selectedPlotId]);
 
   // Sync selected plot to global AppContext so the chatbot always has the
@@ -360,14 +360,21 @@ const ManagerFarmDash: React.FC = () => {
     url: string,
     retries = 1,
     timeout = 15000,
+    outerSignal?: AbortSignal,
   ): Promise<any> => {
     const abortController = new AbortController();
     const timeoutId = setTimeout(() => {
       abortController.abort();
     }, timeout);
 
+    const onOuterAbort = () => abortController.abort();
+    if (outerSignal) {
+      if (outerSignal.aborted) abortController.abort();
+      else outerSignal.addEventListener("abort", onOuterAbort);
+    }
+
     try {
-      const response = await axios.get(url, {
+      const response = await eventsApi.get(url, {
         signal: abortController.signal,
         timeout: timeout,
         headers: {
@@ -376,9 +383,21 @@ const ManagerFarmDash: React.FC = () => {
         },
       });
       clearTimeout(timeoutId);
+      if (outerSignal)
+        outerSignal.removeEventListener("abort", onOuterAbort);
       return response.data;
     } catch (error: any) {
       clearTimeout(timeoutId);
+      if (outerSignal)
+        outerSignal.removeEventListener("abort", onOuterAbort);
+
+      if (
+        error?.code === "ERR_CANCELED" ||
+        error?.name === "CanceledError" ||
+        error?.name === "AbortError"
+      ) {
+        throw error;
+      }
 
       // Handle CORS errors
       if (
@@ -401,7 +420,7 @@ const ManagerFarmDash: React.FC = () => {
       ) {
         if (retries > 0) {
           await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait 1 second before retry
-          return makeRequestWithRetry(url, retries - 1, timeout);
+          return makeRequestWithRetry(url, retries - 1, timeout, outerSignal);
         }
         throw new Error(
           `Request timeout: The server took too long to respond. Please try again later.`,
@@ -415,7 +434,7 @@ const ManagerFarmDash: React.FC = () => {
       ) {
         if (retries > 0) {
           await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait 2 seconds before retry
-          return makeRequestWithRetry(url, retries - 1, timeout);
+          return makeRequestWithRetry(url, retries - 1, timeout, outerSignal);
         }
         throw new Error(
           `Network error: Unable to connect to the server. Please check your internet connection.`,
@@ -426,7 +445,7 @@ const ManagerFarmDash: React.FC = () => {
       if (error.response?.status === 504) {
         if (retries > 0) {
           await new Promise((resolve) => setTimeout(resolve, 2000));
-          return makeRequestWithRetry(url, retries - 1, timeout);
+          return makeRequestWithRetry(url, retries - 1, timeout, outerSignal);
         }
         throw new Error(
           `Gateway timeout: The server is taking too long to process your request. Please try again later.`,
@@ -438,126 +457,268 @@ const ManagerFarmDash: React.FC = () => {
     }
   };
 
-  // Fetch all data for selected plot - Optimized for faster retrieval
-  const fetchAllData = async (): Promise<void> => {
-    if (!selectedPlotId) return;
+  // Fetch all data for selected plot — parallel network where possible (no backend changes).
+  const fetchAllData = async (
+    plotId: string,
+    signal: AbortSignal,
+  ): Promise<void> => {
+    if (!plotId) return;
 
     setLoadingData(true);
     try {
-      // Use timezone offset for consistent date calculation
       const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
-      const endDate = new Date(Date.now() - tzOffsetMs)
+      const today = new Date(Date.now() - tzOffsetMs)
         .toISOString()
         .slice(0, 10);
-      const today = endDate;
 
-      // Step 1: Fetch harvest status first to determine correct date for yield data
-      const harvestCacheKey = `harvest_${selectedPlotId}_${today}`;
-      let harvestStatus: string | null = null;
-      let harvestData = getCache(harvestCacheKey);
+      const pad2 = (n: number) => String(n).padStart(2, "0");
+      const [y0, m0, d0] = today.split("-").map(Number);
+      const baseCal = new Date(y0, m0 - 1, d0);
+      const y1 = new Date(baseCal);
+      y1.setDate(y1.getDate() - 1);
+      const y2 = new Date(baseCal);
+      y2.setDate(y2.getDate() - 2);
+      const yesterday = `${y1.getFullYear()}-${pad2(y1.getMonth() + 1)}-${pad2(y1.getDate())}`;
+      const twoDaysAgo = `${y2.getFullYear()}-${pad2(y2.getMonth() + 1)}-${pad2(y2.getDate())}`;
+      const datesToTry = [today, yesterday, twoDaysAgo];
 
-      if (!harvestData) {
+      const cleanId = plotId.replace(/"/g, "");
+      const quotedId = `"${cleanId}"`;
+
+      const harvestPromise = (async () => {
+        const harvestCacheKey = `harvest_${plotId}_${today}`;
+        let harvestData = getCache(harvestCacheKey);
+        if (harvestData) return { harvestData };
+        if (signal.aborted) return { harvestData: null as any };
         try {
-          const harvestRes = await axios.post(
-            `${BASE_URL}/sugarcane-harvest?plot_name=${selectedPlotId}&end_date=${today}`,
+          const harvestRes = await eventsApi.post(
+            `${BASE_URL}/sugarcane-harvest?plot_name=${plotId}&end_date=${today}`,
             {},
-            { timeout: 10000 },
+            { timeout: 10000, signal },
           );
           harvestData = harvestRes.data;
           setCache(harvestCacheKey, harvestData);
+          return { harvestData };
         } catch (err) {
+          if (
+            (err as any)?.code === "ERR_CANCELED" ||
+            (err as any)?.name === "CanceledError"
+          ) {
+            return { harvestData: null as any };
+          }
           console.warn("Harvest status fetch failed, continuing...", err);
+          return { harvestData: null as any };
         }
-      }
+      })();
 
-      if (harvestData) {
-        harvestStatus =
-          harvestData.harvest_status ||
-          harvestData.harvest_summary?.harvest_status ||
-          harvestData.features?.[0]?.properties?.harvest_status ||
-          null;
-      }
+      const agroPromise = (async (): Promise<{
+        allPlotsData: any;
+        currentPlotData: any;
+        successfulDate: string;
+      } | null> => {
+        const yieldDataDate = today;
+        const agroStatsCacheKey = `agroStats_v3_${yieldDataDate}`;
+        let allPlotsData = getCache(agroStatsCacheKey);
+        let currentPlotData = getCache(`plot_v3_${plotId}_${yieldDataDate}`);
 
-      // Determine date for yield data (always use today for agroStats)
-      const yieldDataDate = today;
+        if (allPlotsData && currentPlotData) {
+          return {
+            allPlotsData,
+            currentPlotData,
+            successfulDate: yieldDataDate,
+          };
+        }
 
-      // Helper to fetch agroStats with fallback dates
-      const fetchAgroStatsWithFallback = async (dates: string[]) => {
-        for (const date of dates) {
-          try {
-            console.log(`Fetching AgroStats for date: ${date}`);
-            const res = await axios.get(
-              `https://events-cropeye.up.railway.app/plots/agroStats?end_date=${date}`
-            );
-            if (res.data) {
-              return { data: res.data, successfulDate: date };
+        if (allPlotsData && !currentPlotData) {
+          currentPlotData =
+            allPlotsData[cleanId] || allPlotsData[quotedId] || null;
+        }
+        if (currentPlotData && allPlotsData) {
+          return {
+            allPlotsData,
+            currentPlotData,
+            successfulDate: yieldDataDate,
+          };
+        }
+
+        for (const d of datesToTry) {
+          const allCached = getCache(`agroStats_v3_${d}`);
+          const plotCached = getCache(`plot_v3_${plotId}_${d}`);
+          if (plotCached && allCached) {
+            return {
+              allPlotsData: allCached,
+              currentPlotData: plotCached,
+              successfulDate: d,
+            };
+          }
+          if (allCached) {
+            const row = allCached[cleanId] || allCached[quotedId] || null;
+            if (row) {
+              setCache(`plot_v3_${plotId}_${d}`, row);
+              return {
+                allPlotsData: allCached,
+                currentPlotData: row,
+                successfulDate: d,
+              };
             }
-          } catch (err: any) {
-             console.warn(`Failed to fetch AgroStats for ${date}:`, err.message);
-             // Continue to next date if available
           }
         }
+
+        if (signal.aborted) return null;
+
+        const settled = await Promise.allSettled(
+          datesToTry.map((date) =>
+            eventsApi
+              .get(
+                `https://events-cropeye.up.railway.app/plots/agroStats?end_date=${date}`,
+                { signal, timeout: 12000 },
+              )
+              .then((res) => ({ date, data: res.data })),
+          ),
+        );
+
+        for (let i = 0; i < datesToTry.length; i++) {
+          const s = settled[i];
+          if (s.status !== "fulfilled" || !s.value?.data) continue;
+          const { date, data } = s.value;
+          const row = data[cleanId] || data[quotedId] || null;
+          if (row) {
+            setCache(`agroStats_v3_${date}`, data);
+            setCache(`plot_v3_${plotId}_${date}`, row);
+            return {
+              allPlotsData: data,
+              currentPlotData: row,
+              successfulDate: date,
+            };
+          }
+        }
+
+        for (let i = 0; i < datesToTry.length; i++) {
+          const s = settled[i];
+          if (s.status !== "fulfilled" || !s.value?.data) continue;
+          const { date, data } = s.value;
+          setCache(`agroStats_v3_${date}`, data);
+          console.warn(
+            `Plot data not found for ID: ${plotId} in AgroStats response (${date})`,
+          );
+          return {
+            allPlotsData: data,
+            currentPlotData: null,
+            successfulDate: date,
+          };
+        }
+
+        console.error("All AgroStats fetch attempts failed.");
         return null;
-      };
+      })();
 
-      // Step 2: Fetch agroStats with fallback logic
-      // Try today, then yesterday, then 2 days ago
-      const yesterday = new Date(new Date(today).setDate(new Date(today).getDate() - 1)).toISOString().slice(0, 10);
-      const twoDaysAgo = new Date(new Date(today).setDate(new Date(today).getDate() - 2)).toISOString().slice(0, 10);
-      
-      const datesToTry = [today, yesterday, twoDaysAgo];
-      let successfulDate = yieldDataDate; // Default to today/yieldDataDate
+      const indicesCacheKey = `indices_${plotId}`;
+      const stressCacheKey = `stress_${plotId}_NDRE_0.15`;
+      const irrigationCacheKey = `irrigation_${plotId}`;
 
-      // Check cache first for today (primary target)
-      const agroStatsCacheKey = `agroStats_v3_${yieldDataDate}`;
-      let allPlotsData = getCache(agroStatsCacheKey);
-      
-      // Also check plot-specific cache for faster retrieval
-      const plotSpecificCacheKey = `plot_v3_${selectedPlotId}_${yieldDataDate}`;
-      let currentPlotData = getCache(plotSpecificCacheKey);
+      const cachedIndices = getCache(indicesCacheKey);
+      const cachedStress = getCache(stressCacheKey);
+      const cachedIrrigation = getCache(irrigationCacheKey);
 
-      if (!allPlotsData || !currentPlotData) {
-        const result = await fetchAgroStatsWithFallback(datesToTry);
-        
-        if (result) {
-           allPlotsData = result.data;
-           successfulDate = result.successfulDate;
-           
-           // Cache the result using the date that actually worked
-           const successfulCacheKey = `agroStats_v3_${successfulDate}`;
-           setCache(successfulCacheKey, allPlotsData);
+      const fetchPromises: Promise<{
+        type: string;
+        data: any;
+      }>[] = [];
 
-           // Extract and cache plot-specific data
-           const cleanId = selectedPlotId.replace(/"/g, "");
-           const quotedId = `"${cleanId}"`;
-           
-           currentPlotData =
-             allPlotsData[cleanId] || allPlotsData[quotedId] || null;
-
-           if (currentPlotData) {
-             const successfulPlotKey = `plot_v3_${selectedPlotId}_${successfulDate}`;
-             setCache(successfulPlotKey, currentPlotData);
-           } else {
-             console.warn(`Plot data not found for ID: ${selectedPlotId} in AgroStats response (${successfulDate})`);
-           }
-        } else {
-           console.error("All AgroStats fetch attempts failed.");
-           allPlotsData = null;
-        }
+      if (!cachedIndices) {
+        fetchPromises.push(
+          makeRequestWithRetry(
+            `${BASE_URL}/plots/${plotId}/indices`,
+            1,
+            10000,
+            signal,
+          )
+            .then((data) => {
+              const processed = data.map((item: any) => ({
+                date: new Date(item.date).toISOString().split("T")[0],
+                growth: item.NDVI,
+                stress: item.NDMI,
+                water: item.NDWI,
+                moisture: item.NDRE,
+              }));
+              setCache(indicesCacheKey, processed);
+              return { type: "indices", data: processed };
+            })
+            .catch(() => ({ type: "indices", data: null })),
+        );
       } else {
-        // Use cached plot data if available
-        const cleanId = selectedPlotId.replace(/"/g, "");
-        const quotedId = `"${cleanId}"`;
-        
-        if (!currentPlotData && allPlotsData) {
-           currentPlotData =
-            allPlotsData[cleanId] ||
-            allPlotsData[quotedId] ||
-            null;
-        }
+        fetchPromises.push(
+          Promise.resolve({ type: "indices", data: cachedIndices }),
+        );
       }
 
-      // Step 3: Calculate biomass from expectedYield (matching FarmerDashboard)
+      if (!cachedStress) {
+        fetchPromises.push(
+          makeRequestWithRetry(
+            `${BASE_URL}/plots/${plotId}/stress?index_type=NDRE&threshold=0.15`,
+            1,
+            10000,
+            signal,
+          )
+            .then((data) => {
+              setCache(stressCacheKey, data);
+              return { type: "stress", data };
+            })
+            .catch(() => ({
+              type: "stress",
+              data: { events: [], total_events: 0 },
+            })),
+        );
+      } else {
+        fetchPromises.push(
+          Promise.resolve({ type: "stress", data: cachedStress }),
+        );
+      }
+
+      if (!cachedIrrigation) {
+        fetchPromises.push(
+          makeRequestWithRetry(
+            `${BASE_URL}/plots/${plotId}/irrigation?threshold_ndmi=0.05&threshold_ndwi=0.05&min_days_between_events=10`,
+            1,
+            10000,
+            signal,
+          )
+            .then((data) => {
+              setCache(irrigationCacheKey, data);
+              return { type: "irrigation", data };
+            })
+            .catch(() => ({
+              type: "irrigation",
+              data: { total_events: null },
+            })),
+        );
+      } else {
+        fetchPromises.push(
+          Promise.resolve({ type: "irrigation", data: cachedIrrigation }),
+        );
+      }
+
+      const chartsPromise = Promise.allSettled(fetchPromises);
+
+      const [harvestOutcome, agroOutcome, chartSettled] = await Promise.all([
+        harvestPromise,
+        agroPromise,
+        chartsPromise,
+      ]);
+
+      if (signal.aborted) return;
+
+      const harvestData = harvestOutcome?.harvestData;
+      const harvestStatus: string | null = harvestData
+        ? harvestData.harvest_status ||
+          harvestData.harvest_summary?.harvest_status ||
+          harvestData.features?.[0]?.properties?.harvest_status ||
+          null
+        : null;
+
+      const agroResolved = agroOutcome;
+      let currentPlotData = agroResolved?.currentPlotData ?? null;
+
       const expectedYieldValue =
         currentPlotData?.brix_sugar?.sugar_yield?.mean ??
         currentPlotData?.brix_sugar?.sugar_yield?.min ??
@@ -572,14 +733,12 @@ const ManagerFarmDash: React.FC = () => {
         calculatedBiomass = underGroundBiomassInTons;
         totalBiomassForMetric = totalBiomass;
       } else if (currentPlotData?.biomass?.mean) {
-        // Fallback to API biomass if calculated value is not available
         const totalBiomass = currentPlotData.biomass.mean;
         const underGroundBiomassInTons = totalBiomass * 0.12;
         calculatedBiomass = underGroundBiomassInTons;
         totalBiomassForMetric = totalBiomass;
       }
 
-      // Step 3: Update metrics immediately with available data for faster UI response
       if (currentPlotData) {
         const brixStats = currentPlotData?.brix_sugar?.brix ?? null;
         const recoveryStats = currentPlotData?.brix_sugar?.recovery ?? null;
@@ -612,97 +771,11 @@ const ManagerFarmDash: React.FC = () => {
         }));
       }
 
-      // Step 4: Fetch additional data in parallel with shorter timeouts
-      // Check cache first for each endpoint
-      const indicesCacheKey = `indices_${selectedPlotId}`;
-      const stressCacheKey = `stress_${selectedPlotId}_NDRE_0.15`;
-      const irrigationCacheKey = `irrigation_${selectedPlotId}`;
-
-      let cachedIndices = getCache(indicesCacheKey);
-      let cachedStress = getCache(stressCacheKey);
-      let cachedIrrigation = getCache(irrigationCacheKey);
-
-      // Only fetch what's not cached, with shorter timeouts
-      const fetchPromises = [];
-
-      if (!cachedIndices) {
-        fetchPromises.push(
-          makeRequestWithRetry(
-            `${BASE_URL}/plots/${selectedPlotId}/indices`,
-            1,
-            10000, // Shorter timeout for indices
-          )
-            .then((data) => {
-              const processed = data.map((item: any) => ({
-                date: new Date(item.date).toISOString().split("T")[0],
-                growth: item.NDVI,
-                stress: item.NDMI,
-                water: item.NDWI,
-                moisture: item.NDRE,
-              }));
-              setCache(indicesCacheKey, processed);
-              return { type: "indices", data: processed };
-            })
-            .catch(() => ({ type: "indices", data: null })),
-        );
-      } else {
-        fetchPromises.push(
-          Promise.resolve({ type: "indices", data: cachedIndices }),
-        );
-      }
-
-      if (!cachedStress) {
-        fetchPromises.push(
-          makeRequestWithRetry(
-            `${BASE_URL}/plots/${selectedPlotId}/stress?index_type=NDRE&threshold=0.15`,
-            1,
-            10000,
-          )
-            .then((data) => {
-              setCache(stressCacheKey, data);
-              return { type: "stress", data };
-            })
-            .catch(() => ({
-              type: "stress",
-              data: { events: [], total_events: 0 },
-            })),
-        );
-      } else {
-        fetchPromises.push(
-          Promise.resolve({ type: "stress", data: cachedStress }),
-        );
-      }
-
-      if (!cachedIrrigation) {
-        fetchPromises.push(
-          makeRequestWithRetry(
-            `${BASE_URL}/plots/${selectedPlotId}/irrigation?threshold_ndmi=0.05&threshold_ndwi=0.05&min_days_between_events=10`,
-            1,
-            10000,
-          )
-            .then((data) => {
-              setCache(irrigationCacheKey, data);
-              return { type: "irrigation", data };
-            })
-            .catch(() => ({
-              type: "irrigation",
-              data: { total_events: null },
-            })),
-        );
-      } else {
-        fetchPromises.push(
-          Promise.resolve({ type: "irrigation", data: cachedIrrigation }),
-        );
-      }
-
-      // Execute all fetches in parallel
-      const results = await Promise.allSettled(fetchPromises);
-
       let rawIndices: LineChartData[] = [];
       let stressData: any = { events: [], total_events: 0 };
       let irrigationData: any = { total_events: null };
 
-      results.forEach((result) => {
+      chartSettled.forEach((result) => {
         if (result.status === "fulfilled" && result.value) {
           const { type, data } = result.value;
           if (type === "indices") rawIndices = data || [];
@@ -713,11 +786,11 @@ const ManagerFarmDash: React.FC = () => {
         }
       });
 
-      // Update state with fetched data
+      if (signal.aborted) return;
+
       setLineChartData(rawIndices);
       setStressEvents(stressData?.events ?? []);
 
-      // Update metrics with complete data
       setMetrics((prev) => ({
         ...prev,
         stressCount: stressData?.total_events ?? 0,
@@ -725,10 +798,18 @@ const ManagerFarmDash: React.FC = () => {
         cnRatio: null,
       }));
     } catch (err: any) {
-      // You could add a toast notification here to inform the user
-      // For now, we'll just log the error and continue with partial data
+      if (
+        err?.code === "ERR_CANCELED" ||
+        err?.name === "CanceledError" ||
+        err?.name === "AbortError"
+      ) {
+        return;
+      }
     } finally {
-      setLoadingData(false);
+      if (!signal.aborted) {
+        setHasLoadedOnce(true);
+        setLoadingData(false);
+      }
     }
   };
 
@@ -790,7 +871,7 @@ const ManagerFarmDash: React.FC = () => {
 
     try {
       const today = new Date().toISOString().slice(0, 10);
-      const response = await axios.post(
+      const response = await eventsApi.post(
         `${BASE_URL}/analyze?plot_name=${plotId}&date=${today}`,
       );
 
@@ -1149,6 +1230,70 @@ const ManagerFarmDash: React.FC = () => {
     );
   };
 
+  const isInitialLoad = loadingData && !hasLoadedOnce && !!selectedPlotId;
+
+  const SkeletonBlock: React.FC<{ className?: string }> = ({ className }) => (
+    <div
+      className={`animate-pulse rounded-xl bg-gray-200/80 ${className || ""}`}
+      aria-hidden
+    />
+  );
+
+  if (isInitialLoad) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-4">
+          <div className="flex items-center justify-end gap-2 text-sm text-gray-600">
+            Loading dashboard…
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div
+                key={i}
+                className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-gray-200"
+              >
+                <div className="flex items-center justify-between mb-3">
+                  <SkeletonBlock className="h-6 w-6 rounded-lg" />
+                  <SkeletonBlock className="h-7 w-20" />
+                </div>
+                <SkeletonBlock className="h-3 w-24" />
+              </div>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div
+                key={i}
+                className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-gray-200"
+              >
+                <div className="flex items-center justify-between mb-3">
+                  <SkeletonBlock className="h-6 w-6 rounded-lg" />
+                  <SkeletonBlock className="h-7 w-16" />
+                </div>
+                <SkeletonBlock className="h-3 w-28" />
+              </div>
+            ))}
+          </div>
+
+          <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2 bg-white rounded-xl shadow-lg overflow-hidden">
+              <div className="relative w-full h-[400px] sm:h-[400px] md:h-[450px] lg:h-[500px] min-h-[300px]">
+                <SkeletonBlock className="absolute inset-0 rounded-none" />
+              </div>
+            </div>
+            <div className="bg-white rounded-xl shadow-lg p-4">
+              <SkeletonBlock className="h-5 w-40 mb-3" />
+              <SkeletonBlock className="h-24 w-full mb-3" />
+              <SkeletonBlock className="h-24 w-full" />
+            </div>
+          </section>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50">
       {/* Enhanced Header */}
@@ -1327,6 +1472,11 @@ const ManagerFarmDash: React.FC = () => {
       </div>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-4">
+        {loadingData && hasLoadedOnce && (
+          <div className="flex items-center justify-end gap-2 text-sm text-gray-600">
+            Refreshing…
+          </div>
+        )}
         {/* Top Priority Metrics - 4 Key Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-green-200 hover:shadow-xl transition-all duration-300">
@@ -1334,11 +1484,7 @@ const ManagerFarmDash: React.FC = () => {
               <MapPin className="w-6 h-6 text-green-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    metrics.area?.toFixed(2) || "-"
-                  )}
+                  {metrics.area?.toFixed(2) || "-"}
                 </div>
                 <div className="text-sm font-semibold text-green-600">acre</div>
               </div>
@@ -1351,11 +1497,7 @@ const ManagerFarmDash: React.FC = () => {
               <Leaf className="w-6 h-6 text-emerald-600" />
               <div className="text-right">
                 <div className="text-lg font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    metrics.growthStage || "-"
-                  )}
+                  {metrics.growthStage || "-"}
                 </div>
               </div>
             </div>
@@ -1369,9 +1511,7 @@ const ManagerFarmDash: React.FC = () => {
               <Calendar className="w-6 h-6 text-orange-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin text-orange-600" />
-                  ) : metrics.growthStage?.toLowerCase().includes("harvested") ? (
+                  {metrics.growthStage?.toLowerCase().includes("harvested") ? (
                     0
                   ) : metrics.daysToHarvest !== null ? (
                     metrics.daysToHarvest
@@ -1392,9 +1532,7 @@ const ManagerFarmDash: React.FC = () => {
               <Beaker className="w-6 h-6 text-blue-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800 flex items-center gap-1 justify-end">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin text-blue-600" />
-                  ) : metrics.brix !== null ? (
+                  {metrics.brix !== null ? (
                     metrics.brix.toFixed(2)
                   ) : (
                     "-"
@@ -1411,11 +1549,7 @@ const ManagerFarmDash: React.FC = () => {
               <div className="flex gap-4">
                 <div className="text-center">
                   <div className="font-semibold text-red-600 text-sm">
-                    {loadingData
-                      ? "—"
-                      : metrics.brixMax !== null
-                        ? metrics.brixMax.toFixed(2)
-                        : "-"}
+                    {metrics.brixMax !== null ? metrics.brixMax.toFixed(2) : "-"}
                   </div>
                   <div className="text-[10px] text-gray-500 uppercase tracking-wide">
                     Max
@@ -1423,11 +1557,7 @@ const ManagerFarmDash: React.FC = () => {
                 </div>
                 <div className="text-center">
                   <div className="font-semibold text-green-600 text-sm">
-                    {loadingData
-                      ? "—"
-                      : metrics.brixMin !== null
-                        ? metrics.brixMin.toFixed(2)
-                        : "-"}
+                    {metrics.brixMin !== null ? metrics.brixMin.toFixed(2) : "-"}
                   </div>
                   <div className="text-[10px] text-gray-500 uppercase tracking-wide">
                     Min
@@ -1445,11 +1575,7 @@ const ManagerFarmDash: React.FC = () => {
               <Target className="w-6 h-6 text-purple-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    metrics.recovery?.toFixed(1) || "-"
-                  )}
+                  {metrics.recovery?.toFixed(1) || "-"}
                 </div>
                 <div className="text-sm font-semibold text-purple-600">%</div>
               </div>
@@ -1462,11 +1588,7 @@ const ManagerFarmDash: React.FC = () => {
               <BarChart3 className="w-6 h-6 text-indigo-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    metrics.expectedYield?.toFixed(0) || "-"
-                  )}
+                  {metrics.expectedYield?.toFixed(0) || "-"}
                 </div>
                 <div className="text-sm font-semibold text-indigo-600">
                   T/acre
@@ -1481,11 +1603,7 @@ const ManagerFarmDash: React.FC = () => {
               <Thermometer className="w-6 h-6 text-teal-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    metrics.organicCarbonDensity?.toFixed(1) || "-"
-                  )}
+                  {metrics.organicCarbonDensity?.toFixed(1) || "-"}
                 </div>
                 <div className="text-sm font-semibold text-teal-600">g/kg</div>
               </div>
@@ -1498,11 +1616,7 @@ const ManagerFarmDash: React.FC = () => {
               <Droplets className="w-6 h-6 text-cyan-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    (metrics.irrigationEvents ?? 0)
-                  )}
+                  {metrics.irrigationEvents ?? 0}
                 </div>
                 <div className="text-sm font-semibold text-cyan-600">
                   Events
@@ -1519,11 +1633,7 @@ const ManagerFarmDash: React.FC = () => {
               <AlertTriangle className="w-6 h-6 text-yellow-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    (metrics.stressCount ?? 0)
-                  )}
+                  {metrics.stressCount ?? 0}
                 </div>
                 <div className="text-sm font-semibold text-yellow-600">
                   Events
@@ -1538,11 +1648,7 @@ const ManagerFarmDash: React.FC = () => {
               <Activity className="w-6 h-6 text-pink-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    metrics.biomass?.toFixed(1) || "-"
-                  )}
+                  {metrics.biomass?.toFixed(1) || "-"}
                 </div>
                 <div className="text-sm font-semibold text-pink-600">kg/acre</div>
               </div>

@@ -20,6 +20,8 @@ interface SoilAnalysisProps {
   phStatistics?: {
     phh2o_0_5cm_mean_mean: number;
   };
+  /** Render a denser layout (about half height) for dashboard panels. */
+  compact?: boolean;
 }
 
 interface ApiSoilData {
@@ -76,6 +78,7 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
   plotName,
   phValue,
   phStatistics,
+  compact = false,
 }) => {
   const { appState, setAppState, setCached, selectedPlotName } = useAppContext();
   const { profile, loading: profileLoading } = useFarmerProfile();
@@ -743,164 +746,203 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
     }
   };
 
+  const hasLoadedReport =
+    Boolean(currentPlotName) && !loading && !error && !profileLoading;
+
   return (
-    <div className="w-full max-w-full sm:max-w-sm md:max-w-md p-0 sm:p-2 md:p-4 mt-12">
-      <div className="mb-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            {/* <Info className="w-4 h-4 text-blue-500" /> */}
-            <span className="text-gray-600 font-semibold">
+    <div className="w-full max-w-full min-w-0">
+      <div className="rounded-2xl border border-gray-200/80 bg-white shadow-sm overflow-hidden">
+        {/* Header — full width, aligned like reference */}
+        <div className={`flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 bg-white ${compact ? "px-3 py-2" : "px-4 py-3 sm:px-5 sm:py-4"}`}>
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3 min-w-0">
+            <h2 className={`${compact ? "text-2xl" : "text-base sm:text-2xl"} font-bold text-gray-900 tracking-tight`}>
               Soil Analysis Report
-            </span>
+            </h2>
             {plotDisplayName && (
-              <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">
+              <span className="shrink-0 text-xs font-semibold bg-blue-100 text-blue-800 px-2.5 py-1 rounded-md border border-blue-200/60">
                 Plot: {plotDisplayName}
               </span>
             )}
           </div>
-          <button className="flex items-center gap-1 px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 text-xs">
-            <Download className="w-3 h-3" />
+          <button
+            type="button"
+            title="Download report"
+            className={`shrink-0 inline-flex items-center justify-center rounded-lg bg-blue-600 text-white shadow-sm transition hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${compact ? "p-1.5" : "p-2"}`}
+          >
+            <Download className="w-4 h-4" aria-hidden />
           </button>
         </div>
-      </div>
 
-      {loading && (
-        <div className="text-center py-4 text-gray-500 flex items-center justify-center">
-          Loading soil data...
-        </div>
-      )}
+        <div className={`${compact ? "px-3 py-3" : "px-4 py-4 sm:px-5 sm:py-5"}`}>
+          {loading && (
+            <div className="flex items-center justify-center gap-2 py-10 text-sm text-gray-600">
+              <RefreshCw className="h-5 w-5 animate-spin text-blue-600" />
+              Loading soil data...
+            </div>
+          )}
 
-      {error && <div className="text-center py-4 text-red-500">{error}</div>}
+          {error && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-center text-sm text-red-700">
+              {error}
+            </div>
+          )}
 
-      {profileLoading && (
-        <div className="text-center py-8 text-gray-500">
-          <RefreshCw className="h-5 w-5 animate-spin text-blue-600 mx-auto mb-2" />
-          <p>Loading farmer profile...</p>
-        </div>
-      )}
+          {profileLoading && (
+            <div className="flex flex-col items-center justify-center py-12 text-gray-600">
+              <RefreshCw className="h-8 w-8 animate-spin text-blue-600 mb-2" />
+              <p className="text-sm">Loading farmer profile...</p>
+            </div>
+          )}
 
-      {!profileLoading && !currentPlotName && !loading && !error && (
-        <div className="text-center py-8 text-gray-500">
-          <Info className="w-8 h-8 mx-auto mb-2 text-gray-400" />
-          <p>No plot data available for soil analysis</p>
-        </div>
-      )}
+          {!profileLoading && !currentPlotName && !loading && !error && (
+            <div className="flex flex-col items-center justify-center py-12 text-center text-gray-500">
+              <Info className="w-10 h-10 mb-2 text-gray-400" />
+              <p className="text-sm font-medium">No plot selected</p>
+              <p className="mt-1 max-w-md text-xs text-gray-400">
+                Select a plot on the map to view soil analysis.
+              </p>
+            </div>
+          )}
 
-      {currentPlotName && loading && (
-        <div className="text-center py-8 text-gray-500">
-          <Satellite className="w-8 h-8 mx-auto mb-2 text-gray-400 animate-spin" />
-          <p>Loading soil analysis data for your plot...</p>
-          <p className="text-xs mt-2 text-gray-400">
-            This may take up to 30 seconds. Please wait...
-          </p>
-        </div>
-      )}
+          {currentPlotName && loading && (
+            <div className="flex flex-col items-center justify-center py-12 text-gray-600">
+              <Satellite className="w-10 h-10 mb-3 text-blue-500 animate-spin" />
+              <p className="text-sm font-medium">Loading soil analysis…</p>
+              <p className="mt-2 max-w-sm text-center text-xs text-gray-400">
+                This may take up to 30 seconds.
+              </p>
+            </div>
+          )}
 
-      {currentPlotName && !loading && !error && (
-        <>
-          <div className="flex gap-2">
-            {/* <div className="flex flex-col justify-between text-xs text-gray-600 h-40 py-1">
-              <span>Very High</span>
-              <span>Optimal</span>
-              <span>Medium</span>
-              <span>Low</span>
-              <span>Very Low</span>
-            </div> */}
-            <div className="flex-1 overflow-x-auto">
-              <div className="flex items-end justify-between gap-2 h-40">
-                {metrics.map((metric, idx) => (
+          {hasLoadedReport && (
+            <div className={`${compact ? "space-y-3" : "space-y-6 sm:space-y-8"}`}>
+              {/* Summary: 9 equal columns — vertical bars + symbol labels */}
+              <div className="w-full overflow-x-auto pb-1 [-webkit-overflow-scrolling:touch]">
+                <div className={`mx-auto ${compact ? "min-w-[520px]" : "min-w-[600px]"} sm:min-w-0 max-w-[90rem]`}>
+                  <div className={`grid grid-cols-9 ${compact ? "gap-1.5" : "gap-1.5 sm:gap-3"}`}>
+                    {metrics.map((metric, idx) => {
+                      const pct = Math.max(8, Math.min(100, metric.percentage));
+                      return (
+                      <div
+                        key={idx}
+                        className={`flex min-h-0 flex-col items-stretch rounded-lg border bg-gray-50/80 ${getLevelBorderColor(
+                          metric.level
+                        )} overflow-hidden`}
+                      >
+                        <div className={`relative mx-auto w-full ${compact ? "max-w-[28px] pt-1" : "max-w-[24px] px-0.5 pt-2 sm:max-w-[50px] sm:px-1"}`}>
+                          <div
+                            className={`relative ${compact ? "h-[64px]" : "h-[100px] sm:h-[120px]"} w-full overflow-hidden rounded-t bg-gray-200/90`}
+                            aria-hidden
+                          >
+                            <div
+                              className={`absolute bottom-0 left-0 right-0 rounded-t ${getLevelColor(
+                                metric.level
+                              )} transition-all duration-300`}
+                              style={{ height: `${pct}%` }}
+                            />
+                          </div>
+                        </div>
+                        <div className={`border-t border-gray-100 bg-white px-0.5 text-center ${compact ? "py-1" : "py-1.5"}`}>
+                          <span className={`${compact ? "text-[9px]" : "text-[10px] sm:text-xs"} font-bold text-gray-800`}>
+                            {metric.symbol}
+                          </span>
+                        </div>
+                      </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              {/* Legend — matches reference (high → low) */}
+              <div className={`flex flex-wrap items-center justify-center ${compact ? "gap-x-3 gap-y-1" : "gap-x-4 gap-y-2 sm:gap-x-6"}`}>
+                <div className="flex items-center gap-1.5">
+                  <span className="h-3 w-3 shrink-0 rounded-sm bg-green-700" />
+                  <span className={`${compact ? "text-[10px]" : "text-xs"} text-gray-600`}>Very High</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="h-3 w-3 shrink-0 rounded-sm bg-green-500" />
+                  <span className={`${compact ? "text-[10px]" : "text-xs"} text-gray-600`}>Optimal</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="h-3 w-3 shrink-0 rounded-sm bg-yellow-400" />
+                  <span className={`${compact ? "text-[10px]" : "text-xs"} text-gray-600`}>Medium</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="h-3 w-3 shrink-0 rounded-sm bg-orange-400" />
+                  <span className={`${compact ? "text-[10px]" : "text-xs"} text-gray-600`}>Low</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="h-3 w-3 shrink-0 rounded-sm bg-red-500" />
+                  <span className={`${compact ? "text-[10px]" : "text-xs"} text-gray-600`}>Very Low</span>
+                </div>
+              </div>
+
+              {/* Detail cards — 3×3 grid, centered content */}
+              <div className={`grid grid-cols-1 ${compact ? "gap-2" : "gap-3 sm:gap-4"} sm:grid-cols-2 lg:grid-cols-3`}>
+                {metrics.map((metric, index) => (
                   <div
-                    key={idx}
-                    className={`flex flex-col items-center justify-end h-full w-20 border ${getLevelBorderColor(
+                    key={index}
+                    className={`flex flex-col rounded-xl border bg-white text-center shadow-sm ${getLevelBorderColor(
                       metric.level
-                    )} rounded`}
+                    )} overflow-hidden ${compact ? "" : "transition-shadow hover:shadow-md"}`}
                   >
+                    <div className="h-1.5 w-full shrink-0 bg-gray-200">
+                      <div
+                        className={`h-full ${getLevelColor(metric.level)}`}
+                        style={{
+                          width: `${Math.max(4, Math.min(100, metric.percentage))}%`,
+                        }}
+                      />
+                    </div>
                     <div
-                      className={`w-full ${getLevelColor(
-                        metric.level
-                      )} rounded-t`}
-                      style={{
-                        height: `${metric.percentage}%`,
-                      }}
-                    ></div>
-                    <div className="text-center text-xs mt-1">
-                      <strong>{metric.symbol}</strong>
+                      className={`flex flex-1 flex-col items-center justify-between ${
+                        compact ? "gap-1 px-2 py-1.5" : "gap-2 px-3 py-3 sm:px-4 sm:py-4"
+                      }`}
+                    >
+                      <div>
+                        <h3 className={`${compact ? "text-[16px]" : "text-sm"} font-semibold text-gray-900`}>
+                          {metric.name}
+                        </h3>
+                        <p className={`${compact ? "text-[14px]" : "text-xs"} text-gray-500`}>({metric.symbol})</p>
+                      </div>
+                      <div className="w-full">
+                        {metric.value === null ? (
+                          <p className={`${compact ? "text-[20px]" : "text-xl"} font-bold text-gray-400`}>N/A</p>
+                        ) : (
+                          <>
+                            <p
+                              className={`${
+                                compact ? "text-[18px]" : "text-xl sm:text-2xl"
+                              } font-bold tabular-nums text-gray-900 leading-tight`}
+                            >
+                              {typeof metric.value === "number"
+                                ? metric.value.toFixed(2)
+                                : metric.value}
+                            </p>
+                            {metric.unit ? (
+                              <p className={`${compact ? "mt-0 text-[14px]" : "mt-0.5 text-xs"} font-medium text-gray-500`}>
+                                {metric.unit.trim()}
+                              </p>
+                            ) : null}
+                          </>
+                        )}
+                      </div>
+                      <p
+                        className={`w-full rounded-md bg-gray-100 px-2 ${
+                          compact ? "py-0.5 text-[13px]" : "py-1.5 text-[11px]"
+                        } font-medium text-gray-600 leading-tight`}
+                      >
+                        Range: {metric.optimalRange}
+                      </p>
                     </div>
                   </div>
                 ))}
               </div>
             </div>
-          </div>
-
-          <div className="flex items-center justify-center gap-1 mt-6 flex-wrap">
-            <div className="flex items-center">
-              <div className="w-4 h-4 bg-red-500 rounded-sm mr-1"></div>
-              <span className="text-xs text-gray-600 mr-4">Very Low</span>
-            </div>
-            <div className="flex items-center">
-              <div className="w-4 h-4 bg-orange-400 rounded-sm mr-1"></div>
-              <span className="text-xs text-gray-600 mr-4">Low</span>
-            </div>
-            <div className="flex items-center">
-              <div className="w-4 h-4 bg-yellow-400 rounded-sm mr-1"></div>
-              <span className="text-xs text-gray-600 mr-4">Medium</span>
-            </div>
-            <div className="flex items-center">
-              <div className="w-4 h-4 bg-green-500 rounded-sm mr-1"></div>
-              <span className="text-xs text-gray-600 mr-4">Optimal</span>
-            </div>
-            <div className="flex items-center">
-              <div className="w-4 h-4 bg-green-700 rounded-sm mr-1"></div>
-              <span className="text-xs text-gray-600">Very High</span>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-3 gap-4 mt-6">
-            {metrics.map((metric, index) => (
-              <div
-                key={index}
-                className={`border ${getLevelBorderColor(
-                  metric.level
-                )} rounded p-2 sm:p-3 text-center shadow-sm`}
-              >
-                <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden mb-2">
-                  <div
-                    className={`${getLevelColor(metric.level)} h-full`}
-                    style={{
-                      width: `${metric.percentage}%`,
-                    }}
-                  ></div>
-                </div>
-                <h3 className="text-sm font-semibold text-gray-800">
-                  {metric.name}
-                </h3>
-                <p className="text-xs text-gray-500">({metric.symbol})</p>
-                <div className="mt-1">
-                  {metric.value === null ? (
-                    <p className="text-lg font-bold text-gray-900">N/A</p>
-                  ) : (
-                    <div className="flex flex-col items-center leading-tight">
-                      <span className="text-lg font-bold text-gray-900">
-                        {typeof metric.value === "number"
-                          ? metric.value.toFixed(2)
-                          : metric.value}
-                      </span>
-                      {metric.unit && (
-                        <span className="text-xs font-medium text-gray-500">
-                          {metric.unit}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </div>
-                <p className="text-[10px] text-gray-500 bg-gray-100 rounded mt-1 px-2 py-1">
-                  Range: {metric.optimalRange}
-                </p>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
+          )}
+        </div>
+      </div>
     </div>
   );
 };

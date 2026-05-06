@@ -32,6 +32,7 @@ import {
 } from "lucide-react";
 import Chatbot from "./Chatbot";
 import axios from "axios";
+import { eventsApi } from "../api";
 import { getCache, setCache } from "../utils/cache";
 import { useFarmerProfile } from "../hooks/useFarmerProfile";
 import { useAppContext } from "../context/AppContext";
@@ -441,7 +442,7 @@ const FarmerDashboard: React.FC = () => {
       let rawIndices = getCache(indicesCacheKey);
 
       if (!rawIndices) {
-        const indicesRes = await axios.get(
+        const indicesRes = await eventsApi.get(
           `${BASE_URL}/plots/${currentPlotId}/indices`
         );
         rawIndices = indicesRes.data.map((item: any) => ({
@@ -460,7 +461,7 @@ const FarmerDashboard: React.FC = () => {
       let stressData = getCache(stressCacheKey);
 
       if (!stressData) {
-        const stressRes = await axios.get(
+        const stressRes = await eventsApi.get(
           `${BASE_URL}/plots/${currentPlotId}/stress?index_type=NDRE&threshold=0.15`
         );
         stressData = stressRes.data;
@@ -473,7 +474,7 @@ const FarmerDashboard: React.FC = () => {
       let irrigationData = getCache(irrigationCacheKey);
 
       if (!irrigationData) {
-        const irrigationRes = await axios.get(
+        const irrigationRes = await eventsApi.get(
           `${BASE_URL}/plots/${currentPlotId}/irrigation?threshold_ndmi=0.05&threshold_ndwi=0.05&min_days_between_events=10`
         );
         irrigationData = irrigationRes.data;
@@ -500,7 +501,7 @@ const FarmerDashboard: React.FC = () => {
 
       if (!harvestData) {
         try {
-          const harvestRes = await axios.post(
+          const harvestRes = await eventsApi.post(
             `${BASE_URL}/sugarcane-harvest?plot_name=${currentPlotId}&end_date=${endDate}`
           );
           harvestData = harvestRes.data;
@@ -537,7 +538,7 @@ const FarmerDashboard: React.FC = () => {
 
       if (!currentPlotData) {
         try {
-          const singlePlotRes = await axios.get(
+          const singlePlotRes = await eventsApi.get(
             `https://events-cropeye.up.railway.app/plots/analyzeSinglePlot?plot_id=${currentPlotId}`,
           );
           currentPlotData = singlePlotRes.data;
@@ -556,7 +557,7 @@ const FarmerDashboard: React.FC = () => {
 
           if (!allPlotsData) {
             try {
-              const agroStatsRes = await axios.get(agroStatsUrl);
+              const agroStatsRes = await eventsApi.get(agroStatsUrl);
               allPlotsData = agroStatsRes.data;
               setCache(agroStatsCacheKey, allPlotsData);
             } catch (err) {
@@ -1544,8 +1545,8 @@ const FarmerDashboard: React.FC = () => {
                 </div>
               </div>
               <p className="text-xs text-gray-600">
-                {t("farmerDashboard.cards.stressEvents", {
-                  defaultValue: "Stress Events",
+                {t("farmerDashboard.card.stressEvents", {
+                  defaultValue: "pest Stress Events",
                 })}
               </p>
             </div>
@@ -1564,8 +1565,8 @@ const FarmerDashboard: React.FC = () => {
               </div>
             </div>
             <p className="text-xs text-gray-600">
-              {t("farmerDashboard.cards.irrigationEvents", {
-                defaultValue: "Irrigation Events",
+              {t("farmerDashboard.card.irrigationEvents", {
+                defaultValue: "Irrigation stress Events",
               })}
             </p>
           </div>

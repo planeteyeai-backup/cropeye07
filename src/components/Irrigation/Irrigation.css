@@ -103,6 +103,22 @@
   min-height: 180px;
 }
 
+/* Compact variant for sidebar stacks (FarmerHomeGrid right panel) */
+.irrigation-card.irrigation-card--compact {
+  padding: 0.75rem;
+  gap: 0.5rem;
+}
+
+.irrigation-card.irrigation-card--compact .card-content {
+  padding: 0.75rem;
+  min-height: 120px;
+}
+
+.irrigation-card.irrigation-card--compact .moisture-container {
+  width: 96px;
+  height: 130px;
+}
+
 /* Water Uptake Ring */
 .progress-ring {
   position: relative;
@@ -587,5 +603,5 @@
 .irrigation-schedule-table,
 .irrigation-schedule-table th,
 .irrigation-schedule-table td {
-  line-height: 4.25;
+  line-height: 1.4;
 }

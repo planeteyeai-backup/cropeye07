@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 import { Satellite, Leaf, Mail, Lock, Eye, EyeOff } from 'lucide-react';
 import { setAuthData, setRefreshToken } from '../utils/auth';
-import { login } from '../api';
+import { getFarmerMyProfile, login, loginFarmerPlot, loginFastApi, setAuthToken as setApiAuthToken, setFastApiAuthToken } from '../api';
 
 export type UserRole = "manager" | "admin" | "fieldofficer" | "farmer" | "owner";
 
@@ -210,65 +210,82 @@ const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
     setError('');
 
     try {
-      // Using the API function to login with email as username
-      const response = await login(phone_number.trim(), password.trim());
+      const identifier = phone_number.trim();
+      const pass = password.trim();
+
+      // Keep existing login exactly as-is (phone_number + password on Django).
+      const response = await login(identifier, pass);
       const result = response.data;
-      
+
       const token = result.access || result.token;
-      const refreshToken = result.refresh; // Get refresh token from response
-      
+      const refreshToken = result.refresh;
+
       if (!token) {
         throw new Error('No authentication token received');
       }
 
-      // User data is already included in the login response
       const userData = result.user;
-      
-      // Handle role determination from the response format
+
       let userRole: UserRole;
-      
+
       if (userData.role && typeof userData.role === 'object' && userData.role.name) {
         userRole = userData.role.name.toLowerCase() as UserRole;
       } else if (userData.role && typeof userData.role === 'object' && userData.role.id) {
         const roleMap: { [key: number]: UserRole } = {
           1: 'farmer',
-          2: 'fieldofficer', 
+          2: 'fieldofficer',
           3: 'manager',
           4: 'owner'
         };
         userRole = roleMap[userData.role.id] || 'farmer';
       } else {
         userRole = 'farmer';
-        console.warn('Could not determine user role, defaulting to farmer');
       }
 
-      // Validate role
       if (!userRole || !['manager', 'admin', 'fieldofficer', 'farmer', 'owner'].includes(userRole)) {
         throw new Error('Invalid user role');
       }
 
-      // Store authentication data
       const userDataToStore = {
         first_name: userData.first_name || '',
         last_name: userData.last_name || '',
-        phone_number: userData.phone_number || phone_number,
-        username: userData.username ||phone_number,
+        phone_number: userData.phone_number || identifier,
+        username: userData.username || identifier,
         id: userData.id || ''
       };
-      
-      // Store refresh token if available
+
       if (refreshToken) {
         setRefreshToken(refreshToken);
-        console.log("✅ Refresh token stored successfully");
-      } else {
-        console.warn("⚠️ No refresh token received from login response");
       }
-      
+
       setAuthData(token, userRole, userDataToStore, refreshToken);
-      
-      console.log("✅ Login successful - Access token and refresh token stored");
-      
-      // Success - call the callback with role and token
+      setApiAuthToken(token);
+
+      // After login: obtain FastAPI access_token (required for 192.168.42.55 services).
+      // - Farmer: use plot's fastapi_plot_id as username/password
+      // - Other roles: use admin/admin1234
+      try {
+        if (userRole === "farmer") {
+          const profRes = await getFarmerMyProfile();
+          const plots = (profRes as any)?.data?.plots;
+          const fastapiPlotId =
+            Array.isArray(plots) && plots.length > 0
+              ? (plots[0]?.fastapi_plot_id || plots[0]?.farm_uid || plots[0]?.plot_id || "")
+              : "";
+
+          const plotLoginId = String(fastapiPlotId || identifier).trim();
+          const fastapiRes = await loginFarmerPlot(plotLoginId);
+          const fastToken = (fastapiRes.data as any)?.access_token;
+          if (fastToken) setFastApiAuthToken(fastToken);
+        } else {
+          const fastapiRes = await loginFastApi("admin", "admin123");
+          const fastToken = (fastapiRes.data as any)?.access_token;
+          if (fastToken) setFastApiAuthToken(fastToken);
+        }
+      } catch {
+        // If FastAPI token fetch fails, continue with the existing token
+      }
+
       onLoginSuccess(userRole, token);
 
     } catch (err: any) {

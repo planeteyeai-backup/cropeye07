@@ -24,7 +24,6 @@ import {
   useMap,
 } from "react-leaflet";
 import {
-  Loader2,
   AlertTriangle,
   Calendar,
   TrendingUp,
@@ -159,6 +158,7 @@ const OfficerDashboard: React.FC = () => {
   const [loadingFarmers, setLoadingFarmers] = useState<boolean>(false);
   const [loadingData, setLoadingData] = useState<boolean>(false);
   const [showDebugInfo] = useState(false);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
   const lineStyles: LineStyles = {
     growth: { color: "#22c55e", label: "Growth Index", icon: TrendingUp },
@@ -645,6 +645,7 @@ const OfficerDashboard: React.FC = () => {
       // You could add a toast notification here to inform the user
       // For now, we'll just log the error and continue with partial data
     } finally {
+      setHasLoadedOnce(true);
       setLoadingData(false);
     }
   };
@@ -1266,6 +1267,11 @@ const OfficerDashboard: React.FC = () => {
       </div>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-4">
+        {loadingData && hasLoadedOnce && (
+          <div className="flex items-center justify-end text-sm text-gray-600">
+            Refreshing…
+          </div>
+        )}
         {/* Top Priority Metrics - 4 Key Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-green-200 hover:shadow-xl transition-all duration-300">
@@ -1273,11 +1279,7 @@ const OfficerDashboard: React.FC = () => {
               <MapPin className="w-6 h-6 text-green-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    metrics.area?.toFixed(2) || "-"
-                  )}
+                  {metrics.area?.toFixed(2) || "-"}
                 </div>
                 <div className="text-sm font-semibold text-green-600">acre</div>
               </div>
@@ -1290,11 +1292,7 @@ const OfficerDashboard: React.FC = () => {
               <Leaf className="w-6 h-6 text-emerald-600" />
               <div className="text-right">
                 <div className="text-lg font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    metrics.growthStage || "-"
-                  )}
+                  {metrics.growthStage || "-"}
                 </div>
               </div>
             </div>
@@ -1308,9 +1306,7 @@ const OfficerDashboard: React.FC = () => {
               <Calendar className="w-6 h-6 text-orange-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin text-orange-600" />
-                  ) : metrics.growthStage?.toLowerCase().includes("harvested") ? (
+                  {metrics.growthStage?.toLowerCase().includes("harvested") ? (
                     0
                   ) : metrics.daysToHarvest !== null ? (
                     metrics.daysToHarvest
@@ -1331,9 +1327,7 @@ const OfficerDashboard: React.FC = () => {
               <Beaker className="w-6 h-6 text-blue-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800 flex items-center gap-1 justify-end">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin text-blue-600" />
-                  ) : metrics.brix !== null ? (
+                  {metrics.brix !== null ? (
                     metrics.brix.toFixed(2)
                   ) : (
                     "-"
@@ -1350,11 +1344,7 @@ const OfficerDashboard: React.FC = () => {
               <div className="flex gap-4">
                 <div className="text-center">
                   <div className="font-semibold text-red-600 text-sm">
-                    {loadingData
-                      ? "—"
-                      : metrics.brixMax !== null
-                        ? metrics.brixMax.toFixed(2)
-                        : "-"}
+                    {metrics.brixMax !== null ? metrics.brixMax.toFixed(2) : "-"}
                   </div>
                   <div className="text-[10px] text-gray-500 uppercase tracking-wide">
                     Max
@@ -1362,11 +1352,7 @@ const OfficerDashboard: React.FC = () => {
                 </div>
                 <div className="text-center">
                   <div className="font-semibold text-green-600 text-sm">
-                    {loadingData
-                      ? "—"
-                      : metrics.brixMin !== null
-                        ? metrics.brixMin.toFixed(2)
-                        : "-"}
+                    {metrics.brixMin !== null ? metrics.brixMin.toFixed(2) : "-"}
                   </div>
                   <div className="text-[10px] text-gray-500 uppercase tracking-wide">
                     Min
@@ -1384,11 +1370,7 @@ const OfficerDashboard: React.FC = () => {
               <Target className="w-6 h-6 text-purple-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    metrics.recovery?.toFixed(1) || "-"
-                  )}
+                  {metrics.recovery?.toFixed(1) || "-"}
                 </div>
                 <div className="text-sm font-semibold text-purple-600">%</div>
               </div>
@@ -1401,11 +1383,7 @@ const OfficerDashboard: React.FC = () => {
               <BarChart3 className="w-6 h-6 text-indigo-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    metrics.sugarYieldMean?.toFixed(0) || "-"
-                  )}
+                  {metrics.sugarYieldMean?.toFixed(0) || "-"}
                 </div>
                 <div className="text-sm font-semibold text-indigo-600">
                   T/acre
@@ -1420,11 +1398,7 @@ const OfficerDashboard: React.FC = () => {
               <Thermometer className="w-6 h-6 text-teal-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    metrics.organicCarbonDensity?.toFixed(1) || "-"
-                  )}
+                  {metrics.organicCarbonDensity?.toFixed(1) || "-"}
                 </div>
                 <div className="text-sm font-semibold text-teal-600">g/kg</div>
               </div>
@@ -1437,11 +1411,7 @@ const OfficerDashboard: React.FC = () => {
               <Droplets className="w-6 h-6 text-cyan-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    (metrics.irrigationEvents ?? 0)
-                  )}
+                  {metrics.irrigationEvents ?? 0}
                 </div>
                 <div className="text-sm font-semibold text-cyan-600">
                   Events
@@ -1458,11 +1428,7 @@ const OfficerDashboard: React.FC = () => {
               <AlertTriangle className="w-6 h-6 text-yellow-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    (metrics.stressCount ?? 0)
-                  )}
+                  {metrics.stressCount ?? 0}
                 </div>
                 <div className="text-sm font-semibold text-yellow-600">
                   Events
@@ -1477,11 +1443,7 @@ const OfficerDashboard: React.FC = () => {
               <Activity className="w-6 h-6 text-pink-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    metrics.biomass?.toFixed(1) || "-"
-                  )}
+                  {metrics.biomass?.toFixed(1) || "-"}
                 </div>
                 <div className="text-sm font-semibold text-pink-600">kg/acre</div>
               </div>

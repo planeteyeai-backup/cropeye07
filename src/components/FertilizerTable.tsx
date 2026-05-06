@@ -566,7 +566,7 @@ const FertilizerTable: React.FC = () => {
   };
 
   return (
-    <div className="bg-white rounded-lg shadow-md p-6 min-h-[420px] flex flex-col h-full">
+    <div className="bg-white rounded-lg shadow-md p-6 min-h-[250px] flex flex-col h-full">
       <div className="flex justify-between items-center mb-4">
         <h2 className="text-2xl font-bold text-gray-800">
           Fertilizer Schedule
@@ -652,9 +652,9 @@ const FertilizerTable: React.FC = () => {
 
         if (shouldShowMessage) {
           return (
-            <div className="mb-4 p-6 bg-green-50 border border-green-200 rounded-lg text-center">
+            <div className="mb-4 p-6 bg-green-50 border border-green-200 rounded-lg text-center max-h-[100px] flex flex-col items-center justify-center">
               <svg
-                className="w-12 h-12 text-green-600 mx-auto mb-3"
+                className="w-12 h-auto text-green-600 mx-auto mb-3"
                 fill="none"
                 stroke="currentColor"
                 viewBox="0 0 24 24"
