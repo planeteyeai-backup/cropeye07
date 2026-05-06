@@ -3,6 +3,7 @@ import { clearAllAppCache } from "../components/utils/cache";
 // Authentication utility functions
 export const AUTH_TOKEN_KEY = 'token';
 export const REFRESH_TOKEN_KEY = 'refresh_token'; // Add refresh token key
+export const FASTAPI_TOKEN_KEY = 'fastapi_token';
 export const USER_ROLE_KEY = 'role';
 export const USER_DATA_KEY = 'userData';
 export const IS_AUTHENTICATED_KEY = 'isAuthenticated';
@@ -64,9 +65,19 @@ export const getRefreshToken = (): string | null => {
   return localStorage.getItem(REFRESH_TOKEN_KEY);
 };
 
+// Get FastAPI token from localStorage (used for events microservice auth)
+export const getFastApiToken = (): string | null => {
+  return localStorage.getItem(FASTAPI_TOKEN_KEY);
+};
+
 // Set refresh token in localStorage
 export const setRefreshToken = (token: string): void => {
   localStorage.setItem(REFRESH_TOKEN_KEY, token);
+};
+
+// Set FastAPI token in localStorage
+export const setFastApiToken = (token: string): void => {
+  localStorage.setItem(FASTAPI_TOKEN_KEY, token);
 };
 
 // Remove refresh token from localStorage
@@ -74,10 +85,16 @@ export const removeRefreshToken = (): void => {
   localStorage.removeItem(REFRESH_TOKEN_KEY);
 };
 
+// Remove FastAPI token from localStorage
+export const removeFastApiToken = (): void => {
+  localStorage.removeItem(FASTAPI_TOKEN_KEY);
+};
+
 // Clear all authentication data
 export const clearAuthData = (): void => {
   removeAuthToken();
   removeRefreshToken();
+  removeFastApiToken();
   removeUserRole();
   removeUserData();
   localStorage.removeItem(IS_AUTHENTICATED_KEY);

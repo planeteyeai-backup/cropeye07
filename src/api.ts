@@ -7,6 +7,8 @@ import {
   setRefreshToken,
   clearAllLocalStorage,
   getUserRole,
+  getFastApiToken,
+  setFastApiToken,
 } from "./utils/auth";
 import { checkAndRefreshToken, isTokenExpired } from "./utils/tokenManager";
 
@@ -17,6 +19,12 @@ const API_BASE_URL =
 
 // KML/GeoJSON API URL
 const KML_API_URL = "http://192.168.41.51";
+
+// FastAPI auth base URL (farmer plot login)
+const FASTAPI_AUTH_BASE_URL =
+  import.meta.env.VITE_FASTAPI_AUTH_BASE_URL ||
+  import.meta.env.VITE_DEV_EVENTS_API_URL ||
+  "https://events-cropeye.up.railway.app";
 
 // Create axios instance
 const api = axios.create({
@@ -32,6 +40,23 @@ const publicApi = axios.create({
   headers: {
     "Content-Type": "application/json",
   },
+});
+
+// Axios instance for Events/FastAPI endpoints that require /auth/login token
+export const eventsApi = axios.create({
+  baseURL: FASTAPI_AUTH_BASE_URL,
+  headers: {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  },
+});
+
+eventsApi.interceptors.request.use((config) => {
+  const t = getFastApiToken();
+  if (t) {
+    config.headers.Authorization = `Bearer ${t}`;
+  }
+  return config;
 });
 
 // Add auth token if available and refresh if needed
@@ -201,6 +226,40 @@ api.interceptors.response.use(
 // Uses publicApi since login doesn't require authentication
 export const login = (phone_number: string, password: string) => {
   return publicApi.post("/login/", { phone_number, password });
+};
+
+/**
+ * Farmer login (FastAPI): POST /auth/login with plot name as username & password.
+ * Response: { access_token, token_type, role, plot_name, ... }
+ */
+export const loginFarmerPlot = (plotName: string) => {
+  const u = plotName?.trim();
+  return axios.post(
+    `${FASTAPI_AUTH_BASE_URL}/auth/login`,
+    { username: u, password: u },
+    {
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+    },
+  );
+};
+
+/** FastAPI login with explicit credentials (for non-farmer roles). */
+export const loginFastApi = (username: string, password: string) => {
+  const u = username?.trim();
+  const p = password?.trim();
+  return axios.post(
+    `${FASTAPI_AUTH_BASE_URL}/auth/login`,
+    { username: u, password: p },
+    {
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+    },
+  );
 };
 
 // Token refresh function
@@ -702,6 +761,12 @@ export const setAuthToken = (token: string) => {
   api.defaults.headers.Authorization = `Bearer ${token}`;
   // Also store it in localStorage using the utility
   setAuthTokenUtil(token);
+};
+
+// Set FastAPI token for events microservice calls
+export const setFastApiAuthToken = (token: string) => {
+  eventsApi.defaults.headers.Authorization = `Bearer ${token}`;
+  setFastApiToken(token);
 };
 
 // Plot Creation API - Requires Bearer token
@@ -1465,7 +1530,7 @@ export const refreshApiEndpoints = async () => {
 // New fast agro stats endpoint for a single plot (Farmer dashboard)
 export const getSinglePlotAgroStats = async (plotId: string | number) => {
   const url = `https://events-cropeye.up.railway.app/plots/analyzeSinglePlot?plot_id=${plotId}`;
-  const response = await axios.get(url);
+  const response = await eventsApi.get(url);
   return response.data;
 };
 
@@ -1476,7 +1541,7 @@ export const getFieldOfficerAgroStats = async (
 ) => {
   const dateParam = endDate ? `?end_date=${endDate}` : "";
   const url = `https://events-cropeye.up.railway.app/field-officers/${fieldOfficerId}/agroStats${dateParam}`;
-  const response = await axios.get(url);
+  const response = await eventsApi.get(url);
   return response.data;
 };
 
