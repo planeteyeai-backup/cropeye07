@@ -261,7 +261,7 @@ const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
       setAuthData(token, userRole, userDataToStore, refreshToken);
       setApiAuthToken(token);
 
-      // After login: obtain FastAPI access_token (required for 192.168.42.55 services).
+      // After login: obtain FastAPI access_token (required for microservices).
       // - Farmer: use plot's fastapi_plot_id as username/password
       // - Other roles: use admin/admin1234
       try {
@@ -282,8 +282,9 @@ const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
           const fastToken = (fastapiRes.data as any)?.access_token;
           if (fastToken) setFastApiAuthToken(fastToken);
         }
-      } catch {
+      } catch (err) {
         // If FastAPI token fetch fails, continue with the existing token
+        console.error("FastAPI login failed:", err);
       }
 
       onLoginSuccess(userRole, token);

@@ -9,6 +9,7 @@ import {
   MapPin,
   Navigation,
 } from "lucide-react";
+import NotificationSystem from "./NotificationSystem";
 import "./Header.css";
 import {
   fetchCurrentWeather,
@@ -28,6 +29,7 @@ import GoogleTranslateWidget from "./GoogleTranslateWidget";
 interface HeaderProps {
   toggleSidebar: () => void;
   isSidebarOpen: boolean;
+  onNavigate?: (view: string) => void;
 }
 
 /** Stable component (must not be defined inside Header) — avoids remount thrash that breaks React + Google Translate DOM. */
@@ -167,6 +169,7 @@ const LocationPermissionPrompt: React.FC<LocationPermissionPromptProps> = ({
 export const Header: React.FC<HeaderProps> = ({
   toggleSidebar,
   isSidebarOpen,
+  onNavigate,
 }) => {
   const [weather, setWeather] = useState<WeatherServiceData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -416,8 +419,9 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           </div>
 
-          {/* Right side - Google Translate + Logo */}
+          {/* Right side - Notifications + Google Translate + Logo */}
           <div className="logo-container">
+            <NotificationSystem onNavigate={onNavigate} />
             <GoogleTranslateWidget />
             <img src="/icons/Cropeye-new.png" alt="CropEye Logo" className="logo-image" />
           </div>

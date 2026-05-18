@@ -1669,4 +1669,50 @@ export const getKMLDataWithAuth = async (token?: string) => {
   }
 };
 
+// ==================== PROFILE UPDATE API ====================
+
+/**
+ * PATCH /api/users/my-profile/
+ * Update logged-in user's personal information.
+ */
+export const patchUserMyProfile = (data: {
+  first_name?: string;
+  last_name?: string;
+  email?: string;
+  phone_number?: string;
+  address?: string;
+  village?: string;
+  district?: string;
+  state?: string;
+  taluka?: string;
+  aadhaar_number?: string;
+}) => {
+  return api.put("/users/my-profile/", data);
+};
+
+/**
+ * PATCH /api/farms/my-profile/
+ * Update logged-in farmer's farm/plot data (partial update).
+ */
+export const patchFarmMyProfile = (data: {
+  address?: string;
+  area_size?: string;
+  plantation_date?: string;
+  crop_variety?: string;
+  variety_type?: string;
+  variety_subtype?: string;
+  spacing_a?: string;
+  spacing_b?: string;
+  row_spacing?: string;
+  plant_spacing?: string;
+  flow_rate_liter_per_hour?: string;
+  emitters_per_plant?: number;
+  sugarcane_type?: string;
+  sugarcane_yield?: string | null;
+  plants_in_field?: number;
+}) => {
+  return api.patch("/farms/my-profile/", data);
+};
+
 export default api;
+

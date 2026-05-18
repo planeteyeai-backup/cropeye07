@@ -42,6 +42,7 @@ import AgroDashboard from "./components/AgroDash/AgroDashboard";
 import ManagerFarmDash from "./components/ManagerFarmDash";
 import HarvestDashboard from "./components/HarvestDashboard";
 import Chatbot from "./components/Chatbot";
+import MyProfile from "./components/MyProfile";
 import { MessageCircle } from "lucide-react";
 
 enum View {
@@ -81,6 +82,7 @@ enum View {
   Map = "Map",
   FarmerDashboard = "FarmerDashboard",
   FarmCropStatus = "FarmCropStatus",
+  MyProfile = "MyProfile",
 }
 
 interface AppProps {
@@ -356,6 +358,9 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
       case "FarmerDashboard":
         nextView = View.FarmerDashboard;
         break;
+      case "MyProfile":
+        nextView = View.MyProfile;
+        break;
       default:
         nextView = View.Home;
         break;
@@ -479,7 +484,7 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
 
   return (
     <div className="min-h-screen flex flex-col">
-      <Header toggleSidebar={toggleSidebar} isSidebarOpen={isSidebarOpen} />
+      <Header toggleSidebar={toggleSidebar} isSidebarOpen={isSidebarOpen} onNavigate={handleMenuSelect} />
 
       <div className="flex flex-1">
         <div
@@ -693,6 +698,12 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
             {cachedViews.includes(View.FarmerDashboard) && (
               <div style={{ display: currentView === View.FarmerDashboard ? 'block' : 'none' }}>
                 <FarmerDashboard />
+              </div>
+            )}
+
+            {cachedViews.includes(View.MyProfile) && (
+              <div style={{ display: currentView === View.MyProfile ? 'block' : 'none' }}>
+                <MyProfile onClose={() => setCurrentView(View.Home)} />
               </div>
             )}
 
