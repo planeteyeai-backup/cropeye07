@@ -391,7 +391,9 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
       });
       if (!res.ok) throw new Error(`Server error: ${res.status}`);
       const data = await res.json();
-      if (data.error) throw new Error(String(data.error));
+      if (data.error || data.ok === false) {
+        throw new Error(String(data.error || data.message || "Initialization failed"));
+      }
     };
 
     try {
