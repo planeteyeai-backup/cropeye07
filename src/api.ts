@@ -306,8 +306,18 @@ export const getTasksForUser = (userId: number) => {
   return api.get(`/tasks/?assigned_to_id=${userId}`);
 };
 
-export const getFarmersByFieldOfficer = (fieldOfficerId: number) => {
-  return api.get(`/users/farmers-by-field-officer/${fieldOfficerId}/`);
+export const getFarmersByFieldOfficer = (fieldOfficerId: string | number) => {
+  return api.get("/users/farmers-by-field-officer/", {
+    params: { field_officer_id: fieldOfficerId },
+  });
+};
+
+export const parseFarmersByFieldOfficerResponse = (data: any): any[] => {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.farmers)) return data.farmers;
+  if (Array.isArray(data?.results)) return data.results;
+  if (Array.isArray(data?.data)) return data.data;
+  return [];
 };
 
 export const updateTaskStatus = (taskId: number, status: string) => {
@@ -462,7 +472,37 @@ export const getFarmsWithFarmerDetails = () => {
   return api.get("/farms/?include_farmer=true");
 };
 
-// Get recent farmers
+/** Owner/manager-safe: paginate through all farms with nested farmer (recent-farmers is FO-only). */
+export const getAllFarmsWithFarmerDetails = async (): Promise<any[]> => {
+  const all: any[] = [];
+  let nextPath: string | null = "/farms/?include_farmer=true";
+
+  while (nextPath) {
+    const res: { data?: any } = await api.get(nextPath);
+    const data: any = res?.data;
+    const page: any[] = Array.isArray(data?.results)
+      ? data.results
+      : Array.isArray(data)
+        ? data
+        : [];
+    all.push(...page);
+
+    const nextUrl: unknown = data?.next;
+    if (!nextUrl || typeof nextUrl !== "string") {
+      break;
+    }
+    try {
+      const parsed: URL = new URL(nextUrl);
+      nextPath = `${parsed.pathname}${parsed.search}`.replace(/^\/api/, "");
+    } catch {
+      nextPath = nextUrl.startsWith("/") ? nextUrl : null;
+    }
+  }
+
+  return all;
+};
+
+// Get recent farmers (field officer only — returns 403 for owner/manager)
 export const getRecentFarmers = () => {
   return api.get("/farms/recent-farmers/");
 };
@@ -471,9 +511,9 @@ export const getFarmById = (id: string) => {
   return api.get(`/farms/${id}/`);
 };
 
-// Get farms by farmer ID
+// Get farms by farmer ID (include_farmer helps return plot gat/plot numbers)
 export const getFarmsByFarmerId = (farmerId: string) => {
-  return api.get(`/farms/?farmer_id=${farmerId}`);
+  return api.get(`/farms/?farmer_id=${farmerId}&include_farmer=true`);
 };
 
 export const createFarm = async (data: {
@@ -639,6 +679,10 @@ export const registerUser = (data: {
 
 export const getCurrentUser = () => {
   return api.get("/users/me/");
+};
+
+export const getUserById = (id: string | number) => {
+  return api.get(`/users/${id}/`);
 };
 
 export const getUsers = () => {
