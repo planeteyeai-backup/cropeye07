@@ -42,7 +42,7 @@ const publicApi = axios.create({
   },
 });
 
-// Axios instance for Events/FastAPI endpoints that require /auth/login token
+// Axios instance for Events/FastAPI microservice (optional Bearer from storage)
 export const eventsApi = axios.create({
   baseURL: FASTAPI_AUTH_BASE_URL,
   headers: {
@@ -226,40 +226,6 @@ api.interceptors.response.use(
 // Uses publicApi since login doesn't require authentication
 export const login = (phone_number: string, password: string) => {
   return publicApi.post("/login/", { phone_number, password });
-};
-
-/**
- * Farmer login (FastAPI): POST /auth/login with plot name as username & password.
- * Response: { access_token, token_type, role, plot_name, ... }
- */
-export const loginFarmerPlot = (plotName: string) => {
-  const u = plotName?.trim();
-  return axios.post(
-    `${FASTAPI_AUTH_BASE_URL}/auth/login`,
-    { username: u, password: u },
-    {
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      },
-    },
-  );
-};
-
-/** FastAPI login with explicit credentials (for non-farmer roles). */
-export const loginFastApi = (username: string, password: string) => {
-  const u = username?.trim();
-  const p = password?.trim();
-  return axios.post(
-    `${FASTAPI_AUTH_BASE_URL}/auth/login`,
-    { username: u, password: p },
-    {
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      },
-    },
-  );
 };
 
 // Token refresh function
