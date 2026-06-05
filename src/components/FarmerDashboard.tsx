@@ -32,7 +32,7 @@ import {
 } from "lucide-react";
 import Chatbot from "./Chatbot";
 import axios from "axios";
-import { eventsApi } from "../api";
+import { eventsApi, getSinglePlotAgroStats } from "../api";
 import { getCache, setCache } from "../utils/cache";
 import { useFarmerProfile } from "../hooks/useFarmerProfile";
 import { useAppContext } from "../context/AppContext";
@@ -538,10 +538,7 @@ const FarmerDashboard: React.FC = () => {
 
       if (!currentPlotData) {
         try {
-          const singlePlotRes = await eventsApi.get(
-            `https://events-cropeye.up.railway.app/plots/analyzeSinglePlot?plot_id=${currentPlotId}`,
-          );
-          currentPlotData = singlePlotRes.data;
+          currentPlotData = await getSinglePlotAgroStats(currentPlotId);
           setCache(singlePlotCacheKey, currentPlotData);
         } catch (singleErr) {
           console.error(

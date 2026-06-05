@@ -24,6 +24,7 @@ import {
   useMap,
 } from "react-leaflet";
 import {
+  AlertTriangle,
   Loader2,
   Calendar,
   Droplets,
@@ -49,10 +50,13 @@ import "leaflet/dist/leaflet.css";
 import axios from "axios";
 import { getCache, setCache } from "../utils/cache";
 import api, {
+  encodePlotIdForEventsUrl,
   getCurrentUser,
   getFarmersByFieldOfficer,
   getTeamConnect,
+  isAnalyzeSinglePlotPlantationDateError,
   parseFarmersByFieldOfficerResponse,
+  PLANTATION_DATE_NOT_PROVIDED_MSG,
 } from "../api"; // Import the authenticated api instance + hierarchy helpers
 import CommonSpinner from "./CommanSpinner";
 
@@ -618,6 +622,7 @@ const OwnerFarmDash: React.FC = () => {
     useState<boolean>(false);
   const [loadingFarmerPlots, setLoadingFarmerPlots] = useState<boolean>(false);
   const [loadingData, setLoadingData] = useState<boolean>(false);
+  const [plotStatsError, setPlotStatsError] = useState<string | null>(null);
   const [showDebugInfo, setShowDebugInfo] = useState(false);
   const [loadingSections, setLoadingSections] = useState<{
     plotStats: boolean;
@@ -1143,6 +1148,7 @@ const OwnerFarmDash: React.FC = () => {
   // Fetch all data for selected plot - Optimized for faster retrieval
   const fetchAllData = async (): Promise<void> => {
     if (!selectedPlotId) return;
+    setPlotStatsError(null);
     try {
       const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
       const endDate = new Date(Date.now() - tzOffsetMs)
@@ -1291,12 +1297,25 @@ const OwnerFarmDash: React.FC = () => {
             // Re-check cache (might be filled while this async started).
             let plotData = getCache(singlePlotCacheKey);
             if (!plotData) {
-              // Prefer single-plot endpoint.
-              const singleRes = await axios.get(
-                `https://events-cropeye.up.railway.app/plots/analyzeSinglePlot?plot_id=${plotIdAtStart}`,
-              );
-              plotData = singleRes?.data ?? null;
-              if (plotData) setCache(singlePlotCacheKey, plotData);
+              try {
+                const singleRes = await axios.get(
+                  `https://events-cropeye.up.railway.app/plots/analyzeSinglePlot?plot_id=${encodePlotIdForEventsUrl(plotIdAtStart)}`,
+                );
+                plotData = singleRes?.data ?? null;
+                if (plotData) setCache(singlePlotCacheKey, plotData);
+              } catch (singleErr) {
+                if (isAnalyzeSinglePlotPlantationDateError(singleErr)) {
+                  if (selectedPlotIdRef.current === plotIdAtStart) {
+                    setPlotStatsError(PLANTATION_DATE_NOT_PROVIDED_MSG);
+                    setLoadingSections((prev) => ({
+                      ...prev,
+                      plotStats: false,
+                    }));
+                  }
+                  return;
+                }
+                throw singleErr;
+              }
             }
 
             // Fallback: use all-plots agroStats only if single-plot has no usable data.
@@ -2464,6 +2483,12 @@ const OwnerFarmDash: React.FC = () => {
       </div>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-4">
+        {plotStatsError && (
+          <div className="flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>{plotStatsError}</span>
+          </div>
+        )}
         {/* Top Priority Metrics - 4 Key Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-green-200 hover:shadow-xl transition-all duration-300">

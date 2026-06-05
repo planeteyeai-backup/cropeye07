@@ -720,50 +720,6 @@ export const registerFarmer = (data: {
   });
 };
 
-// OTP-based registration (commented out - using password-based auth instead)
-// export const sendOTPForRegistration = async (email: string): Promise<void> => {
-//   try {
-//     console.log('Sending OTP to:', email);
-//     await axios.post(`${API_BASE_URL}/otp/`, {
-//       email: email
-//     }, {
-//       headers: {
-//         'Content-Type': 'application/json',
-//       },
-//     });
-//
-//     console.log('✅ OTP sent successfully to:', email);
-//   } catch (error: any) {
-//     console.error('Failed to send OTP:', error);
-//     throw new Error(`Failed to send OTP: ${error.response?.data?.detail || error.message}`);
-//   }
-// };
-
-// OTP verification (commented out - using password-based auth instead)
-// export const verifyOTPAndGetToken = async (email: string, otp: string): Promise<string> => {
-//   try {
-//     console.log('Verifying OTP for:', email);
-//     const verifyResponse = await axios.post(`${API_BASE_URL}/verify-otp/`, {
-//       email: email,
-//       otp: otp
-//     }, {
-//       headers: {
-//         'Content-Type': 'application/json',
-//       },
-//     });
-//
-//     if (verifyResponse.data && (verifyResponse.data.access || verifyResponse.data.token)) {
-//       const token = verifyResponse.data.access || verifyResponse.data.token;
-//       console.log('✅ OTP verification successful, token received');
-//       return token;
-//     } else {
-//       throw new Error('Invalid OTP response format');
-//     }
-//   } catch (error: any) {
-//     console.error('OTP verification failed:', error);
-//     throw new Error(`OTP verification failed: ${error.response?.data?.detail || error.message}`);
-//   }
-// };
 
 // Set authentication token for API calls
 export const setAuthToken = (token: string) => {
@@ -1537,10 +1493,33 @@ export const refreshApiEndpoints = async () => {
 
 // ==================== EVENTS SERVICE (AGRO STATS) HELPERS ====================
 
-// New fast agro stats endpoint for a single plot (Farmer dashboard)
-export const getSinglePlotAgroStats = async (plotId: string | number) => {
-  const url = `https://events-cropeye.up.railway.app/plots/analyzeSinglePlot?plot_id=${plotId}`;
-  const response = await eventsApi.get(url);
+/** Normalized plot name: spaces → `+` (e.g. `188_1 2A` → `188_1+2A`). */
+export function formatPlotIdForEventsApi(plotId: string | number): string {
+  return String(plotId).trim().replace(/ /g, "+");
+}
+
+/** URL encoding for Events API (`188_1+2A` → `188_1%2B2A` per Swagger). */
+export function encodePlotIdForEventsUrl(plotId: string | number): string {
+  return encodeURIComponent(formatPlotIdForEventsApi(plotId));
+}
+
+/** Shown when analyzeSinglePlot returns HTTP 400 (plantation date missing on backend). */
+export const PLANTATION_DATE_NOT_PROVIDED_MSG =
+  "Plantation date not Provided";
+
+export function isAnalyzeSinglePlotPlantationDateError(err: unknown): boolean {
+  return (
+    (err as { response?: { status?: number } })?.response?.status === 400
+  );
+}
+
+// Single-plot agro stats (Manager/Owner/Farmer dashboards)
+export const getSinglePlotAgroStats = async (
+  plotId: string | number,
+  config?: { signal?: AbortSignal; timeout?: number },
+) => {
+  const url = `https://events-cropeye.up.railway.app/plots/analyzeSinglePlot?plot_id=${encodePlotIdForEventsUrl(plotId)}`;
+  const response = await eventsApi.get(url, config);
   return response.data;
 };
 

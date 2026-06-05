@@ -47,11 +47,20 @@ import {
 } from "lucide-react";
 import "leaflet/dist/leaflet.css";
 import { getCache, setCache } from "../utils/cache";
-import api, { eventsApi } from "../api"; // Authenticated Django api + FastAPI events api
+import api, {
+  eventsApi,
+  encodePlotIdForEventsUrl,
+  getSinglePlotAgroStats,
+  isAnalyzeSinglePlotPlantationDateError,
+  PLANTATION_DATE_NOT_PROVIDED_MSG,
+} from "../api"; // Authenticated Django api + FastAPI events api
 import { useAppContext } from "../context/AppContext";
 
 // Constants (same as FarmerDashboard)
 const BASE_URL = "https://events-cropeye.up.railway.app";
+
+/** indices / stress / irrigation / analyzeSinglePlot are often slow; 10s abort shows as "(canceled)" in DevTools. */
+const MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS = 90_000;
 // const OPTIMAL_BIOMASS = 150;
 // const SOIL_API_URL = "https://events-cropeye.up.railway.app";
 // const SOIL_DATE = "2025-10-03";
@@ -159,9 +168,12 @@ const ManagerFarmDash: React.FC = () => {
   const [plots, setPlots] = useState<string[]>([]);
   const [loadingFarmers, setLoadingFarmers] = useState<boolean>(false);
   const [loadingData, setLoadingData] = useState<boolean>(false);
+  const [plotStatsError, setPlotStatsError] = useState<string | null>(null);
   const [showDebugInfo] = useState(false);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
-    
+  const dashboardLoadedForPlotRef = useRef<string>("");
+  const plotFetchGenRef = useRef(0);
+
   const lineStyles: LineStyles = {
     growth: { color: "#16a34a", label: "Growth Index" },
     stress: { color: "#dc2626", label: "Crop Stress Index" },
@@ -294,8 +306,10 @@ const ManagerFarmDash: React.FC = () => {
         // Auto-select first plot if available
         if (plotIds.length > 0) {
           const firstPlotId = plotIds[0];
+          dashboardLoadedForPlotRef.current = "";
           setSelectedPlotId(firstPlotId);
         } else {
+          dashboardLoadedForPlotRef.current = "";
           setSelectedPlotId("");
         }
       } else {
@@ -309,9 +323,19 @@ const ManagerFarmDash: React.FC = () => {
   }, [selectedFarmerId, farmersForSelectedOfficer]);
 
   useEffect(() => {
-    if (!selectedPlotId) return;
+    if (!selectedPlotId) {
+      dashboardLoadedForPlotRef.current = "";
+      return;
+    }
+
+    if (dashboardLoadedForPlotRef.current === selectedPlotId) {
+      setPlotCoordinatesFromState(selectedPlotId);
+      return;
+    }
+
+    const fetchGen = ++plotFetchGenRef.current;
     const ac = new AbortController();
-    void fetchAllData(selectedPlotId, ac.signal);
+    void fetchAllData(selectedPlotId, ac.signal, fetchGen);
     setPlotCoordinatesFromState(selectedPlotId);
     return () => ac.abort();
   }, [selectedPlotId]);
@@ -461,29 +485,19 @@ const ManagerFarmDash: React.FC = () => {
   const fetchAllData = async (
     plotId: string,
     signal: AbortSignal,
+    fetchGen?: number,
   ): Promise<void> => {
     if (!plotId) return;
 
+    const eventsPlotId = encodePlotIdForEventsUrl(plotId);
+
     setLoadingData(true);
+    setPlotStatsError(null);
     try {
       const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
       const today = new Date(Date.now() - tzOffsetMs)
         .toISOString()
         .slice(0, 10);
-
-      const pad2 = (n: number) => String(n).padStart(2, "0");
-      const [y0, m0, d0] = today.split("-").map(Number);
-      const baseCal = new Date(y0, m0 - 1, d0);
-      const y1 = new Date(baseCal);
-      y1.setDate(y1.getDate() - 1);
-      const y2 = new Date(baseCal);
-      y2.setDate(y2.getDate() - 2);
-      const yesterday = `${y1.getFullYear()}-${pad2(y1.getMonth() + 1)}-${pad2(y1.getDate())}`;
-      const twoDaysAgo = `${y2.getFullYear()}-${pad2(y2.getMonth() + 1)}-${pad2(y2.getDate())}`;
-      const datesToTry = [today, yesterday, twoDaysAgo];
-
-      const cleanId = plotId.replace(/"/g, "");
-      const quotedId = `"${cleanId}"`;
 
       const harvestPromise = (async () => {
         const harvestCacheKey = `harvest_${plotId}_${today}`;
@@ -492,9 +506,9 @@ const ManagerFarmDash: React.FC = () => {
         if (signal.aborted) return { harvestData: null as any };
         try {
           const harvestRes = await eventsApi.post(
-            `${BASE_URL}/sugarcane-harvest?plot_name=${plotId}&end_date=${today}`,
+            `${BASE_URL}/sugarcane-harvest?plot_name=${eventsPlotId}&end_date=${today}`,
             {},
-            { timeout: 10000, signal },
+            { timeout: MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS, signal },
           );
           harvestData = harvestRes.data;
           setCache(harvestCacheKey, harvestData);
@@ -512,104 +526,41 @@ const ManagerFarmDash: React.FC = () => {
       })();
 
       const agroPromise = (async (): Promise<{
-        allPlotsData: any;
         currentPlotData: any;
-        successfulDate: string;
+        plantationDateMissing?: boolean;
       } | null> => {
-        const yieldDataDate = today;
-        const agroStatsCacheKey = `agroStats_v3_${yieldDataDate}`;
-        let allPlotsData = getCache(agroStatsCacheKey);
-        let currentPlotData = getCache(`plot_v3_${plotId}_${yieldDataDate}`);
-
-        if (allPlotsData && currentPlotData) {
-          return {
-            allPlotsData,
-            currentPlotData,
-            successfulDate: yieldDataDate,
-          };
-        }
-
-        if (allPlotsData && !currentPlotData) {
-          currentPlotData =
-            allPlotsData[cleanId] || allPlotsData[quotedId] || null;
-        }
-        if (currentPlotData && allPlotsData) {
-          return {
-            allPlotsData,
-            currentPlotData,
-            successfulDate: yieldDataDate,
-          };
-        }
-
-        for (const d of datesToTry) {
-          const allCached = getCache(`agroStats_v3_${d}`);
-          const plotCached = getCache(`plot_v3_${plotId}_${d}`);
-          if (plotCached && allCached) {
-            return {
-              allPlotsData: allCached,
-              currentPlotData: plotCached,
-              successfulDate: d,
-            };
-          }
-          if (allCached) {
-            const row = allCached[cleanId] || allCached[quotedId] || null;
-            if (row) {
-              setCache(`plot_v3_${plotId}_${d}`, row);
-              return {
-                allPlotsData: allCached,
-                currentPlotData: row,
-                successfulDate: d,
-              };
-            }
-          }
+        const cleanId = plotId.replace(/"/g, "");
+        const cacheKey = `agroSingle_v1_${cleanId}`;
+        const cached = getCache(cacheKey);
+        if (cached) {
+          return { currentPlotData: cached };
         }
 
         if (signal.aborted) return null;
 
-        const settled = await Promise.allSettled(
-          datesToTry.map((date) =>
-            eventsApi
-              .get(
-                `https://events-cropeye.up.railway.app/plots/agroStats?end_date=${date}`,
-                { signal, timeout: 12000 },
-              )
-              .then((res) => ({ date, data: res.data })),
-          ),
-        );
-
-        for (let i = 0; i < datesToTry.length; i++) {
-          const s = settled[i];
-          if (s.status !== "fulfilled" || !s.value?.data) continue;
-          const { date, data } = s.value;
-          const row = data[cleanId] || data[quotedId] || null;
-          if (row) {
-            setCache(`agroStats_v3_${date}`, data);
-            setCache(`plot_v3_${plotId}_${date}`, row);
-            return {
-              allPlotsData: data,
-              currentPlotData: row,
-              successfulDate: date,
-            };
+        try {
+          const data = await getSinglePlotAgroStats(cleanId, {
+            signal,
+            timeout: MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
+          });
+          if (data) {
+            setCache(cacheKey, data);
+            return { currentPlotData: data };
           }
+        } catch (err) {
+          if (
+            (err as any)?.code === "ERR_CANCELED" ||
+            (err as any)?.name === "CanceledError"
+          ) {
+            return null;
+          }
+          if (isAnalyzeSinglePlotPlantationDateError(err)) {
+            return { currentPlotData: null, plantationDateMissing: true };
+          }
+          console.warn("analyzeSinglePlot fetch failed:", err);
         }
 
-        for (let i = 0; i < datesToTry.length; i++) {
-          const s = settled[i];
-          if (s.status !== "fulfilled" || !s.value?.data) continue;
-          const { date, data } = s.value;
-          setCache(`agroStats_v3_${date}`, data);
-          console.warn(
-            `Plot data not found for ID: ${plotId} in AgroStats response (${date})`,
-          );
-          return {
-            allPlotsData: data,
-            currentPlotData: null,
-            successfulDate: date,
-          };
-        }
-
-        console.error("All AgroStats fetch attempts failed.");
-        return null;
+        return { currentPlotData: null };
       })();
 
       const indicesCacheKey = `indices_${plotId}`;
@@ -628,9 +579,9 @@ const ManagerFarmDash: React.FC = () => {
       if (!cachedIndices) {
         fetchPromises.push(
           makeRequestWithRetry(
-            `${BASE_URL}/plots/${plotId}/indices`,
+            `${BASE_URL}/plots/${eventsPlotId}/indices`,
             1,
-            10000,
+            MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
             signal,
           )
             .then((data) => {
@@ -655,9 +606,9 @@ const ManagerFarmDash: React.FC = () => {
       if (!cachedStress) {
         fetchPromises.push(
           makeRequestWithRetry(
-            `${BASE_URL}/plots/${plotId}/stress?index_type=NDRE&threshold=0.15`,
+            `${BASE_URL}/plots/${eventsPlotId}/stress?index_type=NDRE&threshold=0.15`,
             1,
-            10000,
+            MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
             signal,
           )
             .then((data) => {
@@ -678,9 +629,9 @@ const ManagerFarmDash: React.FC = () => {
       if (!cachedIrrigation) {
         fetchPromises.push(
           makeRequestWithRetry(
-            `${BASE_URL}/plots/${plotId}/irrigation?threshold_ndmi=0.05&threshold_ndwi=0.05&min_days_between_events=10`,
+            `${BASE_URL}/plots/${eventsPlotId}/irrigation?threshold_ndmi=0.05&threshold_ndwi=0.05&min_days_between_events=10`,
             1,
-            10000,
+            MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
             signal,
           )
             .then((data) => {
@@ -718,6 +669,10 @@ const ManagerFarmDash: React.FC = () => {
 
       const agroResolved = agroOutcome;
       let currentPlotData = agroResolved?.currentPlotData ?? null;
+
+      if (agroResolved?.plantationDateMissing) {
+        setPlotStatsError(PLANTATION_DATE_NOT_PROVIDED_MSG);
+      }
 
       const expectedYieldValue =
         currentPlotData?.brix_sugar?.sugar_yield?.mean ??
@@ -806,7 +761,11 @@ const ManagerFarmDash: React.FC = () => {
         return;
       }
     } finally {
-      if (!signal.aborted) {
+      if (
+        !signal.aborted &&
+        (fetchGen == null || fetchGen === plotFetchGenRef.current)
+      ) {
+        dashboardLoadedForPlotRef.current = plotId;
         setHasLoadedOnce(true);
         setLoadingData(false);
       }
@@ -872,7 +831,7 @@ const ManagerFarmDash: React.FC = () => {
     try {
       const today = new Date().toISOString().slice(0, 10);
       const response = await eventsApi.post(
-        `${BASE_URL}/analyze?plot_name=${plotId}&date=${today}`,
+        `${BASE_URL}/analyze?plot_name=${encodePlotIdForEventsUrl(plotId)}&date=${today}`,
       );
 
       const geom = response.data?.features?.[0]?.geometry?.coordinates?.[0];
@@ -1475,6 +1434,12 @@ const ManagerFarmDash: React.FC = () => {
         {loadingData && hasLoadedOnce && (
           <div className="flex items-center justify-end gap-2 text-sm text-gray-600">
             Refreshing…
+          </div>
+        )}
+        {plotStatsError && (
+          <div className="flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>{plotStatsError}</span>
           </div>
         )}
         {/* Top Priority Metrics - 4 Key Cards */}
