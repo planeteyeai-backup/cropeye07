@@ -31,8 +31,12 @@ interface FarmFormData {
   variety_subtype: string;     // planting method (1_bud …)
   spacing_a: string;
   spacing_b: string;
+  irrigation_type: string;
   flow_rate_liter_per_hour: string;
   emitters_per_plant: string;
+  motor_horsepower: string;
+  pipe_width_inches: string;
+  distance_motor_to_plot_m: string;
   sugarcane_type: string;
   sugarcane_yield: string;
   plants_in_field: string;
@@ -45,8 +49,8 @@ const emptyUser: UserFormData = {
 const emptyFarm: FarmFormData = {
   address: "", area_size: "", plantation_date: "", crop_variety: "",
   variety_type: "", variety_subtype: "", spacing_a: "", spacing_b: "",
-  flow_rate_liter_per_hour: "",
-  emitters_per_plant: "", sugarcane_type: "new", sugarcane_yield: "",
+  irrigation_type: "", flow_rate_liter_per_hour: "",
+  emitters_per_plant: "", motor_horsepower: "", pipe_width_inches: "", distance_motor_to_plot_m: "", sugarcane_type: "new", sugarcane_yield: "",
   plants_in_field: "",
 };
 
@@ -150,8 +154,12 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
           variety_subtype: farm.variety_subtype ?? farm.crop_type?.planting_method ?? "",
           spacing_a: farm.spacing_a?.toString() ?? "",
           spacing_b: farm.spacing_b?.toString() ?? "",
+          irrigation_type: farm.irrigations?.[0]?.irrigation_type_code ?? farm.irrigation_type ?? "",
           flow_rate_liter_per_hour: farm.irrigations?.[0]?.flow_rate_lph?.toString() ?? farm.flow_rate_liter_per_hour?.toString() ?? "",
           emitters_per_plant: farm.irrigations?.[0]?.emitters_count?.toString() ?? farm.emitters_per_plant?.toString() ?? "",
+          motor_horsepower: farm.irrigations?.[0]?.motor_horsepower?.toString() ?? farm.motor_horsepower?.toString() ?? "",
+          pipe_width_inches: farm.irrigations?.[0]?.pipe_width_inches?.toString() ?? farm.pipe_width_inches?.toString() ?? "",
+          distance_motor_to_plot_m: farm.irrigations?.[0]?.distance_motor_to_plot_m?.toString() ?? farm.distance_motor_to_plot_m?.toString() ?? "",
           sugarcane_type: farm.sugarcane_type ?? "new",
           sugarcane_yield: farm.sugarcane_yield?.toString() ?? "",
           plants_in_field: farm.plants_in_field?.toString() ?? "",
@@ -199,7 +207,7 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
     try {
       setSavingFarm(true);
       setFarmMsg(null);
-      await patchFarmMyProfile({
+      const payload: any = {
         address: farmForm.address || undefined,
         area_size: farmForm.area_size || undefined,
         plantation_date: farmForm.plantation_date || undefined,
@@ -208,12 +216,21 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
         variety_subtype: farmForm.variety_subtype || undefined,
         spacing_a: farmForm.spacing_a || undefined,
         spacing_b: farmForm.spacing_b || undefined,
-        flow_rate_liter_per_hour: farmForm.flow_rate_liter_per_hour || undefined,
-        emitters_per_plant: farmForm.emitters_per_plant ? Number(farmForm.emitters_per_plant) : undefined,
+        irrigation_type: farmForm.irrigation_type || undefined,
         sugarcane_type: farmForm.sugarcane_type || undefined,
         sugarcane_yield: farmForm.sugarcane_yield || null,
-        plants_in_field: farmForm.plants_in_field ? Number(farmForm.plants_in_field) : undefined,
-      });
+      };
+
+      if (farmForm.irrigation_type === "drip") {
+        payload.flow_rate_liter_per_hour = farmForm.flow_rate_liter_per_hour || undefined;
+        payload.emitters_per_plant = farmForm.emitters_per_plant ? Number(farmForm.emitters_per_plant) : undefined;
+      } else if (farmForm.irrigation_type === "flood") {
+        payload.motor_horsepower = farmForm.motor_horsepower ? Number(farmForm.motor_horsepower) : undefined;
+        payload.pipe_width_inches = farmForm.pipe_width_inches ? Number(farmForm.pipe_width_inches) : undefined;
+        payload.distance_motor_to_plot_m = farmForm.distance_motor_to_plot_m ? Number(farmForm.distance_motor_to_plot_m) : undefined;
+      }
+
+      await patchFarmMyProfile(payload);
       await refreshApiEndpoints();
       setFarmMsg({ type: "success", text: "Farm data updated successfully!" });
       setEditingFarm(false);
@@ -393,8 +410,29 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
 
               <InputField label="Spacing A (ft)" value={farmForm.spacing_a} onChange={setFarm("spacing_a")} icon={<Ruler size={14} />} type="number" readOnly={!editingFarm} />
               <InputField label="Spacing B (ft)" value={farmForm.spacing_b} onChange={setFarm("spacing_b")} icon={<Ruler size={14} />} type="number" readOnly={!editingFarm} />
-              <InputField label="Flow Rate (L/hr)" value={farmForm.flow_rate_liter_per_hour} onChange={setFarm("flow_rate_liter_per_hour")} icon={<Droplets size={14} />} type="number" readOnly={!editingFarm} />
-              <InputField label="Emitters Per Plant" value={farmForm.emitters_per_plant} onChange={setFarm("emitters_per_plant")} icon={<Droplets size={14} />} type="number" readOnly={!editingFarm} />
+              
+              <SelectField
+                label="Irrigation Type"
+                value={farmForm.irrigation_type}
+                options={["drip", "flood"]}
+                onChange={setFarm("irrigation_type")}
+                readOnly={!editingFarm}
+              />
+
+              {farmForm.irrigation_type === "drip" && (
+                <>
+                  <InputField label="Flow Rate (L/hr)" value={farmForm.flow_rate_liter_per_hour} onChange={setFarm("flow_rate_liter_per_hour")} icon={<Droplets size={14} />} type="number" readOnly={!editingFarm} />
+                  <InputField label="Emitters Per Plant" value={farmForm.emitters_per_plant} onChange={setFarm("emitters_per_plant")} icon={<Droplets size={14} />} type="number" readOnly={!editingFarm} />
+                </>
+              )}
+
+              {farmForm.irrigation_type === "flood" && (
+                <>
+                  <InputField label="Motor Horsepower" value={farmForm.motor_horsepower} onChange={setFarm("motor_horsepower")} icon={<Droplets size={14} />} type="number" readOnly={!editingFarm} />
+                  <InputField label="Pipe Width (inches)" value={farmForm.pipe_width_inches} onChange={setFarm("pipe_width_inches")} icon={<Ruler size={14} />} type="number" readOnly={!editingFarm} />
+                  <InputField label="Distance Motor to Plot (m)" value={farmForm.distance_motor_to_plot_m} onChange={setFarm("distance_motor_to_plot_m")} icon={<Ruler size={14} />} type="number" readOnly={!editingFarm} />
+                </>
+              )}
 
               {/* Sugarcane type select */}
               <SelectField
