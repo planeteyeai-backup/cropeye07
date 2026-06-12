@@ -42,7 +42,7 @@ const publicApi = axios.create({
   },
 });
 
-// Axios instance for Events/FastAPI endpoints that require /auth/login token
+// Axios instance for Events/FastAPI microservice (optional Bearer from storage)
 export const eventsApi = axios.create({
   baseURL: FASTAPI_AUTH_BASE_URL,
   headers: {
@@ -228,40 +228,6 @@ export const login = (phone_number: string, password: string) => {
   return publicApi.post("/login/", { phone_number, password });
 };
 
-/**
- * Farmer login (FastAPI): POST /auth/login with plot name as username & password.
- * Response: { access_token, token_type, role, plot_name, ... }
- */
-export const loginFarmerPlot = (plotName: string) => {
-  const u = plotName?.trim();
-  return axios.post(
-    `${FASTAPI_AUTH_BASE_URL}/auth/login`,
-    { username: u, password: u },
-    {
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      },
-    },
-  );
-};
-
-/** FastAPI login with explicit credentials (for non-farmer roles). */
-export const loginFastApi = (username: string, password: string) => {
-  const u = username?.trim();
-  const p = password?.trim();
-  return axios.post(
-    `${FASTAPI_AUTH_BASE_URL}/auth/login`,
-    { username: u, password: p },
-    {
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      },
-    },
-  );
-};
-
 // Token refresh function
 export const refreshToken = (refresh: string) => {
   return axios.post(`${API_BASE_URL}/token/refresh/`, { refresh });
@@ -306,8 +272,18 @@ export const getTasksForUser = (userId: number) => {
   return api.get(`/tasks/?assigned_to_id=${userId}`);
 };
 
-export const getFarmersByFieldOfficer = (fieldOfficerId: number) => {
-  return api.get(`/users/farmers-by-field-officer/${fieldOfficerId}/`);
+export const getFarmersByFieldOfficer = (fieldOfficerId: string | number) => {
+  return api.get("/users/farmers-by-field-officer/", {
+    params: { field_officer_id: fieldOfficerId },
+  });
+};
+
+export const parseFarmersByFieldOfficerResponse = (data: any): any[] => {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.farmers)) return data.farmers;
+  if (Array.isArray(data?.results)) return data.results;
+  if (Array.isArray(data?.data)) return data.data;
+  return [];
 };
 
 export const updateTaskStatus = (taskId: number, status: string) => {
@@ -462,7 +438,37 @@ export const getFarmsWithFarmerDetails = () => {
   return api.get("/farms/?include_farmer=true");
 };
 
-// Get recent farmers
+/** Owner/manager-safe: paginate through all farms with nested farmer (recent-farmers is FO-only). */
+export const getAllFarmsWithFarmerDetails = async (): Promise<any[]> => {
+  const all: any[] = [];
+  let nextPath: string | null = "/farms/?include_farmer=true";
+
+  while (nextPath) {
+    const res: { data?: any } = await api.get(nextPath);
+    const data: any = res?.data;
+    const page: any[] = Array.isArray(data?.results)
+      ? data.results
+      : Array.isArray(data)
+        ? data
+        : [];
+    all.push(...page);
+
+    const nextUrl: unknown = data?.next;
+    if (!nextUrl || typeof nextUrl !== "string") {
+      break;
+    }
+    try {
+      const parsed: URL = new URL(nextUrl);
+      nextPath = `${parsed.pathname}${parsed.search}`.replace(/^\/api/, "");
+    } catch {
+      nextPath = nextUrl.startsWith("/") ? nextUrl : null;
+    }
+  }
+
+  return all;
+};
+
+// Get recent farmers (field officer only — returns 403 for owner/manager)
 export const getRecentFarmers = () => {
   return api.get("/farms/recent-farmers/");
 };
@@ -471,9 +477,9 @@ export const getFarmById = (id: string) => {
   return api.get(`/farms/${id}/`);
 };
 
-// Get farms by farmer ID
+// Get farms by farmer ID (include_farmer helps return plot gat/plot numbers)
 export const getFarmsByFarmerId = (farmerId: string) => {
-  return api.get(`/farms/?farmer_id=${farmerId}`);
+  return api.get(`/farms/?farmer_id=${farmerId}&include_farmer=true`);
 };
 
 export const createFarm = async (data: {
@@ -641,6 +647,10 @@ export const getCurrentUser = () => {
   return api.get("/users/me/");
 };
 
+export const getUserById = (id: string | number) => {
+  return api.get(`/users/${id}/`);
+};
+
 export const getUsers = () => {
   return api.get("/users/");
 };
@@ -710,50 +720,6 @@ export const registerFarmer = (data: {
   });
 };
 
-// OTP-based registration (commented out - using password-based auth instead)
-// export const sendOTPForRegistration = async (email: string): Promise<void> => {
-//   try {
-//     console.log('Sending OTP to:', email);
-//     await axios.post(`${API_BASE_URL}/otp/`, {
-//       email: email
-//     }, {
-//       headers: {
-//         'Content-Type': 'application/json',
-//       },
-//     });
-//
-//     console.log('✅ OTP sent successfully to:', email);
-//   } catch (error: any) {
-//     console.error('Failed to send OTP:', error);
-//     throw new Error(`Failed to send OTP: ${error.response?.data?.detail || error.message}`);
-//   }
-// };
-
-// OTP verification (commented out - using password-based auth instead)
-// export const verifyOTPAndGetToken = async (email: string, otp: string): Promise<string> => {
-//   try {
-//     console.log('Verifying OTP for:', email);
-//     const verifyResponse = await axios.post(`${API_BASE_URL}/verify-otp/`, {
-//       email: email,
-//       otp: otp
-//     }, {
-//       headers: {
-//         'Content-Type': 'application/json',
-//       },
-//     });
-//
-//     if (verifyResponse.data && (verifyResponse.data.access || verifyResponse.data.token)) {
-//       const token = verifyResponse.data.access || verifyResponse.data.token;
-//       console.log('✅ OTP verification successful, token received');
-//       return token;
-//     } else {
-//       throw new Error('Invalid OTP response format');
-//     }
-//   } catch (error: any) {
-//     console.error('OTP verification failed:', error);
-//     throw new Error(`OTP verification failed: ${error.response?.data?.detail || error.message}`);
-//   }
-// };
 
 // Set authentication token for API calls
 export const setAuthToken = (token: string) => {
@@ -1527,10 +1493,33 @@ export const refreshApiEndpoints = async () => {
 
 // ==================== EVENTS SERVICE (AGRO STATS) HELPERS ====================
 
-// New fast agro stats endpoint for a single plot (Farmer dashboard)
-export const getSinglePlotAgroStats = async (plotId: string | number) => {
-  const url = `https://events-cropeye.up.railway.app/plots/analyzeSinglePlot?plot_id=${plotId}`;
-  const response = await eventsApi.get(url);
+/** Normalized plot name: spaces → `+` (e.g. `188_1 2A` → `188_1+2A`). */
+export function formatPlotIdForEventsApi(plotId: string | number): string {
+  return String(plotId).trim().replace(/ /g, "+");
+}
+
+/** URL encoding for Events API (`188_1+2A` → `188_1%2B2A` per Swagger). */
+export function encodePlotIdForEventsUrl(plotId: string | number): string {
+  return encodeURIComponent(formatPlotIdForEventsApi(plotId));
+}
+
+/** Shown when analyzeSinglePlot returns HTTP 400 (plantation date missing on backend). */
+export const PLANTATION_DATE_NOT_PROVIDED_MSG =
+  "Plantation date not Provided";
+
+export function isAnalyzeSinglePlotPlantationDateError(err: unknown): boolean {
+  return (
+    (err as { response?: { status?: number } })?.response?.status === 400
+  );
+}
+
+// Single-plot agro stats (Manager/Owner/Farmer dashboards)
+export const getSinglePlotAgroStats = async (
+  plotId: string | number,
+  config?: { signal?: AbortSignal; timeout?: number },
+) => {
+  const url = `https://events-cropeye.up.railway.app/plots/analyzeSinglePlot?plot_id=${encodePlotIdForEventsUrl(plotId)}`;
+  const response = await eventsApi.get(url, config);
   return response.data;
 };
 

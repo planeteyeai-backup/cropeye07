@@ -24,6 +24,7 @@ import {
   useMap,
 } from "react-leaflet";
 import {
+  AlertTriangle,
   Loader2,
   Calendar,
   Droplets,
@@ -49,9 +50,13 @@ import "leaflet/dist/leaflet.css";
 import axios from "axios";
 import { getCache, setCache } from "../utils/cache";
 import api, {
+  encodePlotIdForEventsUrl,
   getCurrentUser,
   getFarmersByFieldOfficer,
   getTeamConnect,
+  isAnalyzeSinglePlotPlantationDateError,
+  parseFarmersByFieldOfficerResponse,
+  PLANTATION_DATE_NOT_PROVIDED_MSG,
 } from "../api"; // Import the authenticated api instance + hierarchy helpers
 import CommonSpinner from "./CommanSpinner";
 
@@ -147,6 +152,448 @@ interface PieChartWithNeedleProps {
 
 type TimePeriod = "daily" | "weekly" | "monthly" | "yearly";
 
+/** team-connect returns `created_by` like "karnataka_manager_1 (manager)" without numeric manager_id on FOs */
+function parseCreatedByUsername(createdBy: unknown): string | null {
+  if (typeof createdBy !== "string" || !createdBy.trim()) return null;
+  const match = createdBy.trim().match(/^(\S+)/);
+  return match ? match[1].toLowerCase() : null;
+}
+
+function enrichFieldOfficersWithManagerIds(
+  fieldOfficers: any[],
+  managers: any[],
+): any[] {
+  const managersByUsername = new Map<string, any>();
+  for (const m of managers || []) {
+    const username = `${m?.username ?? ""}`.trim().toLowerCase();
+    if (username) managersByUsername.set(username, m);
+  }
+
+  return (fieldOfficers || []).map((fo) => {
+    let managerId =
+      fo?.manager_id ??
+      fo?.manager?.id ??
+      fo?.managerId ??
+      fo?.manager_id_number ??
+      null;
+
+    if (managerId == null) {
+      const creatorUsername = parseCreatedByUsername(fo?.created_by);
+      const mgr = creatorUsername
+        ? managersByUsername.get(creatorUsername)
+        : null;
+      if (mgr) managerId = mgr?.id ?? mgr?.user_id ?? null;
+    }
+
+    if (managerId == null && fo?.username) {
+      const foUsername = `${fo.username}`.toLowerCase();
+      for (const [mgrUsername, mgr] of managersByUsername) {
+        if (foUsername.includes(mgrUsername)) {
+          managerId = mgr?.id ?? mgr?.user_id ?? null;
+          break;
+        }
+      }
+    }
+
+    return { ...fo, manager_id: managerId };
+  });
+}
+
+function countFieldOfficersForManager(
+  manager: any,
+  fieldOfficers: any[],
+): number {
+  const managerId = manager?.id ?? manager?.user_id ?? null;
+  const managerUsername = `${manager?.username ?? ""}`.trim().toLowerCase();
+
+  return (fieldOfficers || []).filter((fo) => {
+    const foManagerId =
+      fo?.manager_id ?? fo?.manager?.id ?? fo?.managerId ?? null;
+    if (
+      managerId != null &&
+      foManagerId != null &&
+      String(foManagerId) === String(managerId)
+    ) {
+      return true;
+    }
+    const creatorUsername = parseCreatedByUsername(fo?.created_by);
+    return (
+      !!managerUsername &&
+      !!creatorUsername &&
+      creatorUsername === managerUsername
+    );
+  }).length;
+}
+
+function normalizeManagersWithFoCounts(
+  managers: any[],
+  fieldOfficers: any[],
+): any[] {
+  return (managers || []).map((m) => {
+    const count = countFieldOfficersForManager(m, fieldOfficers);
+    return {
+      ...m,
+      field_officers_count:
+        m?.field_officers_count ?? m?.fieldOfficersCount ?? count,
+    };
+  });
+}
+
+function farmerBelongsToFieldOfficer(farmer: any, officer: any): boolean {
+  const officerId = officer?.id ?? officer?.user_id ?? null;
+  const officerUsername = `${officer?.username ?? ""}`.trim().toLowerCase();
+
+  const farmerFoId =
+    farmer?.field_officer_id ??
+    farmer?.field_officer?.id ??
+    farmer?.fieldOfficerId ??
+    null;
+  if (
+    officerId != null &&
+    farmerFoId != null &&
+    String(farmerFoId) === String(officerId)
+  ) {
+    return true;
+  }
+
+  const creatorUsername = parseCreatedByUsername(farmer?.created_by);
+  return (
+    !!officerUsername &&
+    !!creatorUsername &&
+    creatorUsername === officerUsername
+  );
+}
+
+function getFarmersForFieldOfficer(officer: any, allFarmers: any[]): any[] {
+  const nested = officer?.farmers;
+  if (Array.isArray(nested) && nested.length > 0) return nested;
+  return (allFarmers || []).filter((f) =>
+    farmerBelongsToFieldOfficer(f, officer),
+  );
+}
+
+function enrichFieldOfficersWithFarmers(
+  fieldOfficers: any[],
+  farmers: any[],
+): any[] {
+  return (fieldOfficers || []).map((fo) => {
+    const foFarmers = getFarmersForFieldOfficer(fo, farmers);
+    return {
+      ...fo,
+      farmers: foFarmers,
+      farmers_count: foFarmers.length,
+    };
+  });
+}
+
+function getFarmerId(farmer: any): string | null {
+  const id =
+    farmer?.id ?? farmer?.farmer_id ?? farmer?.farmerId ?? farmer?.user_id ?? null;
+  return id != null ? String(id) : null;
+}
+
+function normalizePhone(phone: unknown): string {
+  return `${phone ?? ""}`.replace(/\D/g, "");
+}
+
+function isUuidLike(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value.trim(),
+  );
+}
+
+/** Events API plot_name format: `{gat_number}_{plot_number}` e.g. `27_6`. */
+function buildGatPlotName(record: any): string | null {
+  if (!record || typeof record !== "object") return null;
+
+  const gatRaw =
+    record?.gat_number ??
+    record?.Group_Gat_No ??
+    record?.GroupGatNo ??
+    record?.group_gat_no ??
+    "";
+  const plotRaw =
+    record?.plot_number ??
+    record?.Gat_No_Id ??
+    record?.GatNoId ??
+    record?.gat_no_id ??
+    "";
+
+  const gat = `${gatRaw}`.trim();
+  const plotNum = `${plotRaw}`.trim();
+  const gatOk = /^\d+$/.test(gat);
+  const plotOk = /^\d+$/.test(plotNum);
+
+  if (gatOk && plotOk) {
+    return `${gat}_${plotNum}`;
+  }
+  return null;
+}
+
+function filterFarmsForFarmer(
+  farms: any[],
+  farmerId: string,
+  teamFarmer?: any,
+): any[] {
+  const idStr = String(farmerId);
+  const username = `${teamFarmer?.username ?? ""}`.trim().toLowerCase();
+  const phone = normalizePhone(teamFarmer?.phone_number ?? teamFarmer?.phone);
+
+  return (farms || []).filter((farm) => {
+    const farmFarmerId =
+      farm?.farmer_id ??
+      farm?.farmer?.id ??
+      farm?.farmer?.user_id ??
+      farm?.user_id ??
+      farm?.user?.id ??
+      null;
+    if (farmFarmerId != null && String(farmFarmerId) === idStr) return true;
+
+    const nested = farm?.farmer ?? farm?.user ?? {};
+    if (nested?.id != null && String(nested.id) === idStr) return true;
+    if (
+      username &&
+      `${nested?.username ?? ""}`.trim().toLowerCase() === username
+    ) {
+      return true;
+    }
+    if (phone && normalizePhone(nested?.phone_number ?? nested?.phone) === phone) {
+      return true;
+    }
+    return false;
+  });
+}
+
+function normalizePlotFromFieldOfficer(plot: any, farmer?: any): any | null {
+  const fastapiId =
+    plot?.fastapi_plot_id != null && `${plot.fastapi_plot_id}`.trim() !== ""
+      ? String(plot.fastapi_plot_id).trim()
+      : null;
+  const gatPlot = buildGatPlotName(plot);
+  const plotKey = fastapiId ?? gatPlot;
+  if (!plotKey) return null;
+
+  return {
+    ...plot,
+    id: plot?.id ?? plotKey,
+    fastapi_plot_id: plotKey,
+    events_plot_id: plotKey,
+    plot_id: plot?.plot_id ?? plotKey,
+    plot_name: plotKey,
+    boundary: plot?.boundary ?? plot?.coordinates?.boundary,
+    coordinates: plot?.coordinates,
+    farmer,
+  };
+}
+
+function plotsFromFieldOfficerFarmer(farmer: any): any[] {
+  if (!farmer) return [];
+  const rawPlots = farmer?.plots ?? farmer?.plot_list ?? [];
+  if (!Array.isArray(rawPlots) || rawPlots.length === 0) return [];
+
+  const normalized = rawPlots
+    .map((plot: any) => normalizePlotFromFieldOfficer(plot, farmer))
+    .filter((plot): plot is any => plot != null && !!plot.fastapi_plot_id);
+
+  return dedupePlotRecords(normalized);
+}
+
+async function loadPlotsFromFieldOfficerApi(
+  fieldOfficerId: string,
+  farmerId: string,
+): Promise<{ farmer: any | null; plots: any[] }> {
+  const res = await getFarmersByFieldOfficer(fieldOfficerId);
+  const farmers = parseFarmersByFieldOfficerResponse(res?.data);
+  const farmer =
+    farmers.find((f: any) => getFarmerId(f) === String(farmerId)) ?? null;
+  const plots = plotsFromFieldOfficerFarmer(farmer);
+  return { farmer, plots };
+}
+
+/** Events/FastAPI plot key — `{gat_number}_{plot_number}`, not username or farm_uid. */
+function resolveEventsPlotId(farm: any, _farmerCtx?: any): string | null {
+  const fromFarm = buildGatPlotName(farm);
+  if (fromFarm) return fromFarm;
+
+  if (farm?.plot && typeof farm.plot === "object") {
+    const fromPlot = buildGatPlotName(farm.plot);
+    if (fromPlot) return fromPlot;
+  }
+
+  if (Array.isArray(farm?.plots)) {
+    for (const plot of farm.plots) {
+      const fromNested = buildGatPlotName(plot);
+      if (fromNested) return fromNested;
+    }
+  }
+
+  const named = farm?.fastapi_plot_id ?? farm?.plot_name ?? null;
+  if (named && !isUuidLike(String(named))) {
+    const plotName = String(named).trim();
+    if (/^\d+_\d+$/.test(plotName)) return plotName;
+  }
+
+  return null;
+}
+
+function farmRecordToPlot(farm: any, farmerCtx?: any): any {
+  const eventsPlotId = resolveEventsPlotId(farm, farmerCtx);
+  const farmUid = farm?.farm_uid ?? null;
+  return {
+    ...farm,
+    id: farm?.id ?? eventsPlotId ?? farmUid,
+    farm_uid: farmUid,
+    events_plot_id: eventsPlotId,
+    fastapi_plot_id: eventsPlotId,
+    plot_id: farm?.plot_id ?? eventsPlotId,
+    plot_name: eventsPlotId,
+    boundary: farm?.boundary ?? farm?.coordinates?.boundary,
+    coordinates: farm?.coordinates,
+  };
+}
+
+function normalizePlotRecord(plot: any, farmer?: any): any {
+  const eventsPlotId =
+    resolveEventsPlotId(plot, farmer) ??
+    (plot?.fastapi_plot_id && !isUuidLike(String(plot.fastapi_plot_id))
+      ? String(plot.fastapi_plot_id)
+      : null);
+  return {
+    ...plot,
+    id: plot?.id ?? eventsPlotId,
+    events_plot_id: eventsPlotId,
+    fastapi_plot_id: eventsPlotId,
+    plot_id: plot?.plot_id ?? eventsPlotId,
+    plot_name: eventsPlotId,
+    boundary: plot?.boundary ?? plot?.coordinates?.boundary,
+    coordinates: plot?.coordinates,
+  };
+}
+
+function extractPlotsFromFarmer(farmer: any): any[] {
+  const fromFieldOfficer = plotsFromFieldOfficerFarmer(farmer);
+  if (fromFieldOfficer.length > 0) return fromFieldOfficer;
+
+  if (Array.isArray(farmer?.plots) && farmer.plots.length > 0) {
+    return farmer.plots.map((plot: any) => normalizePlotRecord(plot, farmer));
+  }
+  if (Array.isArray(farmer?.farms) && farmer.farms.length > 0) {
+    return farmer.farms.map((farm: any) => farmRecordToPlot(farm));
+  }
+  if (farmer?.farm && typeof farmer.farm === "object") {
+    return [farmRecordToPlot(farmer.farm)];
+  }
+  if (Array.isArray(farmer?.plot_ids) && farmer.plot_ids.length > 0) {
+    return farmer.plot_ids.map((plotId: any) =>
+      normalizePlotRecord({ id: plotId, fastapi_plot_id: String(plotId) }, farmer),
+    );
+  }
+  return [];
+}
+
+function parseFarmsListResponse(data: any): any[] {
+  if (Array.isArray(data?.results)) return data.results;
+  if (Array.isArray(data)) return data;
+  return [];
+}
+
+function dedupePlotRecords(records: any[]): any[] {
+  const seenPlotKeys = new Set<string>();
+  const seenFarmIds = new Set<string>();
+  const unique: any[] = [];
+
+  for (const record of records || []) {
+    const plotKey =
+      (record?.fastapi_plot_id && String(record.fastapi_plot_id).trim()) ||
+      resolveEventsPlotId(record) ||
+      buildGatPlotName(record);
+    if (plotKey) {
+      if (seenPlotKeys.has(plotKey)) continue;
+      seenPlotKeys.add(plotKey);
+      unique.push(record);
+      continue;
+    }
+
+    const farmKey =
+      record?.id != null
+        ? `farm_${record.id}`
+        : record?.farm_uid
+          ? String(record.farm_uid)
+          : "";
+    if (farmKey) {
+      if (seenFarmIds.has(farmKey)) continue;
+      seenFarmIds.add(farmKey);
+    }
+    unique.push(record);
+  }
+
+  return unique;
+}
+
+/** Expand farm list into plot rows so each entry has gat_number + plot_number when nested. */
+function farmsToPlotRecords(farms: any[], farmerCtx?: any): any[] {
+  const records: any[] = [];
+
+  for (const farm of farms || []) {
+    if (buildGatPlotName(farm)) {
+      records.push(farmRecordToPlot(farm, farmerCtx));
+      continue;
+    }
+
+    const nestedPlots = farm?.plots ?? farm?.farm_plots ?? farm?.plot_list ?? [];
+    if (Array.isArray(nestedPlots) && nestedPlots.length > 0) {
+      for (const plot of nestedPlots) {
+        const plotName = buildGatPlotName(plot);
+        if (!plotName) continue;
+        records.push(
+          farmRecordToPlot(
+            {
+              ...farm,
+              ...plot,
+              plot,
+              boundary: plot?.boundary ?? plot?.coordinates?.boundary ?? farm?.boundary,
+            },
+            farmerCtx,
+          ),
+        );
+      }
+      continue;
+    }
+
+    records.push(farmRecordToPlot(farm, farmerCtx));
+  }
+
+  return dedupePlotRecords(records);
+}
+
+function boundaryToLeafletCoords(boundary: any): [number, number][] {
+  const coordsList = boundary?.coordinates;
+  if (!coordsList || !Array.isArray(coordsList) || coordsList.length === 0) {
+    return [];
+  }
+  const ring = coordsList[0];
+  if (!Array.isArray(ring)) return [];
+  return ring
+    .filter((pt) => Array.isArray(pt) && pt.length >= 2)
+    .map(([lng, lat]: [number, number]) => [lat, lng]);
+}
+
+function calculateCenterFromCoords(
+  coords: [number, number][],
+): [number, number] {
+  if (coords.length === 0) return [17.5789, 75.053];
+  const sumLat = coords.reduce((sum, [lat]) => sum + lat, 0);
+  const sumLng = coords.reduce((sum, [, lng]) => sum + lng, 0);
+  return [sumLat / coords.length, sumLng / coords.length];
+}
+
+function getPlotIdsFromFarmer(farmer: any): string[] {
+  return extractPlotsFromFarmer(farmer)
+    .map((plot: any) => plot?.fastapi_plot_id ?? plot?.events_plot_id ?? plot?.plot_id)
+    .filter((plotId) => plotId != null && `${plotId}`.trim() !== "")
+    .map((plotId) => String(plotId));
+}
+
 const OwnerFarmDash: React.FC = () => {
   // const center: [number, number] = [17.5789, 75.053]; // Unused - using mapCenter state instead
   const mapWrapperRef = useRef<HTMLDivElement>(null);
@@ -162,12 +609,20 @@ const OwnerFarmDash: React.FC = () => {
   const [fieldOfficers, setFieldOfficers] = useState<any[]>([]);
   // Raw field officers list (used to filter per selected manager).
   const [teamFieldOfficersRaw, setTeamFieldOfficersRaw] = useState<any[]>([]);
+  const [teamFarmersRaw, setTeamFarmersRaw] = useState<any[]>([]);
+  const [farmerPlotsCache, setFarmerPlotsCache] = useState<
+    Record<string, any[]>
+  >({});
   const [farmersForSelectedOfficer, setFarmersForSelectedOfficer] = useState<
     any[]
   >([]);
   const [plots, setPlots] = useState<string[]>([]);
   const [loadingHierarchy, setLoadingHierarchy] = useState<boolean>(true);
+  const [loadingFarmersForOfficer, setLoadingFarmersForOfficer] =
+    useState<boolean>(false);
+  const [loadingFarmerPlots, setLoadingFarmerPlots] = useState<boolean>(false);
   const [loadingData, setLoadingData] = useState<boolean>(false);
+  const [plotStatsError, setPlotStatsError] = useState<string | null>(null);
   const [showDebugInfo, setShowDebugInfo] = useState(false);
   const [loadingSections, setLoadingSections] = useState<{
     plotStats: boolean;
@@ -257,13 +712,15 @@ const OwnerFarmDash: React.FC = () => {
     Map<string, [number, number][]>
   >(new Map());
   const hierarchyRequestIdRef = useRef<number>(0);
+  const prevFieldOfficerIdRef = useRef<string>("");
+  const lastFetchedFarmerIdRef = useRef<string>("");
+  const dashboardLoadedForPlotRef = useRef<string>("");
+  const farmerFetchGenRef = useRef(0);
 
   const selectedFarmerForUi =
-    farmersForSelectedOfficer.find((f: any) => {
-      const farmerId =
-        f?.id ?? f?.farmer_id ?? f?.farmerId ?? f?.user_id ?? null;
-      return farmerId != null && String(farmerId) === String(selectedFarmerId);
-    }) ?? null;
+    farmersForSelectedOfficer.find(
+      (f: any) => getFarmerId(f) === String(selectedFarmerId),
+    ) ?? null;
 
   const selectedFarmerNameForUi =
     selectedFarmerForUi?.name ??
@@ -285,11 +742,9 @@ const OwnerFarmDash: React.FC = () => {
   // NEW: Function to set plot coordinates from existing state
   const setPlotCoordinatesFromState = (plotId: string): void => {
     // Only rely on the currently loaded farmers list.
-    const farmer = farmersForSelectedOfficer.find((f: any) => {
-      const farmerId =
-        f?.id ?? f?.farmer_id ?? f?.farmerId ?? f?.user_id ?? null;
-      return farmerId != null && String(farmerId) === String(selectedFarmerId);
-    });
+    const farmer = farmersForSelectedOfficer.find(
+      (f: any) => getFarmerId(f) === String(selectedFarmerId),
+    );
 
     const plot =
       farmer?.plots?.find((p: any) => {
@@ -308,16 +763,43 @@ const OwnerFarmDash: React.FC = () => {
           ([lng, lat]: [number, number]) => [lat, lng],
         );
         setPlotCoordinates(coords);
-
-        // Calculate and set map center
-        const center = calculateCenter(coords);
-        setMapCenter(center);
-        setMapKey((prev) => prev + 1); // Force map re-render
+        setMapCenter(calculateCenterFromCoords(coords));
+        setMapKey((prev) => prev + 1);
         return;
       }
     }
 
     setPlotCoordinates([]);
+  };
+
+  const applyCoordinatesFromPlot = (plot: any): boolean => {
+    const coords = boundaryToLeafletCoords(
+      plot?.boundary ?? plot?.coordinates?.boundary,
+    );
+    if (coords.length === 0) return false;
+    setPlotCoordinates(coords);
+    setMapCenter(calculateCenterFromCoords(coords));
+    setMapKey((prev) => prev + 1);
+    return true;
+  };
+
+  const findPlotInSelection = (plotId: string): any | null => {
+    const farmer = farmersForSelectedOfficer.find(
+      (f) => getFarmerId(f) === String(selectedFarmerId),
+    );
+    if (!farmer) return null;
+    return (
+      extractPlotsFromFarmer(farmer).find((plot: any) => {
+        const candidates = [
+          plot?.fastapi_plot_id,
+          plot?.events_plot_id,
+          plot?.plot_name,
+          plot?.plot_id,
+          plot?.id,
+        ].filter((pid) => pid != null && `${pid}`.trim() !== "");
+        return candidates.some((pid) => String(pid) === String(plotId));
+      }) ?? null
+    );
   };
 
   // Update field officers dropdown when manager changes
@@ -332,14 +814,28 @@ const OwnerFarmDash: React.FC = () => {
       return;
     }
 
-    // teamFieldOfficersRaw is flattened; filter officers by manager_id.
+    const selectedManager = managers.find(
+      (m) => String(m?.id ?? m?.user_id) === String(selectedManagerId),
+    );
     const filtered = teamFieldOfficersRaw.filter((fo: any) => {
       const mid =
         fo?.manager_id ??
         fo?.manager?.id ??
         fo?.managerId ??
         fo?.manager_id;
-      return mid != null && String(mid) === String(selectedManagerId);
+      if (mid != null && String(mid) === String(selectedManagerId)) {
+        return true;
+      }
+      if (!selectedManager) return false;
+      const creatorUsername = parseCreatedByUsername(fo?.created_by);
+      const managerUsername = `${selectedManager?.username ?? ""}`
+        .trim()
+        .toLowerCase();
+      return (
+        !!creatorUsername &&
+        !!managerUsername &&
+        creatorUsername === managerUsername
+      );
     });
 
     setFieldOfficers(filtered);
@@ -349,50 +845,159 @@ const OwnerFarmDash: React.FC = () => {
     setSelectedFarmerId("");
     setPlots([]);
     setSelectedPlotId("");
-  }, [selectedManagerId, teamFieldOfficersRaw]);
+  }, [selectedManagerId, teamFieldOfficersRaw, managers]);
 
-  // Update farmers dropdown when field officer changes
+  // Load farmers for the selected field officer from dedicated API.
   useEffect(() => {
     if (!selectedFieldOfficerId) {
+      prevFieldOfficerIdRef.current = "";
       setFarmersForSelectedOfficer([]);
       setSelectedFarmerId("");
       setPlots([]);
       setSelectedPlotId("");
+      setLoadingFarmersForOfficer(false);
       return;
     }
 
-    let cancelled = false;
+    const fieldOfficerChanged =
+      prevFieldOfficerIdRef.current !== String(selectedFieldOfficerId);
+    prevFieldOfficerIdRef.current = String(selectedFieldOfficerId);
 
-    // Step-by-step: load farmers only when an officer is selected.
-    // Primary: API call via /users/farmers-by-field-officer/<id>/
-    (async () => {
-      setFarmersForSelectedOfficer([]);
+    if (fieldOfficerChanged) {
+      lastFetchedFarmerIdRef.current = "";
+      dashboardLoadedForPlotRef.current = "";
       setSelectedFarmerId("");
       setPlots([]);
       setSelectedPlotId("");
+      setPlotCoordinates([]);
+    }
 
+    let cancelled = false;
+    setLoadingFarmersForOfficer(true);
+    setFarmersForSelectedOfficer([]);
+
+    void (async () => {
       try {
-        const res = await getFarmersByFieldOfficer(
-          selectedFieldOfficerId as unknown as number,
-        );
-        const data = res?.data;
-        const farmers =
-          (data && (data.results || data.farmers)) ??
-          data ??
-          [];
-        if (!cancelled) {
-          setFarmersForSelectedOfficer(Array.isArray(farmers) ? farmers : []);
-        }
-      } catch (err) {
-        // Fallback: use any nested farmers that might exist on the filtered FO object.
+        const res = await getFarmersByFieldOfficer(selectedFieldOfficerId);
+        if (cancelled) return;
+
+        const apiFarmers = parseFarmersByFieldOfficerResponse(res?.data);
+        setFarmersForSelectedOfficer(apiFarmers);
+      } catch {
+        if (cancelled) return;
         const officer = fieldOfficers.find(
-          (fo) => String(fo.id) === String(selectedFieldOfficerId),
+          (fo) =>
+            String(fo.id ?? fo.user_id) === String(selectedFieldOfficerId),
         );
-        const fallbackFarmers = officer?.farmers ?? [];
-        if (!cancelled) {
-          setFarmersForSelectedOfficer(
-            Array.isArray(fallbackFarmers) ? fallbackFarmers : [],
+        const fallbackFarmers = officer
+          ? getFarmersForFieldOfficer(officer, teamFarmersRaw)
+          : [];
+        setFarmersForSelectedOfficer(fallbackFarmers);
+      } finally {
+        if (!cancelled) setLoadingFarmersForOfficer(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedFieldOfficerId, fieldOfficers, teamFarmersRaw]);
+
+  const applyFarmerPlotsToUi = (
+    farmerId: string,
+    farmPlots: any[],
+    options?: { selectFirstPlot?: boolean },
+  ) => {
+    const plotIds = farmPlots
+      .map((plot) => plot?.fastapi_plot_id)
+      .filter((id) => id != null && `${id}`.trim() !== "")
+      .map((id) => String(id));
+    setPlots(plotIds);
+    setFarmersForSelectedOfficer((prev) =>
+      prev.map((f) =>
+        getFarmerId(f) === String(farmerId)
+          ? { ...f, plots: farmPlots, plots_count: farmPlots.length }
+          : f,
+      ),
+    );
+
+    if (options?.selectFirstPlot !== false && plotIds.length > 0) {
+      const firstPlot =
+        farmPlots.find(
+          (p) => String(p?.fastapi_plot_id) === String(plotIds[0]),
+        ) ?? farmPlots[0];
+      const fastapiPlotId = plotIds[0];
+      dashboardLoadedForPlotRef.current = "";
+      setSelectedPlotId(fastapiPlotId);
+      if (!applyCoordinatesFromPlot(firstPlot) && fastapiPlotId) {
+        void fetchPlotCoordinates(fastapiPlotId);
+      }
+    }
+  };
+
+  // Plots + map boundary from farmers-by-field-officer (same endpoint as farmers list).
+  useEffect(() => {
+    if (!selectedFarmerId || !selectedFieldOfficerId) {
+      lastFetchedFarmerIdRef.current = "";
+      dashboardLoadedForPlotRef.current = "";
+      setPlots([]);
+      setSelectedPlotId("");
+      setPlotCoordinates([]);
+      return;
+    }
+
+    const farmerId = String(selectedFarmerId);
+    const fieldOfficerId = String(selectedFieldOfficerId);
+    const fetchGen = ++farmerFetchGenRef.current;
+
+    let cancelled = false;
+    setLoadingFarmerPlots(true);
+    dashboardLoadedForPlotRef.current = "";
+    setSelectedPlotId("");
+    setPlots([]);
+    setPlotCoordinates([]);
+
+    void (async () => {
+      try {
+        const { farmer, plots: farmPlots } = await loadPlotsFromFieldOfficerApi(
+          fieldOfficerId,
+          farmerId,
+        );
+        if (cancelled || fetchGen !== farmerFetchGenRef.current) return;
+
+        lastFetchedFarmerIdRef.current = farmerId;
+        setFarmerPlotsCache((prev) => ({
+          ...prev,
+          [farmerId]: farmPlots,
+        }));
+
+        if (farmer) {
+          setFarmersForSelectedOfficer((prev) =>
+            prev.map((f) =>
+              getFarmerId(f) === farmerId
+                ? { ...f, ...farmer, plots: farmPlots, plots_count: farmPlots.length }
+                : f,
+            ),
           );
+        }
+
+        applyFarmerPlotsToUi(farmerId, farmPlots);
+      } catch {
+        if (cancelled || fetchGen !== farmerFetchGenRef.current) return;
+        const cached = farmersForSelectedOfficer.find(
+          (f) => getFarmerId(f) === farmerId,
+        );
+        const fallbackPlots = plotsFromFieldOfficerFarmer(cached);
+        if (fallbackPlots.length > 0) {
+          applyFarmerPlotsToUi(farmerId, fallbackPlots);
+        } else {
+          setPlots([]);
+          setSelectedPlotId("");
+          dashboardLoadedForPlotRef.current = "";
+        }
+      } finally {
+        if (!cancelled && fetchGen === farmerFetchGenRef.current) {
+          setLoadingFarmerPlots(false);
         }
       }
     })();
@@ -400,53 +1005,29 @@ const OwnerFarmDash: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [selectedFieldOfficerId, fieldOfficers]);
-
-  // Fetch plots when farmer is selected
-  useEffect(() => {
-    if (selectedFarmerId) {
-      const selectedFarmer = farmersForSelectedOfficer.find(
-        (f) =>
-          String(f.id || f.farmer_id || f.farmerId) ===
-          String(selectedFarmerId),
-      );
-
-      if (selectedFarmer) {
-        // Extract fastapi_plot_id from plots array
-        const farmerPlots = selectedFarmer.plots || [];
-        const plotIds = farmerPlots.map((plot: any) => plot.fastapi_plot_id);
-
-        setPlots(plotIds);
-
-        // Auto-select first plot if available
-        if (plotIds.length > 0) {
-          const firstPlotId = plotIds[0];
-          setSelectedPlotId(firstPlotId);
-        } else {
-          setSelectedPlotId("");
-        }
-      } else {
-        setPlots([]);
-        setSelectedPlotId("");
-      }
-    } else {
-      setPlots([]);
-      setSelectedPlotId("");
-    }
-  }, [selectedFarmerId, farmersForSelectedOfficer]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- farmer + field officer selection
+  }, [selectedFarmerId, selectedFieldOfficerId]);
 
   useEffect(() => {
-    if (selectedPlotId) {
-      // When switching plot/farmer, show loaders across all KPI cards until data arrives.
-      setLoadingSections({
-        plotStats: true,
-        indices: true,
-        stress: true,
-        irrigation: true,
-      });
-      fetchAllData();
-      setPlotCoordinatesFromState(selectedPlotId); // This will now work
+    if (!selectedPlotId) {
+      dashboardLoadedForPlotRef.current = "";
+      return;
     }
+    if (dashboardLoadedForPlotRef.current === selectedPlotId) return;
+
+    dashboardLoadedForPlotRef.current = selectedPlotId;
+    setLoadingSections({
+      plotStats: true,
+      indices: true,
+      stress: true,
+      irrigation: true,
+    });
+    fetchAllData();
+    const plot = findPlotInSelection(selectedPlotId);
+    if (!plot || !applyCoordinatesFromPlot(plot)) {
+      setPlotCoordinatesFromState(selectedPlotId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- load dashboard once per plot id
   }, [selectedPlotId]);
 
   useEffect(() => {
@@ -567,6 +1148,7 @@ const OwnerFarmDash: React.FC = () => {
   // Fetch all data for selected plot - Optimized for faster retrieval
   const fetchAllData = async (): Promise<void> => {
     if (!selectedPlotId) return;
+    setPlotStatsError(null);
     try {
       const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
       const endDate = new Date(Date.now() - tzOffsetMs)
@@ -632,7 +1214,7 @@ const OwnerFarmDash: React.FC = () => {
       // Step 3: Fetch critical data (agroStats) with versioned caching
       // Optimization: prefer the faster single-plot endpoint (analyzeSinglePlot),
       // avoid downloading agroStats for ALL plots on owner dashboard load.
-      const singlePlotCacheKey = `agroSingle_v1_${selectedPlotId}_${yieldDataDate}`;
+      const singlePlotCacheKey = `agroSingle_v3_${selectedPlotId}_${yieldDataDate}`;
       let currentPlotData = getCache(singlePlotCacheKey);
 
       const applyPlotStatsToState = (plot: any) => {
@@ -715,12 +1297,25 @@ const OwnerFarmDash: React.FC = () => {
             // Re-check cache (might be filled while this async started).
             let plotData = getCache(singlePlotCacheKey);
             if (!plotData) {
-              // Prefer single-plot endpoint.
-              const singleRes = await axios.get(
-                `https://events-cropeye.up.railway.app/plots/analyzeSinglePlot?plot_id=${plotIdAtStart}`,
-              );
-              plotData = singleRes?.data ?? null;
-              if (plotData) setCache(singlePlotCacheKey, plotData);
+              try {
+                const singleRes = await axios.get(
+                  `https://events-cropeye.up.railway.app/plots/analyzeSinglePlot?plot_id=${encodePlotIdForEventsUrl(plotIdAtStart)}`,
+                );
+                plotData = singleRes?.data ?? null;
+                if (plotData) setCache(singlePlotCacheKey, plotData);
+              } catch (singleErr) {
+                if (isAnalyzeSinglePlotPlantationDateError(singleErr)) {
+                  if (selectedPlotIdRef.current === plotIdAtStart) {
+                    setPlotStatsError(PLANTATION_DATE_NOT_PROVIDED_MSG);
+                    setLoadingSections((prev) => ({
+                      ...prev,
+                      plotStats: false,
+                    }));
+                  }
+                  return;
+                }
+                throw singleErr;
+              }
             }
 
             // Fallback: use all-plots agroStats only if single-plot has no usable data.
@@ -909,23 +1504,36 @@ const OwnerFarmDash: React.FC = () => {
 
   // Fetch farmers from API - using authenticated endpoint
   const fetchOwnerHierarchy = async (): Promise<void> => {
-    const HIERARCHY_CACHE_KEY = "ownerTeamConnect_v3";
+    const HIERARCHY_CACHE_KEY = "ownerTeamConnect_v9";
     const HIERARCHY_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
     // Fast path: hydrate managers/field officers from cache immediately
     const cached = getCache(HIERARCHY_CACHE_KEY, HIERARCHY_TTL_MS);
     if (cached?.managers && Array.isArray(cached.managers)) {
-      const cachedManagers = cached.managers;
+      const cachedFarmers = Array.isArray(cached.farmers) ? cached.farmers : [];
+      const cachedFieldOfficers = enrichFieldOfficersWithFarmers(
+        enrichFieldOfficersWithManagerIds(
+          Array.isArray(cached.fieldOfficers) ? cached.fieldOfficers : [],
+          cached.managers,
+        ),
+        cachedFarmers,
+      );
+      const cachedManagers = normalizeManagersWithFoCounts(
+        cached.managers,
+        cachedFieldOfficers,
+      );
       const hasAnyFieldOfficer = cachedManagers.some(
         (m: any) => (m?.field_officers_count ?? 0) > 0,
       );
-      const looksIncomplete = cachedManagers.length <= 1 && !hasAnyFieldOfficer;
+      const looksIncomplete =
+        cachedManagers.length <= 1 &&
+        !hasAnyFieldOfficer &&
+        cachedFieldOfficers.length === 0;
 
       if (!looksIncomplete) {
         setManagers(cachedManagers);
-        setTeamFieldOfficersRaw(
-          Array.isArray(cached.fieldOfficers) ? cached.fieldOfficers : [],
-        );
+        setTeamFieldOfficersRaw(cachedFieldOfficers);
+        setTeamFarmersRaw(cachedFarmers);
         setLoadingHierarchy(false);
         return;
       }
@@ -945,6 +1553,7 @@ const OwnerFarmDash: React.FC = () => {
     try {
       let managersTmp: any[] = [];
       let fieldOfficersTmp: any[] = [];
+      let farmersTmp: any[] = [];
 
       // Prefer team-connect for lighter payload (if possible)
       const meRes = await getCurrentUser();
@@ -959,7 +1568,7 @@ const OwnerFarmDash: React.FC = () => {
         const teamRes = await getTeamConnect(industryId);
         const d = teamRes?.data;
 
-        // Format: { users_by_role: { managers: [], field_officers: [] } }
+        // Format: { users_by_role: { managers: [], field_officers: [], farmers: [] } }
         if (d?.users_by_role) {
           managersTmp = Array.isArray(d.users_by_role.managers)
             ? d.users_by_role.managers
@@ -967,23 +1576,45 @@ const OwnerFarmDash: React.FC = () => {
           fieldOfficersTmp = Array.isArray(d.users_by_role.field_officers)
             ? d.users_by_role.field_officers
             : [];
+          farmersTmp = Array.isArray(d.users_by_role.farmers)
+            ? d.users_by_role.farmers
+            : [];
         }
 
-        // Format: { managers: [], field_officers: [] }
+        // Format: { managers: [], field_officers: [], farmers: [] }
         if ((!managersTmp || managersTmp.length === 0) && Array.isArray(d?.managers)) {
           managersTmp = d.managers;
         }
         if ((!fieldOfficersTmp || fieldOfficersTmp.length === 0) && Array.isArray(d?.field_officers)) {
           fieldOfficersTmp = d.field_officers;
         }
+        if ((!farmersTmp || farmersTmp.length === 0) && Array.isArray(d?.farmers)) {
+          farmersTmp = d.farmers;
+        }
 
         // Format: { results: [...] } (role detection per item)
-        if ((!managersTmp || managersTmp.length === 0) && Array.isArray(d?.results)) {
+        if (Array.isArray(d?.results)) {
           d.results.forEach((u: any) => {
             const { roleId, roleName } = normalizeRole(u);
-            if (roleId === 3 || roleName.includes("manager")) managersTmp.push(u);
-            if (roleId === 2 || (roleName.includes("field") && roleName.includes("officer")))
+            if (
+              (!managersTmp || managersTmp.length === 0) &&
+              (roleId === 3 || roleName.includes("manager"))
+            ) {
+              managersTmp.push(u);
+            }
+            if (
+              (!fieldOfficersTmp || fieldOfficersTmp.length === 0) &&
+              (roleId === 2 ||
+                (roleName.includes("field") && roleName.includes("officer")))
+            ) {
               fieldOfficersTmp.push(u);
+            }
+            if (
+              (!farmersTmp || farmersTmp.length === 0) &&
+              (roleId === 1 || roleName.includes("farmer"))
+            ) {
+              farmersTmp.push(u);
+            }
           });
         }
       }
@@ -1035,32 +1666,19 @@ const OwnerFarmDash: React.FC = () => {
         }
       }
 
-      // Ensure each field officer has manager_id for filtering.
-      fieldOfficersTmp = (fieldOfficersTmp || []).map((fo: any) => ({
-        ...fo,
-        manager_id:
-          fo?.manager_id ??
-          fo?.manager?.id ??
-          fo?.managerId ??
-          fo?.manager_id_number ??
-          null,
-      }));
+      fieldOfficersTmp = enrichFieldOfficersWithManagerIds(
+        fieldOfficersTmp || [],
+        managersTmp || [],
+      );
+      fieldOfficersTmp = enrichFieldOfficersWithFarmers(
+        fieldOfficersTmp || [],
+        farmersTmp || [],
+      );
 
-      // Compute field_officers_count for each manager (used in the dropdown UI).
-      const managersNormalized = (managersTmp || []).map((m: any) => {
-        const mid = m?.id ?? m?.user_id ?? null;
-        const count = (fieldOfficersTmp || []).filter((fo: any) => {
-          const foMid = fo?.manager_id ?? fo?.manager?.id ?? fo?.managerId ?? null;
-          return mid != null && foMid != null && String(foMid) === String(mid);
-        }).length;
-        return {
-          ...m,
-          field_officers_count:
-            m?.field_officers_count ??
-            m?.fieldOfficersCount ??
-            count,
-        };
-      });
+      const managersNormalized = normalizeManagersWithFoCounts(
+        managersTmp || [],
+        fieldOfficersTmp,
+      );
 
       // If the team-connect parsing produced an incomplete tree (common issue:
       // only 1 manager with 0 field officers), force-fetch the heavier
@@ -1090,44 +1708,33 @@ const OwnerFarmDash: React.FC = () => {
                 ? responseData.results
                 : [];
 
-            const fallbackFieldOfficersTmp = (
-              fallbackManagersTmp || []
-            ).flatMap((m: any) =>
-              (Array.isArray(m?.field_officers) ? m.field_officers : []).map(
-                (fo: any) => ({
-                  ...fo,
-                  manager_id: fo?.manager_id ?? fo?.manager?.id ?? m?.id,
-                }),
+            const fallbackFieldOfficersTmp = enrichFieldOfficersWithFarmers(
+              enrichFieldOfficersWithManagerIds(
+                (fallbackManagersTmp || []).flatMap((m: any) =>
+                  (Array.isArray(m?.field_officers) ? m.field_officers : []).map(
+                    (fo: any) => ({
+                      ...fo,
+                      manager_id: fo?.manager_id ?? fo?.manager?.id ?? m?.id,
+                    }),
+                  ),
+                ),
+                fallbackManagersTmp || [],
               ),
+              farmersTmp || [],
             );
 
-            const fallbackManagersNormalized = (fallbackManagersTmp || []).map(
-              (m: any) => {
-                const mid = m?.id ?? m?.user_id ?? null;
-                const count = (fallbackFieldOfficersTmp || []).filter(
-                  (fo: any) => {
-                    const foMid =
-                      fo?.manager_id ?? fo?.manager?.id ?? fo?.managerId ?? null;
-                    return (
-                      mid != null &&
-                      foMid != null &&
-                      String(foMid) === String(mid)
-                    );
-                  },
-                ).length;
-                return {
-                  ...m,
-                  field_officers_count:
-                    m?.field_officers_count ?? count,
-                };
-              },
+            const fallbackManagersNormalized = normalizeManagersWithFoCounts(
+              fallbackManagersTmp || [],
+              fallbackFieldOfficersTmp,
             );
 
             setManagers(fallbackManagersNormalized);
             setTeamFieldOfficersRaw(fallbackFieldOfficersTmp);
+            setTeamFarmersRaw(farmersTmp || []);
             setCache(HIERARCHY_CACHE_KEY, {
               managers: fallbackManagersNormalized,
               fieldOfficers: fallbackFieldOfficersTmp,
+              farmers: farmersTmp || [],
             });
           } catch {
             // Keep whatever we already computed.
@@ -1149,9 +1756,11 @@ const OwnerFarmDash: React.FC = () => {
 
       setManagers(finalManagers);
       setTeamFieldOfficersRaw(finalFieldOfficers);
+      setTeamFarmersRaw(farmersTmp || []);
       setCache(HIERARCHY_CACHE_KEY, {
         managers: finalManagers,
         fieldOfficers: finalFieldOfficers,
+        farmers: farmersTmp || [],
       });
 
       // Manager-first loading: do not auto-select manager on first load.
@@ -1160,6 +1769,8 @@ const OwnerFarmDash: React.FC = () => {
       console.error("Owner hierarchy load failed:", error?.message || error);
       setManagers([]);
       setTeamFieldOfficersRaw([]);
+      setTeamFarmersRaw([]);
+      setFarmerPlotsCache({});
     } finally {
       setLoadingHierarchy(false);
     }
@@ -1186,8 +1797,7 @@ const OwnerFarmDash: React.FC = () => {
       if (cachedCoords && cachedCoords.length > 0) {
         setPlotCoordinates(cachedCoords);
         // Calculate center from coordinates
-        const center = calculateCenter(cachedCoords);
-        setMapCenter(center);
+        setMapCenter(calculateCenterFromCoords(cachedCoords));
         setMapKey((prev) => prev + 1);
         return;
       }
@@ -1203,26 +1813,11 @@ const OwnerFarmDash: React.FC = () => {
       if (geom) {
         const coords = geom.map(([lng, lat]: [number, number]) => [lat, lng]);
         setPlotCoordinates(coords);
-
-        // Cache the coordinates
         setPlotCoordinatesCache((prev) => new Map(prev.set(plotId, coords)));
-
-        // Calculate and set map center
-        const center = calculateCenter(coords);
-        setMapCenter(center);
+        setMapCenter(calculateCenterFromCoords(coords));
         setMapKey((prev) => prev + 1);
       }
     } catch (error) {}
-  };
-
-  // Calculate center point from coordinates
-  const calculateCenter = (coords: [number, number][]): [number, number] => {
-    if (coords.length === 0) return [17.5789, 75.053];
-
-    const sumLat = coords.reduce((sum, [lat]) => sum + lat, 0);
-    const sumLng = coords.reduce((sum, [, lng]) => sum + lng, 0);
-
-    return [sumLat / coords.length, sumLng / coords.length];
   };
 
   // Aggregation logic (same as FarmerDashboard)
@@ -1664,7 +2259,7 @@ const OwnerFarmDash: React.FC = () => {
               <pre className="text-xs text-green-300 font-mono">
                 {JSON.stringify(
                   {
-                    endpoint: `${import.meta.env.VITE_API_BASE_URL || "https://cropeye-backendd.up.railway.app/api"}/farms/recent-farmers/`,
+                    endpoint: `${import.meta.env.VITE_API_BASE_URL || "https://cropeye-backendd.up.railway.app/api"}/farms/?farmer_id={id}`,
                     method: "GET",
                     bearerToken: localStorage.getItem("token")
                       ? "✅ Present"
@@ -1760,7 +2355,10 @@ const OwnerFarmDash: React.FC = () => {
                             value={officer.id}
                           >
                             {officer.first_name} {officer.last_name} (
-                            {officer.farmers?.length || 0} farmers)
+                            {officer.farmers_count ??
+                              officer.farmers?.length ??
+                              0}{" "}
+                            farmers)
                           </option>
                         ))}
                       </>
@@ -1777,32 +2375,48 @@ const OwnerFarmDash: React.FC = () => {
                     className="px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200 bg-white shadow-sm w-full sm:w-64"
                     value={selectedFarmerId}
                     onChange={(e) => {
-                      setSelectedFarmerId(e.target.value);
+                      const nextFarmerId = e.target.value;
+                      lastFetchedFarmerIdRef.current = "";
+                      dashboardLoadedForPlotRef.current = "";
+                      setPlots([]);
+                      setSelectedPlotId("");
+                      setPlotCoordinates([]);
+                      setSelectedFarmerId(nextFarmerId);
                     }}
                     disabled={
                       !selectedFieldOfficerId ||
+                      loadingFarmersForOfficer ||
                       farmersForSelectedOfficer.length === 0
                     }
                   >
                     {!selectedFieldOfficerId ? (
                       <option>Select an officer first</option>
-                    ) : loadingHierarchy ? (
+                    ) : loadingHierarchy || loadingFarmersForOfficer ? (
                       <option>Loading farmers...</option>
                     ) : farmersForSelectedOfficer.length === 0 ? (
                       <option>No farmers found</option>
                     ) : (
                       <>
                         <option value="">Select a farmer</option>
-                        {farmersForSelectedOfficer.map((farmer, index) => {
-                          const farmerId = String(farmer.id);
+                        {farmersForSelectedOfficer.map((farmer) => {
+                          const farmerId = getFarmerId(farmer) ?? "";
                           const farmerName =
-                            `${farmer.first_name} ${farmer.last_name}`.trim();
-                          const plotsCount = farmer.plots?.length || 0;
+                            `${farmer.first_name ?? ""} ${farmer.last_name ?? ""}`.trim() ||
+                            farmer.name ||
+                            farmer.username ||
+                            `Farmer ${farmerId}`;
+                          const plotsCount =
+                            String(farmerId) === String(selectedFarmerId)
+                              ? plots.length
+                              : (farmerPlotsCache[farmerId]?.length ?? 0);
+                          const label =
+                            plotsCount > 0
+                              ? `${farmerName} (${plotsCount} plot${plotsCount !== 1 ? "s" : ""})`
+                              : farmerName;
 
                           return (
                             <option key={`farmer-${farmerId}`} value={farmerId}>
-                              {farmerName} ({plotsCount} plot
-                              {plotsCount !== 1 ? "s" : ""})
+                              {label}
                             </option>
                           );
                         })}
@@ -1823,14 +2437,20 @@ const OwnerFarmDash: React.FC = () => {
                       const newPlotId = e.target.value;
                       setSelectedPlotId(newPlotId);
                       if (newPlotId) {
-                        // Immediately fetch coordinates and update map
-                        fetchPlotCoordinates(newPlotId);
+                        const plot = findPlotInSelection(newPlotId);
+                        if (!plot || !applyCoordinatesFromPlot(plot)) {
+                          void fetchPlotCoordinates(newPlotId);
+                        }
                       }
                     }}
-                    disabled={!selectedFarmerId || plots.length === 0}
+                    disabled={
+                      !selectedFarmerId || loadingFarmerPlots || plots.length === 0
+                    }
                   >
                     {!selectedFarmerId ? (
                       <option value="">Select farmer first</option>
+                    ) : loadingFarmerPlots ? (
+                      <option value="">Loading plots...</option>
                     ) : plots.length === 0 ? (
                       <option value="">No plots available</option>
                     ) : (
@@ -1842,7 +2462,7 @@ const OwnerFarmDash: React.FC = () => {
                               key={`plot-${plotId}-${index}`}
                               value={plotId}
                             >
-                              Plot: {plotId}
+                              {plotId}
                             </option>
                           );
                         })}
@@ -1863,6 +2483,12 @@ const OwnerFarmDash: React.FC = () => {
       </div>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-4">
+        {plotStatsError && (
+          <div className="flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>{plotStatsError}</span>
+          </div>
+        )}
         {/* Top Priority Metrics - 4 Key Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-green-200 hover:shadow-xl transition-all duration-300">

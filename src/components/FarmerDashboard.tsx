@@ -32,7 +32,7 @@ import {
 } from "lucide-react";
 import Chatbot from "./Chatbot";
 import axios from "axios";
-import { eventsApi } from "../api";
+import { eventsApi, getSinglePlotAgroStats } from "../api";
 import { getCache, setCache } from "../utils/cache";
 import { useFarmerProfile } from "../hooks/useFarmerProfile";
 import { useAppContext } from "../context/AppContext";
@@ -538,10 +538,7 @@ const FarmerDashboard: React.FC = () => {
 
       if (!currentPlotData) {
         try {
-          const singlePlotRes = await eventsApi.get(
-            `https://events-cropeye.up.railway.app/plots/analyzeSinglePlot?plot_id=${currentPlotId}`,
-          );
-          currentPlotData = singlePlotRes.data;
+          currentPlotData = await getSinglePlotAgroStats(currentPlotId);
           setCache(singlePlotCacheKey, currentPlotData);
         } catch (singleErr) {
           console.error(
@@ -981,7 +978,9 @@ const FarmerDashboard: React.FC = () => {
               <select
                 value={selectedPlotName || ""}
                 onChange={(e) => {
-                  setSelectedPlotName(e.target.value);
+                  const nextPlot = e.target.value;
+                  setSelectedPlotName(nextPlot);
+                  setCurrentPlotId(nextPlot);
                 }}
                 className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               >

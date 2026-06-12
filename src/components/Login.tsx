@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 import { Satellite, Leaf, Mail, Lock, Eye, EyeOff } from 'lucide-react';
 import { setAuthData, setRefreshToken } from '../utils/auth';
-import { getFarmerMyProfile, login, loginFarmerPlot, loginFastApi, setAuthToken as setApiAuthToken, setFastApiAuthToken } from '../api';
+import { login, setAuthToken as setApiAuthToken } from '../api';
 
 export type UserRole = "manager" | "admin" | "fieldofficer" | "farmer" | "owner";
 
@@ -260,32 +260,6 @@ const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
 
       setAuthData(token, userRole, userDataToStore, refreshToken);
       setApiAuthToken(token);
-
-      // After login: obtain FastAPI access_token (required for microservices).
-      // - Farmer: use plot's fastapi_plot_id as username/password
-      // - Other roles: use admin/admin1234
-      try {
-        if (userRole === "farmer") {
-          const profRes = await getFarmerMyProfile();
-          const plots = (profRes as any)?.data?.plots;
-          const fastapiPlotId =
-            Array.isArray(plots) && plots.length > 0
-              ? (plots[0]?.fastapi_plot_id || plots[0]?.farm_uid || plots[0]?.plot_id || "")
-              : "";
-
-          const plotLoginId = String(fastapiPlotId || identifier).trim();
-          const fastapiRes = await loginFarmerPlot(plotLoginId);
-          const fastToken = (fastapiRes.data as any)?.access_token;
-          if (fastToken) setFastApiAuthToken(fastToken);
-        } else {
-          const fastapiRes = await loginFastApi("admin", "admin123");
-          const fastToken = (fastapiRes.data as any)?.access_token;
-          if (fastToken) setFastApiAuthToken(fastToken);
-        }
-      } catch (err) {
-        // If FastAPI token fetch fails, continue with the existing token
-        console.error("FastAPI login failed:", err);
-      }
 
       onLoginSuccess(userRole, token);
 

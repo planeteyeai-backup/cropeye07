@@ -11,6 +11,10 @@ import {
   type UserRole,
   type ChatLocaleCode,
 } from "../services/ruleBasedChatbot";
+import {
+  getChatbotUiMessage,
+  localizeChatbotServerError,
+} from "../services/chatbotUiMessages";
 import { useAppContext } from "../context/AppContext";
 import { getUserRole, getUserData } from "../utils/auth";
 
@@ -120,6 +124,47 @@ interface ChatbotProps {
   userRole?: UserRole;
 }
 
+function chatLocaleToMessageLanguage(locale: ChatLocaleCode | null): Language {
+  switch (locale) {
+    case "hi":
+      return "hindi";
+    case "en":
+      return "english";
+    case "kn":
+      return "kannada";
+    default:
+      return "marathi";
+  }
+}
+
+/** Confirm Redis farm context exists before enabling farmer chat. */
+async function verifyFarmerPlotReady(
+  plotId: string,
+  signal?: AbortSignal,
+): Promise<{ ok: true } | { ok: false; reason: "farm_context" | "processing" | "failed" }> {
+  const res = await fetch(`${CHATBOT_API_URL}/chat/farmer`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: ".", plot_id: plotId, language: "en" }),
+    signal,
+  });
+  if (!res.ok) return { ok: false, reason: "failed" };
+  let data: Record<string, unknown>;
+  try {
+    data = (await res.json()) as Record<string, unknown>;
+  } catch {
+    return { ok: false, reason: "failed" };
+  }
+  const err = data.error ? String(data.error) : "";
+  if (err && /farm context|initialize-plot|not initialized/i.test(err)) {
+    return { ok: false, reason: "farm_context" };
+  }
+  const status = data.status ? String(data.status) : "";
+  if (status === "failed") return { ok: false, reason: "failed" };
+  if (status && status !== "ready") return { ok: false, reason: "processing" };
+  return { ok: true };
+}
+
 // ── Component ──────────────────────────────────────────────────────────────────
 const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
   const { selectedPlotName } = useAppContext();
@@ -137,7 +182,8 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
   // API-specific state
   const [isInitialized, setIsInitialized]   = useState(false);
   const [isInitializing, setIsInitializing] = useState(false);
-  const [initError, setInitError]           = useState<string | null>(null);
+  /** Raw init error from API (display via localizeChatbotServerError + chatLanguage). */
+  const [initErrorRaw, setInitErrorRaw]     = useState<string | null>(null);
   /** Farmer only: true only after `/initialize-plot` succeeds for the current plot (backend requires this before /chat and /voicebot). */
   const [farmerBackendReady, setFarmerBackendReady] = useState(false);
   const [chatLanguage, setChatLanguage]     = useState<ChatLanguage | null>(null);
@@ -244,10 +290,34 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
     }
 
     if (plotId && initializedPlotRef.current === plotId) {
-      // Same plot already initialized successfully — skip API call
       setIsInitialized(true);
       setFarmerBackendReady(true);
-      return;
+      const ac = new AbortController();
+      plotInitAbortRef.current = ac;
+      verifyFarmerPlotReady(plotId, ac.signal)
+        .then((v) => {
+          if (ac.signal.aborted) return;
+          if (!v.ok) {
+            initializedPlotRef.current = null;
+            setFarmerBackendReady(false);
+            setInitErrorRaw(
+              v.reason === "farm_context"
+                ? "Farm context not initialized. Please run /initialize-plot first."
+                : "init_failed",
+            );
+            void initializePlot();
+          }
+        })
+        .catch(() => {
+          if (!ac.signal.aborted) {
+            initializedPlotRef.current = null;
+            setFarmerBackendReady(false);
+            initializePlot();
+          }
+        });
+      return () => {
+        ac.abort();
+      };
     }
 
     if (!plotId && initializedPlotRef.current === "__no_plot__") {
@@ -272,7 +342,7 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
       setChatLanguage(null);
       // Do NOT reset isInitialized — the ref already tracks which plot is
       // initialized so the next open will skip the API call for the same plot
-      setInitError(null);
+      setInitErrorRaw(null);
     }
   }, [isOpen]);
 
@@ -296,7 +366,7 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
       plotInitSeqRef.current += 1;
       initializedPlotRef.current = "__no_plot__";
       setFarmerBackendReady(false);
-      setInitError(null);
+      setInitErrorRaw(null);
       setIsInitialized(true);
       setIsInitializing(false);
       return;
@@ -310,7 +380,7 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
 
     setFarmerBackendReady(false);
     setIsInitializing(true);
-    setInitError(null);
+    setInitErrorRaw(null);
 
     const runOnce = async (): Promise<void> => {
       const res = await fetch(`${CHATBOT_API_URL}/initialize-plot`, {
@@ -321,7 +391,9 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
       });
       if (!res.ok) throw new Error(`Server error: ${res.status}`);
       const data = await res.json();
-      if (data.error) throw new Error(String(data.error));
+      if (data.error || data.ok === false) {
+        throw new Error(String(data.error || data.message || "Initialization failed"));
+      }
     };
 
     try {
@@ -344,15 +416,28 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
       }
 
       if (seq !== plotInitSeqRef.current) return;
+
+      const verify = await verifyFarmerPlotReady(pid, ac.signal);
+      if (seq !== plotInitSeqRef.current || ac.signal.aborted) return;
+      if (!verify.ok) {
+        throw new Error(
+          verify.reason === "farm_context"
+            ? "Farm context not initialized. Please run /initialize-plot first."
+            : "Initialization failed. Please try again.",
+        );
+      }
+
       initializedPlotRef.current = pid;
       setFarmerBackendReady(true);
       setIsInitialized(true);
+      setInitErrorRaw(null);
     } catch (err: any) {
       if (err?.name === "AbortError") return;
       if (seq !== plotInitSeqRef.current) return;
       console.error("[Chatbot] Init failed:", err);
-      setInitError(err.message || "Initialization failed. Please try again.");
+      setInitErrorRaw(err.message || "Initialization failed. Please try again.");
       setFarmerBackendReady(false);
+      initializedPlotRef.current = null;
       setIsInitialized(true);
     } finally {
       if (seq === plotInitSeqRef.current) {
@@ -395,7 +480,9 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
           ? { exact: "en-IN" as const, prefix: "en-", fallback: "en-US" as const }
           : chatLanguage === "hi"
             ? { exact: "hi-IN" as const, prefix: "hi-", fallback: "hi-IN" as const }
-            : { exact: "mr-IN" as const, prefix: "mr-", fallback: "mr-IN" as const };
+            : chatLanguage === "kn"
+              ? { exact: "kn-IN" as const, prefix: "kn-", fallback: "kn-IN" as const }
+              : { exact: "mr-IN" as const, prefix: "mr-", fallback: "mr-IN" as const };
 
       const voice =
         voices.find((v) => v.lang === langPref.exact) ||
@@ -522,25 +609,19 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
   const sendTextMessageWithText = async (message: string) => {
     if (!message.trim() || isLoading) return;
     if (chatLanguage == null) {
-      addMessage("Please select a chat language from the menu above first.", false, "english");
+      addMessage(getChatbotUiMessage(null, "selectLanguageFirst"), false, "english");
       return;
     }
 
+    const uiLang = chatLocaleToMessageLanguage(chatLanguage);
+
     if (isFarmerRole) {
       if (!plotId) {
-        addMessage(
-          "Please select a farm plot from the dashboard first. The assistant needs your plot to load farm data.",
-          false,
-          "english",
-        );
+        addMessage(getChatbotUiMessage(chatLanguage, "selectPlotFirst"), false, uiLang);
         return;
       }
       if (!farmerBackendReady) {
-        addMessage(
-          "Farm context is not ready. Wait for the plot to finish loading, or tap Retry in the bar above.",
-          false,
-          "english",
-        );
+        addMessage(getChatbotUiMessage(chatLanguage, "farmContextNotReady"), false, uiLang);
         return;
       }
     }
@@ -596,12 +677,13 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
           ) {
             setFarmerBackendReady(false);
             initializedPlotRef.current = null;
-            setInitError(errStr);
+            setInitErrorRaw(errStr);
             addMessage(
-              "Farm context was lost or not loaded. Tap Retry above to run plot setup again, then send your message.",
+              getChatbotUiMessage(chatLanguage, "farmContextLost"),
               false,
-              "english",
+              chatLocaleToMessageLanguage(chatLanguage),
             );
+            void initializePlot();
             return;
           }
           throw new Error(errStr);
@@ -611,9 +693,9 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
         if (isFarmerRole && data.status && data.status !== "ready") {
           const waitMsg =
             typeof data.message === "string" && data.message.trim()
-              ? data.message.trim()
-              : "Plot data still loading. Please wait a moment...";
-          addMessage(waitMsg, false, "english");
+              ? localizeChatbotServerError(data.message.trim(), chatLanguage)
+              : getChatbotUiMessage(chatLanguage, "plotStillLoading");
+          addMessage(waitMsg, false, chatLocaleToMessageLanguage(chatLanguage));
           return;
         }
 
@@ -653,25 +735,19 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
   const sendVoiceMessageWithText = async (message: string) => {
     if (!message.trim() || isLoading) return;
     if (chatLanguage == null) {
-      addMessage("Please select a chat language from the menu above first.", false, "english");
+      addMessage(getChatbotUiMessage(null, "selectLanguageFirst"), false, "english");
       return;
     }
 
+    const uiLang = chatLocaleToMessageLanguage(chatLanguage);
+
     if (isFarmerRole) {
       if (!plotId) {
-        addMessage(
-          "Please select a farm plot from the dashboard first. The assistant needs your plot to load farm data.",
-          false,
-          "english",
-        );
+        addMessage(getChatbotUiMessage(chatLanguage, "selectPlotFirst"), false, uiLang);
         return;
       }
       if (!farmerBackendReady) {
-        addMessage(
-          "Farm context is not ready. Wait for the plot to finish loading, or tap Retry in the bar above.",
-          false,
-          "english",
-        );
+        addMessage(getChatbotUiMessage(chatLanguage, "farmContextNotReady"), false, uiLang);
         return;
       }
     }
@@ -714,12 +790,13 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
         ) {
           setFarmerBackendReady(false);
           initializedPlotRef.current = null;
-          setInitError(errStr);
+          setInitErrorRaw(errStr);
           addMessage(
-            "Farm context was lost or not loaded. Tap Retry above to run plot setup again.",
+            getChatbotUiMessage(chatLanguage, "farmContextLost"),
             false,
-            "english",
+            chatLocaleToMessageLanguage(chatLanguage),
           );
+          void initializePlot();
           return;
         }
         throw new Error(errStr);
@@ -727,9 +804,11 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
 
       if (isFarmerRole && data.status && data.status !== "ready") {
         addMessage(
-          String(data.message || "Plot data still loading. Please wait a moment..."),
+          typeof data.message === "string" && String(data.message).trim()
+            ? localizeChatbotServerError(String(data.message), chatLanguage)
+            : getChatbotUiMessage(chatLanguage, "plotStillLoading"),
           false,
-          "english",
+          chatLocaleToMessageLanguage(chatLanguage),
         );
         return;
       }
@@ -1013,7 +1092,7 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
                       : isFarmerRole
                         ? farmerBackendReady
                           ? "bg-green-300"
-                          : initError
+                          : initErrorRaw
                             ? "bg-orange-300"
                             : "bg-yellow-300"
                         : isInitialized
@@ -1027,7 +1106,7 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
                   : isFarmerRole
                     ? farmerBackendReady
                       ? "Ready"
-                      : initError
+                      : initErrorRaw
                         ? "Setup failed — Retry"
                         : "Syncing plot…"
                     : isInitialized
@@ -1038,9 +1117,11 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
           </div>
 
           {/* ── Init error banner ── */}
-          {initError && (
+          {initErrorRaw && (
             <div className="bg-amber-50 border-b border-amber-200 px-3 py-2 flex items-center justify-between">
-              <p className="text-xs text-amber-700">{initError}</p>
+              <p className="text-xs text-amber-700">
+                {localizeChatbotServerError(initErrorRaw, chatLanguage)}
+              </p>
               <button
                 onClick={initializePlot}
                 className="ml-2 text-xs text-amber-600 hover:text-amber-800 flex items-center gap-1"
@@ -1053,8 +1134,12 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
           {isFarmerRole && !isInitialized && isInitializing && (
             <div className="flex-1 flex flex-col items-center justify-center p-6 text-center">
               <Loader2 className="w-10 h-10 text-green-500 animate-spin mb-3" />
-              <p className="text-sm text-gray-600">Loading your plot data...</p>
-              <p className="text-xs text-gray-400 mt-1">Plot: {plotId}</p>
+              <p className="text-sm text-gray-600">
+                {getChatbotUiMessage(chatLanguage, "loadingPlot")}
+              </p>
+              <p className="text-xs text-gray-400 mt-1">
+                {getChatbotUiMessage(chatLanguage, "loadingPlotSub")}: {plotId}
+              </p>
             </div>
           )}
 
