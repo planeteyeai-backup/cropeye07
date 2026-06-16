@@ -1740,8 +1740,12 @@ export const patchFarmMyProfile = (data: {
   spacing_b?: string;
   row_spacing?: string;
   plant_spacing?: string;
+  irrigation_type?: string;
   flow_rate_liter_per_hour?: string;
   emitters_per_plant?: number;
+  motor_horsepower?: number;
+  pipe_width_inches?: number;
+  distance_motor_to_plot_m?: number;
   sugarcane_type?: string;
   sugarcane_yield?: string | null;
   plants_in_field?: number;
