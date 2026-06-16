@@ -1,4 +1,4 @@
-import api from "../api";
+import { getMyFieldOfficers, getManagerFieldOfficersAgroStats } from "../api";
 import React, { useState, useRef, useEffect, useMemo } from "react";
 import axios from "axios";
 import { getCache, setCache } from "../utils/cache";
@@ -40,7 +40,6 @@ import {
 import "leaflet/dist/leaflet.css";
 import { useMap } from "react-leaflet";
 
-const API_BASE_URL = `${import.meta.env.VITE_API_BASE_URL || "https://cropeye-backendd.up.railway.app/api"}/users/my-field-officers/`;
 const BASE_URL = "https://events-cropeye.up.railway.app";
 
 // Chart Types
@@ -507,7 +506,7 @@ const HarvestDashboard: React.FC = () => {
     async function fetchData() {
       setLoading(true);
       try {
-        const response = await api.get(API_BASE_URL);
+        const response = await getMyFieldOfficers();
 
         if (response.data && response.data.field_officers) {
           const apiData = response.data;
@@ -637,20 +636,20 @@ const HarvestDashboard: React.FC = () => {
           );
 
           // Fetch yield data and harvest status for all plots from API
-          const today = new Date().toISOString().slice(0, 10);
+          const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
+          const today = new Date(Date.now() - tzOffsetMs)
+            .toISOString()
+            .slice(0, 10);
           const harvestStatusMap = new Map<string, string>();
           const yieldDataMap = new Map<string, number>();
 
-          // Fetch yield data from agroStats API
-          const agroStatsCacheKey = `agroStats_${today}`;
+          // Fetch yield data from field-officer agroStats (parallel per officer)
+          const agroStatsCacheKey = `managerAgroStats_${today}`;
           let allPlotsYieldData = getCache(agroStatsCacheKey);
 
           if (!allPlotsYieldData) {
             try {
-              const agroStatsRes = await axios.get(
-                `https://events-cropeye.up.railway.app/plots/agroStats?end_date=${today}`,
-              );
-              allPlotsYieldData = agroStatsRes.data;
+              allPlotsYieldData = await getManagerFieldOfficersAgroStats(today);
               setCache(agroStatsCacheKey, allPlotsYieldData);
             } catch (err) {
               allPlotsYieldData = null;

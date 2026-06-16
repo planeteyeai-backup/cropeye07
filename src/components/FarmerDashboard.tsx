@@ -249,7 +249,7 @@ const FarmerDashboard: React.FC = () => {
   const [combinedChartData, setCombinedChartData] = useState<LineChartData[]>(
     []
   );
-  const [timePeriod, setTimePeriod] = useState<TimePeriod>("weekly");
+  const [timePeriod, setTimePeriod] = useState<TimePeriod>("yearly");
   const [aggregatedData, setAggregatedData] = useState<LineChartData[]>([]);
   const [isChatbotOpen, setIsChatbotOpen] = useState(false);
 

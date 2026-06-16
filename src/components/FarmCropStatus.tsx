@@ -214,7 +214,7 @@ const OfficerDashboard: React.FC = () => {
   const [combinedChartData, setCombinedChartData] = useState<LineChartData[]>(
     [],
   );
-  const [timePeriod, setTimePeriod] = useState<TimePeriod>("weekly");
+  const [timePeriod, setTimePeriod] = useState<TimePeriod>("yearly");
   const [aggregatedData, setAggregatedData] = useState<LineChartData[]>([]);
   const [mapKey, setMapKey] = useState<number>(0);
   const [mapCenter, setMapCenter] = useState<[number, number]>([
@@ -271,7 +271,7 @@ const OfficerDashboard: React.FC = () => {
           String(f.id || f.farmer_id || f.farmerId) ===
           String(selectedFarmerId),
       );
-
+      
       if (selectedFarmer) {
         // Extract fastapi_plot_id from plots array
         const farmerPlots = selectedFarmer.plots || [];

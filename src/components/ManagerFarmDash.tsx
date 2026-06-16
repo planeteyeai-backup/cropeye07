@@ -221,7 +221,7 @@ const ManagerFarmDash: React.FC = () => {
   const [combinedChartData, setCombinedChartData] = useState<LineChartData[]>(
     [],
   );
-  const [timePeriod, setTimePeriod] = useState<TimePeriod>("weekly");
+  const [timePeriod, setTimePeriod] = useState<TimePeriod>("yearly");
   const [aggregatedData, setAggregatedData] = useState<LineChartData[]>([]);
   const [mapKey, setMapKey] = useState<number>(0);
   const [mapCenter, setMapCenter] = useState<[number, number]>([

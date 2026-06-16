@@ -1534,6 +1534,52 @@ export const getFieldOfficerAgroStats = async (
   return response.data;
 };
 
+/** Field officers assigned to the current manager (or owner). */
+export const getMyFieldOfficers = () => {
+  return api.get("/users/my-field-officers/");
+};
+
+/** Merge plot dictionaries from multiple field-officer agroStats responses. */
+export function mergeAgroStatsPlotData(
+  ...sources: Array<Record<string, unknown> | null | undefined>
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = {};
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue;
+    Object.assign(merged, source);
+  }
+  return merged;
+}
+
+/**
+ * Manager dashboard: fetch agroStats for every field officer under this manager in parallel.
+ */
+export const getManagerFieldOfficersAgroStats = async (
+  endDate?: string,
+): Promise<Record<string, unknown>> => {
+  const response = await getMyFieldOfficers();
+  const officers: Array<{ id: number }> =
+    response.data?.field_officers ?? [];
+
+  if (officers.length === 0) {
+    return {};
+  }
+
+  const results = await Promise.all(
+    officers.map((officer) =>
+      getFieldOfficerAgroStats(officer.id, endDate).catch((err) => {
+        console.error(
+          `Error fetching agroStats for field officer ${officer.id}:`,
+          err,
+        );
+        return null;
+      }),
+    ),
+  );
+
+  return mergeAgroStatsPlotData(...results);
+};
+
 // Debug function to validate data format before sending
 export const validateAllInOnePayload = (payload: any) => {
   const errors: string[] = [];

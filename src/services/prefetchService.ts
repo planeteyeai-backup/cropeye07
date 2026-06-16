@@ -4,6 +4,7 @@ import {
   getFarmsWithFarmerDetails,
   getTasks,
   getFieldOfficerAgroStats,
+  getManagerFieldOfficersAgroStats,
 } from '../api';
 import { getFastApiToken } from '../utils/auth';
 import { getCache } from '../components/utils/cache';
@@ -134,6 +135,23 @@ export const prefetchAllData = async (
           return null;
         });
         commonPromises.push(agroPromise);
+      }
+
+      // 2c. For manager: prefetch agroStats for all field officers in parallel
+      if (role === 'manager') {
+        const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
+        const endDate = new Date(Date.now() - tzOffsetMs).toISOString().slice(0, 10);
+        const managerAgroPromise = getManagerFieldOfficersAgroStats(endDate)
+          .then((data) => {
+            setCached(`managerAgroStats_${endDate}`, data);
+            fetchedEndpoints.push('managerAgroStats');
+            return data;
+          })
+          .catch((err) => {
+            errors.push(`ManagerAgroStats: ${err.message}`);
+            return null;
+          });
+        commonPromises.push(managerAgroPromise);
       }
 
       await Promise.allSettled(commonPromises);

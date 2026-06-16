@@ -693,7 +693,7 @@ const OwnerFarmDash: React.FC = () => {
   const [combinedChartData, setCombinedChartData] = useState<LineChartData[]>(
     [],
   );
-  const [timePeriod, setTimePeriod] = useState<TimePeriod>("weekly");
+  const [timePeriod, setTimePeriod] = useState<TimePeriod>("yearly");
   const [aggregatedData, setAggregatedData] = useState<LineChartData[]>([]);
 
   // Mobile layout flag for charts

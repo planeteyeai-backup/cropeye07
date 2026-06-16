@@ -11,6 +11,7 @@ import {
   PieChart,
   Activity,
   Maximize2,
+  Loader2,
 } from "lucide-react";
 import GaugeChart from "./components/GaugeChart";
 import WeatherChart from "./components/WeatherChart";
@@ -36,6 +37,9 @@ import {
   ResponsiveContainer,
   Tooltip as RechartsTooltip,
 } from "recharts";
+import { getUserRole } from "../../utils/auth";
+import { getCache, setCache } from "../utils/cache";
+import { getManagerFieldOfficersAgroStats } from "../../api";
 
 // Type definitions
 interface BiomassRange {
@@ -185,6 +189,20 @@ const processApiData = (apiData: Record<string, ApiPlotData>): PlotPoint[] => {
   return plots;
 };
 
+const SkeletonBlock: React.FC<{ className?: string }> = ({ className }) => (
+  <div
+    className={`animate-pulse rounded-xl bg-gray-200/80 ${className || ""}`}
+    aria-hidden
+  />
+);
+
+const SectionLoader: React.FC<{ label?: string }> = ({ label = "Loading…" }) => (
+  <div className="flex flex-col items-center justify-center gap-2 py-6">
+    <Loader2 className="w-6 h-6 animate-spin text-blue-500" />
+    <span className="text-xs text-gray-500">{label}</span>
+  </div>
+);
+
 const AgroDashboard: React.FC = () => {
   const biomassRanges: BiomassRange[] = [
     { range: "Very Low", color: "bg-red-400" },
@@ -228,21 +246,54 @@ const AgroDashboard: React.FC = () => {
   // Fetch API data
   useEffect(() => {
     const fetchData = async () => {
-      try {
+      const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
+      const today = new Date(Date.now() - tzOffsetMs)
+        .toISOString()
+        .slice(0, 10);
+      const role = getUserRole();
+
+      const cacheKey =
+        role === "manager" ? `managerAgroStats_${today}` : `agroStats_${today}`;
+      const cached = getCache(cacheKey) as
+        | Record<string, ApiPlotData>
+        | null
+        | undefined;
+
+      if (!cached) {
         setLoading(true);
-        const today = new Date().toISOString().slice(0, 10);
-        const url = `https://events-cropeye.up.railway.app/plots/agroStats?end_date=${today}`;
-        const response = await fetch(url);
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      try {
+        let data: Record<string, ApiPlotData>;
+
+        if (role === "manager") {
+          if (cached) {
+            data = cached;
+          } else {
+            data = (await getManagerFieldOfficersAgroStats(
+              today,
+            )) as Record<string, ApiPlotData>;
+            setCache(cacheKey, data);
+          }
+        } else {
+          if (cached) {
+            data = cached;
+          } else {
+            const url = `https://events-cropeye.up.railway.app/plots/agroStats?end_date=${today}`;
+            const response = await fetch(url);
+            if (!response.ok) {
+              throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            data = await response.json();
+            setCache(cacheKey, data);
+          }
         }
-        const data = await response.json();
-        setApiData(data);
+
+        setApiData(data ?? {});
         setError(null);
       } catch (err) {
         console.error("Error fetching data:", err);
         setError(err instanceof Error ? err.message : "Failed to fetch data");
-        // Fallback to dummy data if API fails
         setApiData({});
       } finally {
         setLoading(false);
@@ -426,6 +477,8 @@ const AgroDashboard: React.FC = () => {
     }));
   };
 
+  const dataReady = !loading && allPlots.length > 0;
+
   // MapAutoCenter component
   function MapAutoCenter({ center }: MapAutoCenterProps) {
     const map = useMap();
@@ -441,6 +494,12 @@ const AgroDashboard: React.FC = () => {
     <div className="min-h-screen bg-gray-50 p-2 sm:p-4">
       {/* Dropdown Filters - Full width to match sidebar + main content */}
       <div className="max-w-7xl mx-auto mb-6">
+        {loading && (
+          <div className="mb-3 flex items-center justify-end gap-2 text-sm text-gray-600">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            Loading dashboard data…
+          </div>
+        )}
         <div className="">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 lg:gap-6">
             <div className="flex flex-col bg-white p-2 rounded-lg border border-gray-200 shadow-md">
@@ -550,50 +609,79 @@ const AgroDashboard: React.FC = () => {
         </div>
       )}
 
-      {!error && allPlots.length > 0 && (
+      {!error && (
         <div className="max-w-7xl mx-auto flex flex-col lg:flex-row gap-4 sm:gap-6">
           {/* Left Sidebar */}
           <div className="w-full lg:w-1/3 flex flex-col gap-3">
             {/* Gauge Charts */}
             <div className="space-y-4">
               <div ref={gaugeRef}>
-                <GaugeChart
-                  value={totalPlots}
-                  maxValue={allPlots.length}
-                  label="Total Field"
-                  color="#3b82f6"
-                />
-                <div className="relative">
-                  <GaugeChart
-                    value={totalArea}
-                    maxValue={areaGaugeMaxValue.toFixed(2)}
-                    label="Total Area (acre)"
-                    color="#10b981"
-                  />
-                  {/* Filter indicator */}
-                  {Object.values(filters).some((filter) => filter !== "All")}
-                </div>
+                {loading ? (
+                  <>
+                    <div className="flex flex-col items-center p-3 bg-white rounded-lg shadow-sm mb-2 border border-gray-100">
+                      <SkeletonBlock className="h-4 w-24 mb-4" />
+                      <SkeletonBlock className="h-32 w-44 rounded-full mb-2" />
+                      <SkeletonBlock className="h-4 w-32" />
+                    </div>
+                    <div className="flex flex-col items-center p-3 bg-white rounded-lg shadow-sm mb-2 border border-gray-100">
+                      <SkeletonBlock className="h-4 w-28 mb-4" />
+                      <SkeletonBlock className="h-32 w-44 rounded-full mb-2" />
+                      <SkeletonBlock className="h-4 w-32" />
+                    </div>
+                  </>
+                ) : dataReady ? (
+                  <>
+                    <GaugeChart
+                      value={totalPlots}
+                      maxValue={allPlots.length}
+                      label="Total Field"
+                      color="#3b82f6"
+                    />
+                    <div className="relative">
+                      <GaugeChart
+                        value={totalArea}
+                        maxValue={areaGaugeMaxValue.toFixed(2)}
+                        label="Total Area (acre)"
+                        color="#10b981"
+                      />
+                      {Object.values(filters).some((filter) => filter !== "All")}
+                    </div>
+                  </>
+                ) : (
+                  <div className="bg-white rounded-lg shadow-sm border border-gray-100 p-4">
+                    <SectionLoader label="No field data" />
+                  </div>
+                )}
               </div>
             </div>
 
             {/* Field Distribution Chart */}
-            <div>
-              <FieldDistributionChart
-                plots={filteredPlots.map((plot) => ({
-                  id: plot.id,
-                  plotNo: plot.plotNo,
-                  area: plot.area,
-                  status: plot.status,
-                }))}
-                allPlots={allPlots.map((plot) => ({
-                  id: plot.id,
-                  plotNo: plot.plotNo,
-                  area: plot.area,
-                  status: plot.status,
-                }))}
-                onPlotClick={handlePlotClick}
-                selectedPlotId={selectedPlotId}
-              />
+            <div className="bg-white rounded-lg shadow-sm border border-gray-100 min-h-[200px]">
+              {loading ? (
+                <div className="p-4">
+                  <SkeletonBlock className="h-5 w-40 mb-4" />
+                  <SkeletonBlock className="h-[180px] w-full" />
+                </div>
+              ) : dataReady ? (
+                <FieldDistributionChart
+                  plots={filteredPlots.map((plot) => ({
+                    id: plot.id,
+                    plotNo: plot.plotNo,
+                    area: plot.area,
+                    status: plot.status,
+                  }))}
+                  allPlots={allPlots.map((plot) => ({
+                    id: plot.id,
+                    plotNo: plot.plotNo,
+                    area: plot.area,
+                    status: plot.status,
+                  }))}
+                  onPlotClick={handlePlotClick}
+                  selectedPlotId={selectedPlotId}
+                />
+              ) : (
+                <SectionLoader label="No distribution data" />
+              )}
             </div>
           </div>
 
@@ -603,7 +691,7 @@ const AgroDashboard: React.FC = () => {
             <div className="relative bg-green-100 rounded-lg overflow-hidden shadow-sm h-full">
               <div
                 ref={mapWrapperRef}
-                className="relative w-full h-auto sm:h-[400px] md:h-[500px] lg:h-full rounded-lg overflow-hidden"
+                className="relative w-full h-auto sm:h-[400px] md:h-[500px] lg:h-full min-h-[320px] rounded-lg overflow-hidden"
               >
                 {/* Fullscreen Toggle */}
                 <div
@@ -619,121 +707,130 @@ const AgroDashboard: React.FC = () => {
                   <Maximize2 className="w-3 h-3 sm:w-4 sm:h-4" />
                 </div>
 
-                {/* Biomass Legend */}
-                <div className="absolute bottom-2 sm:bottom-4 left-2 sm:left-4 backdrop-brightness-50 rounded-lg p-2 sm:p-3 shadow-lg z-20">
-                  <h4 className="text-xs sm:text-sm font-medium text-gray-200 mb-1 sm:mb-2">
-                    Biomass Range
-                  </h4>
-                  <div className="flex flex-wrap gap-1 sm:gap-2">
-                    {biomassRanges.map((range, index) => (
-                      <div
-                        key={index}
-                        className={`flex items-center text-xs cursor-pointer hover:bg-white/20 rounded px-1 py-1 transition-colors ${
-                          selectedBiomassRange === range.range
-                            ? "bg-white/30 ring-1 ring-white/50"
-                            : ""
-                        }`}
-                        onClick={() => handleBiomassClick(range.range)}
-                        title={`Click to filter by ${range.range} biomass`}
-                      >
-                        <div
-                          className={`w-2 h-2 sm:w-3 sm:h-3 rounded-full mr-1 ${range.color}`}
-                        />
-                        <span className="text-gray-300 text-xs">
-                          {range.range}
-                        </span>
-                      </div>
-                    ))}
+                {loading ? (
+                  <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-gray-100">
+                    <Loader2 className="w-8 h-8 animate-spin text-blue-500 mb-2" />
+                    <span className="text-sm text-gray-600">Loading map data…</span>
                   </div>
-                  {selectedBiomassRange && (
-                    <button
-                      onClick={() => setSelectedBiomassRange(null)}
-                      className="mt-2 text-xs text-gray-300 hover:text-white underline cursor-pointer"
-                    ></button>
-                  )}
-                </div>
-
-                {/* Map */}
-                <MapContainer
-                  center={mapCenter}
-                  zoom={15}
-                  className="absolute inset-0 z-0"
-                  style={{ height: "100%", width: "100%" }}
-                >
-                  <MapAutoCenter center={mapCenter} />
-                  <TileLayer url="http://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}" />
-
-                  {/* Plot Boundaries and Points */}
-                  {filteredPlots.map((plot) => (
-                    <React.Fragment key={plot.id}>
-                      {/* Plot Boundary */}
-                      <Polygon
-                        positions={plot.coordinates}
-                        pathOptions={{
-                          color: getStatusColor(plot.status),
-                          fillOpacity: 0.2,
-                          weight: 2,
-                        }}
-                      />
-
-                      {/* Plot Center Point */}
-                      <CircleMarker
-                        center={plot.position}
-                        pathOptions={{
-                          color: getStatusColor(plot.status),
-                          fillColor: getStatusColor(plot.status),
-                          fillOpacity: 0.8,
-                          weight: 2,
-                        }}
-                      >
-                        <Popup>
-                          <div className="text-xs sm:text-sm">
-                            <div className="font-semibold text-gray-900 mb-1">
-                              Plot {plot.plotNo}
-                            </div>
-                            <div className="text-gray-600 mb-1">
-                              Status:{" "}
-                              <span className="font-medium">{plot.status}</span>
-                            </div>
-                            <div className="text-gray-600 mb-1">
-                              Area:{" "}
-                              <span className="font-medium">{plot.area}</span>
-                            </div>
-                            <div className="text-gray-600 mb-1">
-                              pH:{" "}
-                              <span className="font-medium">
-                                {plot.ph.toFixed(2)}
-                              </span>
-                            </div>
-                            <div className="text-gray-600 mb-1">
-                              Organic Carbon:{" "}
-                              <span className="font-medium">
-                                {plot.organicCarbon.toFixed(2)}%
-                              </span>
-                            </div>
-                            <div className="text-gray-600 mb-1">
-                              Brix:{" "}
-                              <span className="font-medium">
-                                {plot.brix.toFixed(1)}°
-                              </span>
-                            </div>
-                            <div className="text-gray-600">
-                              Yield Forecast:{" "}
-                              <span className="font-medium">
-                                {plot.yieldForecast.toFixed(1)} T/acre
-                              </span>
-                            </div>
+                ) : dataReady ? (
+                  <>
+                    {/* Biomass Legend */}
+                    <div className="absolute bottom-2 sm:bottom-4 left-2 sm:left-4 backdrop-brightness-50 rounded-lg p-2 sm:p-3 shadow-lg z-20">
+                      <h4 className="text-xs sm:text-sm font-medium text-gray-200 mb-1 sm:mb-2">
+                        Biomass Range
+                      </h4>
+                      <div className="flex flex-wrap gap-1 sm:gap-2">
+                        {biomassRanges.map((range, index) => (
+                          <div
+                            key={index}
+                            className={`flex items-center text-xs cursor-pointer hover:bg-white/20 rounded px-1 py-1 transition-colors ${
+                              selectedBiomassRange === range.range
+                                ? "bg-white/30 ring-1 ring-white/50"
+                                : ""
+                            }`}
+                            onClick={() => handleBiomassClick(range.range)}
+                            title={`Click to filter by ${range.range} biomass`}
+                          >
+                            <div
+                              className={`w-2 h-2 sm:w-3 sm:h-3 rounded-full mr-1 ${range.color}`}
+                            />
+                            <span className="text-gray-300 text-xs">
+                              {range.range}
+                            </span>
                           </div>
-                        </Popup>
-                        <Tooltip>
-                          <span className="text-xs font-medium">
-                            {plot.plotNo} - {plot.status}
-                          </span>
-                        </Tooltip>
-                      </CircleMarker>
-                    </React.Fragment>
-                  ))}
-                </MapContainer>
+                        ))}
+                      </div>
+                      {selectedBiomassRange && (
+                        <button
+                          onClick={() => setSelectedBiomassRange(null)}
+                          className="mt-2 text-xs text-gray-300 hover:text-white underline cursor-pointer"
+                        ></button>
+                      )}
+                    </div>
+
+                    {/* Map */}
+                    <MapContainer
+                      center={mapCenter}
+                      zoom={15}
+                      className="absolute inset-0 z-0"
+                      style={{ height: "100%", width: "100%" }}
+                    >
+                      <MapAutoCenter center={mapCenter} />
+                      <TileLayer url="http://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}" />
+
+                      {filteredPlots.map((plot) => (
+                        <React.Fragment key={plot.id}>
+                          <Polygon
+                            positions={plot.coordinates}
+                            pathOptions={{
+                              color: getStatusColor(plot.status),
+                              fillOpacity: 0.2,
+                              weight: 2,
+                            }}
+                          />
+                          <CircleMarker
+                            center={plot.position}
+                            pathOptions={{
+                              color: getStatusColor(plot.status),
+                              fillColor: getStatusColor(plot.status),
+                              fillOpacity: 0.8,
+                              weight: 2,
+                            }}
+                          >
+                            <Popup>
+                              <div className="text-xs sm:text-sm">
+                                <div className="font-semibold text-gray-900 mb-1">
+                                  Plot {plot.plotNo}
+                                </div>
+                                <div className="text-gray-600 mb-1">
+                                  Status:{" "}
+                                  <span className="font-medium">{plot.status}</span>
+                                </div>
+                                <div className="text-gray-600 mb-1">
+                                  Area:{" "}
+                                  <span className="font-medium">{plot.area}</span>
+                                </div>
+                                <div className="text-gray-600 mb-1">
+                                  pH:{" "}
+                                  <span className="font-medium">
+                                    {plot.ph.toFixed(2)}
+                                  </span>
+                                </div>
+                                <div className="text-gray-600 mb-1">
+                                  Organic Carbon:{" "}
+                                  <span className="font-medium">
+                                    {plot.organicCarbon.toFixed(2)}%
+                                  </span>
+                                </div>
+                                <div className="text-gray-600 mb-1">
+                                  Brix:{" "}
+                                  <span className="font-medium">
+                                    {plot.brix.toFixed(1)}°
+                                  </span>
+                                </div>
+                                <div className="text-gray-600">
+                                  Yield Forecast:{" "}
+                                  <span className="font-medium">
+                                    {plot.yieldForecast.toFixed(1)} T/acre
+                                  </span>
+                                </div>
+                              </div>
+                            </Popup>
+                            <Tooltip>
+                              <span className="text-xs font-medium">
+                                {plot.plotNo} - {plot.status}
+                              </span>
+                            </Tooltip>
+                          </CircleMarker>
+                        </React.Fragment>
+                      ))}
+                    </MapContainer>
+                  </>
+                ) : (
+                  <div className="absolute inset-0 flex items-center justify-center bg-gray-100 text-sm text-gray-500">
+                    Map will appear when plot data is available
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -741,8 +838,8 @@ const AgroDashboard: React.FC = () => {
       )}
 
       {/* Weather/Rainfall Chart Toggle */}
-      {!error && allPlots.length > 0 && (
-        <div className="bg-white p-3 sm:p-4 rounded-lg shadow-sm flex-1 flex flex-col max-w-7xl mx-auto mb-6">
+      {!error && (
+        <div className="bg-white p-3 sm:p-4 rounded-lg shadow-sm flex-1 flex flex-col max-w-7xl mx-auto mb-6 mt-6">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-3">
             <div className="flex gap-6 sm:gap-12 w-full sm:w-auto">
               <button
@@ -752,6 +849,7 @@ const AgroDashboard: React.FC = () => {
                     : "bg-gray-100 text-gray-700 hover:bg-gray-200"
                 }`}
                 onClick={() => setWeatherTab("weather")}
+                disabled={loading}
               >
                 Weather
               </button>
@@ -762,55 +860,35 @@ const AgroDashboard: React.FC = () => {
                     : "bg-gray-100 text-gray-700 hover:bg-gray-200"
                 }`}
                 onClick={() => setWeatherTab("rainfall")}
+                disabled={loading}
               >
                 Rainfall
               </button>
             </div>
             <div className="flex gap-1 sm:gap-3 w-full sm:w-auto">
-              <button
-                className={`px-2 sm:px-4 py-2 rounded-md text-xs font-medium transition-all duration-200 flex-1 sm:flex-none ${
-                  timePeriod === "daily"
-                    ? "bg-blue-500 text-white shadow-md transform scale-105"
-                    : "bg-white text-gray-700 hover:bg-gray-100 border border-gray-200"
-                }`}
-                onClick={() => setTimePeriod("daily")}
-              >
-                Daily
-              </button>
-              <button
-                className={`px-2 sm:px-4 py-2 rounded-md text-xs font-medium transition-all duration-200 flex-1 sm:flex-none ${
-                  timePeriod === "weekly"
-                    ? "bg-blue-500 text-white shadow-md transform scale-105"
-                    : "bg-white text-gray-700 hover:bg-gray-100 border border-gray-200"
-                }`}
-                onClick={() => setTimePeriod("weekly")}
-              >
-                Weekly
-              </button>
-              <button
-                className={`px-2 sm:px-4 py-2 rounded-md text-xs font-medium transition-all duration-200 flex-1 sm:flex-none ${
-                  timePeriod === "monthly"
-                    ? "bg-blue-500 text-white shadow-md transform scale-105"
-                    : "bg-white text-gray-700 hover:bg-gray-100 border border-gray-200"
-                }`}
-                onClick={() => setTimePeriod("monthly")}
-              >
-                Monthly
-              </button>
-              <button
-                className={`px-2 sm:px-4 py-2 rounded-md text-xs font-medium transition-all duration-200 flex-1 sm:flex-none ${
-                  timePeriod === "yearly"
-                    ? "bg-blue-500 text-white shadow-md transform scale-105"
-                    : "bg-white text-gray-700 hover:bg-gray-100 border border-gray-200"
-                }`}
-                onClick={() => setTimePeriod("yearly")}
-              >
-                Yearly
-              </button>
+              {(["daily", "weekly", "monthly", "yearly"] as const).map((period) => (
+                <button
+                  key={period}
+                  className={`px-2 sm:px-4 py-2 rounded-md text-xs font-medium transition-all duration-200 flex-1 sm:flex-none capitalize ${
+                    timePeriod === period
+                      ? "bg-blue-500 text-white shadow-md transform scale-105"
+                      : "bg-white text-gray-700 hover:bg-gray-100 border border-gray-200"
+                  }`}
+                  onClick={() => setTimePeriod(period)}
+                  disabled={loading}
+                >
+                  {period}
+                </button>
+              ))}
             </div>
           </div>
-          <div className="flex-1">
-            {weatherTab === "weather" ? (
+          <div className="flex-1 min-h-[280px]">
+            {loading ? (
+              <div className="h-full flex flex-col gap-3">
+                <SkeletonBlock className="h-8 w-48" />
+                <SkeletonBlock className="h-[240px] w-full" />
+              </div>
+            ) : weatherTab === "weather" ? (
               <WeatherChart timePeriod={timePeriod} />
             ) : (
               <RainfallChart timePeriod={timePeriod} />
