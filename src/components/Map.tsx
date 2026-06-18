@@ -9,6 +9,7 @@ import { FaExpand, FaColumns } from 'react-icons/fa';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 import { AnalysisTimelineRibbon } from "./AnalysisTimelineRibbon";
 import { getOrFetchJson } from "../utils/requestCache";
+import { resolveApiPlotName } from "../utils/plotName";
 import { getCache } from "../utils/cache";
 import {
   fetchAnalysisTimeline,
@@ -280,6 +281,8 @@ const CropEyeMap: React.FC<MapProps> = ({
 }) => {
   const { profile, loading: profileLoading } = useFarmerProfile();
   const { getCached, setCached } = useAppContext();
+  const plotNameForApi = (plotKey: string) =>
+    resolveApiPlotName(plotKey, profile?.plots);
   const mapWrapperRef = useRef<HTMLDivElement>(null);
   const initialFetchDoneRef = useRef<boolean>(false); // Track if initial fetch is done
   /** In-memory tile responses: key = `growth|plot|YYYY-MM-DD` etc. Avoids refetch when switching layer tab only. */
@@ -342,7 +345,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     setTimelineError(null);
     mapRebinSnapKeyRef.current = "";
     layerTilesCacheRef.current.clear();
-    fetchAnalysisTimeline(plot)
+    fetchAnalysisTimeline(plotNameForApi(plot))
       .then((data) => {
         if (!cancelled) setTimelinePayload(data);
       })
@@ -573,9 +576,10 @@ const CropEyeMap: React.FC<MapProps> = ({
 
   const fetchGrowthData = async (plotName: string) => {
     if (!plotName) return;
+    const apiPlot = plotNameForApi(plotName);
 
     const apiEndDate = layerApiEndDate(currentEndDate);
-    const memKey = `growth:${plotName}:${currentEndDate}`;
+    const memKey = `growth:${apiPlot}:${currentEndDate}`;
     if (layerTilesCacheRef.current.has(memKey)) {
       const hit = layerTilesCacheRef.current.get(memKey) as any;
       setGrowthData(hit ?? null);
@@ -587,7 +591,7 @@ const CropEyeMap: React.FC<MapProps> = ({
 
     // Check cache first (only for today's date to ensure freshness)
     const today = new Date().toISOString().split('T')[0];
-    const sharedKey = `layer:growth:${plotName}:${currentEndDate}`;
+    const sharedKey = `layer:growth:${apiPlot}:${currentEndDate}`;
     const sharedTtlMs = currentEndDate === today ? 10 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
     const sharedCached = getCache(sharedKey, sharedTtlMs);
     if (sharedCached) {
@@ -600,7 +604,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     }
     // Back-compat: older cache key used by prefetch/login
     if (currentEndDate === today) {
-      const cachedData = getCached(`growthData_${plotName}`);
+      const cachedData = getCached(`growthData_${apiPlot}`);
       if (cachedData) {
         layerTilesCacheRef.current.set(memKey, cachedData);
         setGrowthData(cachedData);
@@ -616,7 +620,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       // ? '/api/dev-plot' 
       // : 'https://admin-cropeye.up.railway.app';
     const baseUrl='https://admin-cropeye.up.railway.app';
-    const url = `${baseUrl}/analyze_Growth?plot_name=${plotName}&end_date=${apiEndDate}&days_back=15`;
+    const url = `${baseUrl}/analyze_Growth?plot_name=${encodeURIComponent(apiPlot)}&end_date=${apiEndDate}&days_back=15`;
     
     try {
       
@@ -640,7 +644,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       
       // Cache the data if it's for today's date
       if (currentEndDate === today) {
-        setCached(`growthData_${plotName}`, data);
+        setCached(`growthData_${apiPlot}`, data);
       }
       
       // Preserve plot boundary from growth data if not already set
@@ -679,9 +683,10 @@ const CropEyeMap: React.FC<MapProps> = ({
 
   const fetchWaterUptakeData = async (plotName: string) => {
     if (!plotName) return;
+    const apiPlot = plotNameForApi(plotName);
 
     const apiEndDate = layerApiEndDate(currentEndDate);
-    const memKey = `water:${plotName}:${currentEndDate}`;
+    const memKey = `water:${apiPlot}:${currentEndDate}`;
     if (layerTilesCacheRef.current.has(memKey)) {
       const hit = layerTilesCacheRef.current.get(memKey) as any;
       setWaterUptakeData(hit ?? null);
@@ -693,7 +698,7 @@ const CropEyeMap: React.FC<MapProps> = ({
 
     // Check cache first (only for today's date to ensure freshness)
     const today = new Date().toISOString().split('T')[0];
-    const sharedKey = `layer:water:${plotName}:${currentEndDate}`;
+    const sharedKey = `layer:water:${apiPlot}:${currentEndDate}`;
     const sharedTtlMs = currentEndDate === today ? 10 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
     const sharedCached = getCache(sharedKey, sharedTtlMs);
     if (sharedCached) {
@@ -706,7 +711,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     }
     // Back-compat: older cache key used by prefetch/login
     if (currentEndDate === today) {
-      const cachedData = getCached(`waterUptakeData_${plotName}`);
+      const cachedData = getCached(`waterUptakeData_${apiPlot}`);
       if (cachedData) {
         layerTilesCacheRef.current.set(memKey, cachedData);
         setWaterUptakeData(cachedData);
@@ -722,7 +727,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     //   ? '/api/dev-plot' 
     //   : 'https://admin-cropeye.up.railway.app';
     const baseUrl = 'https://admin-cropeye.up.railway.app';
-    const url = `${baseUrl}/wateruptake?plot_name=${plotName}&end_date=${apiEndDate}&days_back=15`;
+    const url = `${baseUrl}/wateruptake?plot_name=${encodeURIComponent(apiPlot)}&end_date=${apiEndDate}&days_back=15`;
 
     try {
       
@@ -746,7 +751,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       
       // Cache the data if it's for today's date
       if (currentEndDate === today) {
-        setCached(`waterUptakeData_${plotName}`, data);
+        setCached(`waterUptakeData_${apiPlot}`, data);
       }
       
       // Preserve plot boundary from water uptake data if not already set
@@ -785,9 +790,10 @@ const CropEyeMap: React.FC<MapProps> = ({
 
   const fetchSoilMoistureData = async (plotName: string) => {
     if (!plotName) return;
+    const apiPlot = plotNameForApi(plotName);
 
     const apiEndDate = layerApiEndDate(currentEndDate);
-    const memKey = `soil:${plotName}:${currentEndDate}`;
+    const memKey = `soil:${apiPlot}:${currentEndDate}`;
     if (layerTilesCacheRef.current.has(memKey)) {
       const hit = layerTilesCacheRef.current.get(memKey) as any;
       setSoilMoistureData(hit ?? null);
@@ -799,7 +805,7 @@ const CropEyeMap: React.FC<MapProps> = ({
 
     // Check cache first (only for today's date to ensure freshness)
     const today = new Date().toISOString().split('T')[0];
-    const sharedKey = `layer:soil:${plotName}:${currentEndDate}`;
+    const sharedKey = `layer:soil:${apiPlot}:${currentEndDate}`;
     const sharedTtlMs = currentEndDate === today ? 10 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
     const sharedCached = getCache(sharedKey, sharedTtlMs);
     if (sharedCached) {
@@ -812,7 +818,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     }
     // Back-compat: older cache key used by prefetch/login
     if (currentEndDate === today) {
-      const cachedData = getCached(`soilMoistureData_${plotName}`);
+      const cachedData = getCached(`soilMoistureData_${apiPlot}`);
       if (cachedData) {
         layerTilesCacheRef.current.set(memKey, cachedData);
         setSoilMoistureData(cachedData);
@@ -828,7 +834,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     //   ? '/api/dev-plot' 
     //   : 'https://admin-cropeye.up.railway.app';
     const baseUrl = 'https://admin-cropeye.up.railway.app';
-    const url = `${baseUrl}/SoilMoisture?plot_name=${plotName}&end_date=${apiEndDate}&days_back=7`;
+    const url = `${baseUrl}/SoilMoisture?plot_name=${encodeURIComponent(apiPlot)}&end_date=${apiEndDate}&days_back=7`;
 
     
     try {
@@ -851,7 +857,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       
       // Cache the data if it's for today's date
       if (currentEndDate === today) {
-        setCached(`soilMoistureData_${plotName}`, data);
+        setCached(`soilMoistureData_${apiPlot}`, data);
       }
       
       // Preserve plot boundary from soil moisture data if not already set
@@ -892,13 +898,10 @@ const CropEyeMap: React.FC<MapProps> = ({
     setLoading(true);
     setError(null);
 
-      const currentDate = getCurrentDate();
-    // Use direct backend URL in production (proxy only works in dev)
-    // const baseUrl = import.meta.env.DEV 
-    //   ? '/api/dev-plot' 
-    //   : 'https://admin-cropeye.up.railway.app';
+    const apiPlot = plotNameForApi(plotName);
+    const currentDate = getCurrentDate();
     const baseUrl = 'https://admin-cropeye.up.railway.app';
-    const url = `${baseUrl}/analyze_Growth?plot_name=${plotName}&end_date=${currentDate}&days_back=7`;
+    const url = `${baseUrl}/analyze_Growth?plot_name=${encodeURIComponent(apiPlot)}&end_date=${currentDate}&days_back=7`;
 
     try {
       
@@ -971,12 +974,12 @@ const CropEyeMap: React.FC<MapProps> = ({
 
   const fetchFieldAnalysis = async (plotName: string) => {
     if (!plotName) return;
+    const apiPlot = plotNameForApi(plotName);
 
     try {
-      // console.log("Fetching field analysis for plot:", plotName);
       const currentDate = getCurrentDate();
       const resp = await fetch(
-        `https://sef-cropeye.up.railway.app/analyze?plot_name=${plotName}&end_date=${currentDate}&days_back=7`,
+        `https://sef-cropeye.up.railway.app/analyze?plot_name=${encodeURIComponent(apiPlot)}&end_date=${currentDate}&days_back=7`,
         {
           method: "GET",
           headers: { "Content-Type": "application/json" },

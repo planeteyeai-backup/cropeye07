@@ -45,6 +45,8 @@ import {
   // Filter,
   // RefreshCw,
   Maximize2,
+  Sprout,
+  CalendarDays,
 } from "lucide-react";
 import "leaflet/dist/leaflet.css";
 import axios from "axios";
@@ -139,6 +141,8 @@ interface Metrics {
   cnRatio: number | null;
   sugarYieldMax: number | null;
   sugarYieldMin: number | null;
+  plantationDate: string | null;
+  plantationType: string | null;
 }
 
 interface PieChartWithNeedleProps {
@@ -151,6 +155,44 @@ interface PieChartWithNeedleProps {
 }
 
 type TimePeriod = "daily" | "weekly" | "monthly" | "yearly";
+
+function formatPlantationDateLabel(raw: unknown): string | null {
+  if (raw == null || raw === "") return null;
+  const date = new Date(String(raw));
+  if (Number.isNaN(date.getTime())) return String(raw);
+  return date.toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function extractPlantationInfo(source: any): {
+  plantationDate: string | null;
+  plantationType: string | null;
+} {
+  if (!source) {
+    return { plantationDate: null, plantationType: null };
+  }
+
+  const plantationDate = formatPlantationDateLabel(
+    source.plantation_date ??
+      source.planting_date ??
+      source.crop_type?.plantation_date,
+  );
+
+  const plantationTypeRaw =
+    source.plantation_type_display ??
+    source.plantation_type ??
+    source.planting_method ??
+    source.crop_type?.plantation_type_display ??
+    source.crop_type?.plantation_type;
+
+  return {
+    plantationDate,
+    plantationType: plantationTypeRaw ? String(plantationTypeRaw) : null,
+  };
+}
 
 /** team-connect returns `created_by` like "karnataka_manager_1 (manager)" without numeric manager_id on FOs */
 function parseCreatedByUsername(createdBy: unknown): string | null {
@@ -684,6 +726,8 @@ const OwnerFarmDash: React.FC = () => {
     cnRatio: null,
     sugarYieldMax: null,
     sugarYieldMin: null,
+    plantationDate: null,
+    plantationType: null,
   });
 
   const [stressEvents, setStressEvents] = useState<StressEvent[]>([]);
@@ -801,6 +845,18 @@ const OwnerFarmDash: React.FC = () => {
       }) ?? null
     );
   };
+
+  const selectedPlotPlantation = React.useMemo(() => {
+    if (!selectedPlotId) {
+      return { plantationDate: null, plantationType: null };
+    }
+    return extractPlantationInfo(findPlotInSelection(selectedPlotId));
+  }, [selectedPlotId, selectedFarmerId, farmersForSelectedOfficer]);
+
+  const displayPlantationDate =
+    metrics.plantationDate ?? selectedPlotPlantation.plantationDate;
+  const displayPlantationType =
+    metrics.plantationType ?? selectedPlotPlantation.plantationType;
 
   // Update field officers dropdown when manager changes
   useEffect(() => {
@@ -1154,7 +1210,7 @@ const OwnerFarmDash: React.FC = () => {
       const endDate = new Date(Date.now() - tzOffsetMs)
         .toISOString()
         .slice(0, 10);
-      const today = endDate; // For compatibility with existing code
+      // const today = endDate; // For compatibility with existing code
 
       // Step 1: Harvest status (do NOT block dashboard render)
       // We show the dashboard using endDate first, then update growthStage when harvest status arrives.
@@ -1281,6 +1337,7 @@ const OwnerFarmDash: React.FC = () => {
             plot?.brix_sugar?.sugar_yield?.min ??
               plot?.sugar_yield_min,
           ),
+          ...extractPlantationInfo(plot),
         }));
       };
 
@@ -2489,8 +2546,8 @@ const OwnerFarmDash: React.FC = () => {
             <span>{plotStatsError}</span>
           </div>
         )}
-        {/* Top Priority Metrics - 4 Key Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Top Priority Metrics - 6 Key Cards */}
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-green-200 hover:shadow-xl transition-all duration-300">
             <div className="flex items-center justify-between mb-2">
               <MapPin className="w-6 h-6 text-green-600" />
@@ -2593,6 +2650,38 @@ const OwnerFarmDash: React.FC = () => {
                 </div>
               </div>
             </div>
+          </div>
+
+          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-amber-200 hover:shadow-xl transition-all duration-300">
+            <div className="flex items-center justify-between mb-2">
+              <CalendarDays className="w-6 h-6 text-amber-600" />
+              <div className="text-right">
+                <div className="text-sm font-bold text-gray-800">
+                  {loadingData ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    displayPlantationDate || "-"
+                  )}
+                </div>
+              </div>
+            </div>
+            <p className="text-xs text-gray-600 font-medium">Plantation Date</p>
+          </div>
+
+          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-lime-200 hover:shadow-xl transition-all duration-300">
+            <div className="flex items-center justify-between mb-2">
+              <Sprout className="w-6 h-6 text-lime-600" />
+              <div className="text-right">
+                <div className="text-lg font-bold text-gray-800">
+                  {loadingData ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    displayPlantationType || "-"
+                  )}
+                </div>
+              </div>
+            </div>
+            <p className="text-xs text-gray-600 font-medium">Plantation Type</p>
           </div>
         </div>
 

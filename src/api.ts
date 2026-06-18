@@ -438,12 +438,16 @@ export const getFarmsWithFarmerDetails = () => {
   return api.get("/farms/?include_farmer=true");
 };
 
-/** Owner/manager-safe: paginate through all farms with nested farmer (recent-farmers is FO-only). */
-export const getAllFarmsWithFarmerDetails = async (): Promise<any[]> => {
+/** Paginate farms with nested farmer; capped to avoid hanging the UI. */
+export const getFarmsWithFarmerDetailsPaginated = async (
+  maxPages = 15,
+): Promise<any[]> => {
   const all: any[] = [];
   let nextPath: string | null = "/farms/?include_farmer=true";
+  let pageCount = 0;
 
-  while (nextPath) {
+  while (nextPath && pageCount < maxPages) {
+    pageCount += 1;
     const res: { data?: any } = await api.get(nextPath);
     const data: any = res?.data;
     const page: any[] = Array.isArray(data?.results)
@@ -466,6 +470,11 @@ export const getAllFarmsWithFarmerDetails = async (): Promise<any[]> => {
   }
 
   return all;
+};
+
+/** Owner/manager-safe: paginate through all farms with nested farmer (recent-farmers is FO-only). */
+export const getAllFarmsWithFarmerDetails = async (): Promise<any[]> => {
+  return getFarmsWithFarmerDetailsPaginated(50);
 };
 
 // Get recent farmers (field officer only — returns 403 for owner/manager)
@@ -653,6 +662,101 @@ export const getUserById = (id: string | number) => {
 
 export const getUsers = () => {
   return api.get("/users/");
+};
+
+/** Fetch all user pages (list endpoint is paginated). */
+export const getAllUsersPaginated = async (maxPages = 20): Promise<any[]> => {
+  const all: any[] = [];
+  let nextPath: string | null = "/users/";
+  let pageCount = 0;
+
+  while (nextPath && pageCount < maxPages) {
+    pageCount += 1;
+    const res: { data?: any } = await api.get(nextPath);
+    const data: any = res?.data;
+    const page: any[] = Array.isArray(data?.results)
+      ? data.results
+      : Array.isArray(data)
+        ? data
+        : [];
+    all.push(...page);
+
+    const nextUrl: unknown = data?.next;
+    if (!nextUrl || typeof nextUrl !== "string") {
+      break;
+    }
+    try {
+      const parsed: URL = new URL(nextUrl);
+      nextPath = `${parsed.pathname}${parsed.search}`.replace(/^\/api/, "");
+    } catch {
+      nextPath = nextUrl.startsWith("/") ? nextUrl : null;
+    }
+  }
+
+  return all;
+};
+
+/** GET /users/{id}/ for each farmer — returns village, taluka, district, email. */
+export const getFarmerUserProfiles = async (
+  userIds: Array<number | string>,
+): Promise<any[]> => {
+  const unique = [
+    ...new Set(
+      userIds
+        .map((id) => Number(id))
+        .filter((id) => !Number.isNaN(id) && id > 0),
+    ),
+  ];
+  const profiles: any[] = [];
+  const batchSize = 6;
+
+  for (let i = 0; i < unique.length; i += batchSize) {
+    const batch = unique.slice(i, i + batchSize);
+    const results = await Promise.allSettled(
+      batch.map((id) => getUserById(id)),
+    );
+    for (const result of results) {
+      if (result.status === "fulfilled" && result.value?.data) {
+        profiles.push(result.value.data);
+      }
+    }
+  }
+
+  return profiles;
+};
+
+/** Farmers assigned to field officers (rich profiles with plots/farms). */
+export const getFarmersForFieldOfficers = async (
+  fieldOfficerIds: Array<number | string>,
+): Promise<any[]> => {
+  const uniqueIds = [
+    ...new Set(
+      fieldOfficerIds
+        .map((id) => Number(id))
+        .filter((id) => !Number.isNaN(id) && id > 0),
+    ),
+  ];
+  const farmers: any[] = [];
+  const seen = new Set<string>();
+  const batchSize = 4;
+
+  for (let i = 0; i < uniqueIds.length; i += batchSize) {
+    const batch = uniqueIds.slice(i, i + batchSize);
+    const results = await Promise.allSettled(
+      batch.map((id) => getFarmersByFieldOfficer(id)),
+    );
+    for (const result of results) {
+      if (result.status !== "fulfilled") continue;
+      for (const farmer of parseFarmersByFieldOfficerResponse(result.value.data)) {
+        const key = String(farmer?.id ?? farmer?.user_id ?? farmer?.username ?? "");
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        farmers.push(farmer);
+      }
+    }
+  }
+
+  return farmers;
 };
 
 // Update user using PATCH method (partial update)
@@ -1754,4 +1858,3 @@ export const patchFarmMyProfile = (data: {
 };
 
 export default api;
-

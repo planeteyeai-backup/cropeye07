@@ -37,6 +37,8 @@ import BlogCard from "./components/BlogCard";
 import AgricultureData from "./components/AgricultureData";
 import Map from "./components/Map";
 import FarmerDashboard from "./components/FarmerDashboard";
+import ProgressBarDashboard from "./components/ProgressBarDashboard";
+import ProgressGridDashboard from "./components/ProgressGridDashboard";
 import OfficerDashboard from "./components/FarmCropStatus";
 import AgroDashboard from "./components/AgroDash/AgroDashboard";
 import ManagerFarmDash from "./components/ManagerFarmDash";
@@ -81,6 +83,8 @@ enum View {
   AgricultureData = "AgricultureData",
   Map = "Map",
   FarmerDashboard = "FarmerDashboard",
+  ProgressDashboard = "ProgressDashboard",
+  ProgressGrid = "ProgressGrid",
   FarmCropStatus = "FarmCropStatus",
   MyProfile = "MyProfile",
 }
@@ -210,6 +214,10 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
       'ownerharvestdash': View.OwnerHarvestDash,
       'farmer-dashboard': View.FarmerDashboard,
       'farmerdashboard': View.FarmerDashboard,
+      'progress-dashboard': View.ProgressDashboard,
+      'progressdashboard': View.ProgressDashboard,
+      'progress-grid': View.ProgressGrid,
+      'progressgrid': View.ProgressGrid,
       'map': View.Map,
       'fertilizer': View.Fertilizer,
       'irrigation': View.Irrigation,
@@ -358,6 +366,12 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
       case "FarmerDashboard":
         nextView = View.FarmerDashboard;
         break;
+      case "Progress Dashboard":
+        nextView = View.ProgressDashboard;
+        break;
+      case "Progress Grid":
+        nextView = View.ProgressGrid;
+        break;
       case "MyProfile":
         nextView = View.MyProfile;
         break;
@@ -385,6 +399,8 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
       [View.OwnerFarmDash]: 'ownerfarmdash',
       [View.OwnerHarvestDash]: 'ownerharvestdash',
       [View.FarmerDashboard]: 'farmerdashboard',
+      [View.ProgressDashboard]: 'progressdashboard',
+      [View.ProgressGrid]: 'progressgrid',
       [View.Map]: 'map',
       [View.Fertilizer]: 'fertilizer',
       [View.Irrigation]: 'irrigation',
@@ -698,6 +714,18 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
             {cachedViews.includes(View.FarmerDashboard) && (
               <div style={{ display: currentView === View.FarmerDashboard ? 'block' : 'none' }}>
                 <FarmerDashboard />
+              </div>
+            )}
+
+            {cachedViews.includes(View.ProgressDashboard) && (
+              <div style={{ display: currentView === View.ProgressDashboard ? 'block' : 'none' }}>
+                <ProgressBarDashboard />
+              </div>
+            )}
+
+            {cachedViews.includes(View.ProgressGrid) && (
+              <div style={{ display: currentView === View.ProgressGrid ? 'block' : 'none' }}>
+                <ProgressGridDashboard />
               </div>
             )}
 

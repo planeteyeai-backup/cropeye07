@@ -1,6 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { Download, Edit, Search, Trash2, Loader2, Eye, X, User, Ruler, Map, Droplets, Save, LandPlot } from 'lucide-react';
 import { getRecentFarmers, patchFarm, updateUser, patchPlot, patchIrrigation } from '../api';
+// import {
+//   formatFarmerDisplayName,
+//   // formatPlantationDate,
+//   formatRecordAddress,
+//   getPlantationFromRecord,
+// } from '../utils/plantation';
 
 const ITEMS_PER_PAGE = 5;
 
@@ -32,12 +38,28 @@ const formatAcresFromHectaresOrNA = (value: unknown, fractionDigits = 2): string
   return Number.isFinite(acres) ? acres.toFixed(fractionDigits) : "N/A";
 };
 
+const formatPlantationDate = (value: unknown): string => {
+  if (value === null || value === undefined || value === '') {
+    return 'N/A';
+  }
+  const date = new Date(String(value));
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+  return date.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+};
+
 interface Farmer {
   id: number;
   farmer_name: string;
   phone_number: string;
   area: number;
   area_hectares?: number;
+  plantation_date: string;
   plantation_type: string;
   crop_type: string;
   crop_variety: string;
@@ -165,6 +187,7 @@ export const FarmList: React.FC<FarmlistProps> = ({ users: propUsers, setUsers: 
             phone_number: farmer.phone_number || 'N/A',
             area: Number(farmAreaAcresRaw.toFixed(2)),
             area_hectares: Number(farmAreaHectares.toFixed(4)),
+            plantation_date: formatPlantationDate(firstFarm?.plantation_date),
             plantation_type: firstFarm?.plantation_type || 'N/A',
             crop_type: firstFarm?.crop_type?.crop_type || firstFarm?.crop_type_name || 'Sugarcane',
             crop_variety: firstFarm?.crop_type?.crop_variety || firstFarm?.crop_variety || '',
@@ -451,6 +474,7 @@ export const FarmList: React.FC<FarmlistProps> = ({ users: propUsers, setUsers: 
           phone_number: farmer.phone_number || 'N/A',
           area: Number(farmAreaAcresRaw.toFixed(2)),
           area_hectares: Number(farmAreaHectares.toFixed(4)),
+          plantation_date: formatPlantationDate(firstFarm?.plantation_date),
           plantation_type: firstFarm?.plantation_type || 'N/A',
           crop_type: firstFarm?.crop_type?.crop_type || firstFarm?.crop_type_name || 'Sugarcane',
           crop_variety: firstFarm?.crop_type?.crop_variety || firstFarm?.crop_variety || '',
@@ -740,6 +764,7 @@ export const FarmList: React.FC<FarmlistProps> = ({ users: propUsers, setUsers: 
           phone_number: updatedFarmer.phone_number || 'N/A',
           area: Number(farmAreaAcresRaw.toFixed(2)),
           area_hectares: Number(farmAreaHectares.toFixed(4)),
+          plantation_date: formatPlantationDate(firstFarm?.plantation_date),
           plantation_type: firstFarm?.plantation_type || 'N/A',
           crop_type: firstFarm?.crop_type?.crop_type || firstFarm?.crop_type_name || 'Sugarcane',
           crop_variety: firstFarm?.crop_type?.crop_variety || firstFarm?.crop_variety || '',
@@ -1293,7 +1318,10 @@ export const FarmList: React.FC<FarmlistProps> = ({ users: propUsers, setUsers: 
           (user) =>
             user.farmer_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
             user.phone_number.toString().includes(searchTerm) ||
+            (user.email && user.email.toLowerCase().includes(searchTerm.toLowerCase())) ||
+            (user.address && user.address.toLowerCase().includes(searchTerm.toLowerCase())) ||
             formatAcresValue(user.area).includes(searchTerm) ||
+            user.plantation_date.toLowerCase().includes(searchTerm.toLowerCase()) ||
             user.plantation_type.toLowerCase().includes(searchTerm.toLowerCase()) ||
             user.crop_type.toLowerCase().includes(searchTerm.toLowerCase()) ||
             (user.crop_variety && user.crop_variety.toLowerCase().includes(searchTerm.toLowerCase()))
@@ -1386,7 +1414,10 @@ export const FarmList: React.FC<FarmlistProps> = ({ users: propUsers, setUsers: 
                 </th>
                 <th className="px-4 py-2">Farmer Name</th>
                 <th className="px-4 py-2">Phone Number</th>
+                <th className="px-4 py-2">Email</th>
+                <th className="px-4 py-2">Address</th>
                 <th className="px-4 py-2">Area (acres)</th>
+                <th className="px-4 py-2">Plantation Date</th>
                 <th className="px-4 py-2">Plantation Type</th>
                 <th className="px-4 py-2">Crop Type</th>
                 <th className="px-4 py-2">Crop Variety</th>
@@ -1396,7 +1427,7 @@ export const FarmList: React.FC<FarmlistProps> = ({ users: propUsers, setUsers: 
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={7} className="text-center py-8">
+                  <td colSpan={11} className="text-center py-8">
                     <div className="flex items-center justify-center">
                       <Loader2 className="w-6 h-6 animate-spin mr-2" />
                       Loading farms data...
@@ -1405,13 +1436,13 @@ export const FarmList: React.FC<FarmlistProps> = ({ users: propUsers, setUsers: 
                 </tr>
               ) : error ? (
                 <tr>
-                  <td colSpan={8} className="text-center py-8 text-red-600">
+                  <td colSpan={11} className="text-center py-8 text-red-600">
                     Error: {error}
                   </td>
                 </tr>
               ) : filtering ? (
                 <tr>
-                  <td colSpan={8} className="text-center py-8">
+                  <td colSpan={11} className="text-center py-8">
                     <div className="flex items-center justify-center">
                       <Loader2 className="w-5 h-5 animate-spin mr-2 text-blue-500" />
                       <span className="text-gray-600">Filtering results...</span>
@@ -1420,7 +1451,7 @@ export const FarmList: React.FC<FarmlistProps> = ({ users: propUsers, setUsers: 
                 </tr>
               ) : paginatedData.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="text-center py-4">No farms found</td>
+                  <td colSpan={11} className="text-center py-4">No farms found</td>
                 </tr>
               ) : (
                 paginatedData.map((user) => (
@@ -1435,7 +1466,12 @@ export const FarmList: React.FC<FarmlistProps> = ({ users: propUsers, setUsers: 
                     </td>
                     <td className="px-4 py-2 font-medium">{user.farmer_name}</td>
                     <td className="px-4 py-2">{user.phone_number}</td>
+                    <td className="px-4 py-2">{user.email || 'N/A'}</td>
+                    <td className="px-4 py-2 max-w-[12rem] truncate" title={user.address || 'N/A'}>
+                      {user.address || 'N/A'}
+                    </td>
                     <td className="px-4 py-2">{formatAcresValue(user.area)} acres</td>
+                    <td className="px-4 py-2">{user.plantation_date}</td>
                     <td className="px-4 py-2">{user.plantation_type}</td>
                     <td className="px-4 py-2">{user.crop_type}</td>
                     <td className="px-4 py-2">{user.crop_variety || 'N/A'}</td>
@@ -1533,6 +1569,7 @@ export const FarmList: React.FC<FarmlistProps> = ({ users: propUsers, setUsers: 
                       <div>
                         <h3 className="font-semibold text-gray-900 text-base">{user.farmer_name}</h3>
                         <p className="text-sm text-gray-600">{user.phone_number}</p>
+                        <p className="text-sm text-gray-600">{user.email || 'N/A'}</p>
                       </div>
                     </div>
                     <div className="flex space-x-2">
@@ -1554,12 +1591,20 @@ export const FarmList: React.FC<FarmlistProps> = ({ users: propUsers, setUsers: 
                   </div>
                   
                   <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="col-span-2">
+                      <span className="text-gray-500">Address:</span>
+                      <p className="font-medium">{user.address || 'N/A'}</p>
+                    </div>
                     <div>
                       <span className="text-gray-500">Area:</span>
                       <p className="font-medium">{formatAcresValue(user.area)} acres</p>
                     </div>
                     <div>
-                      <span className="text-gray-500">Plantation:</span>
+                      <span className="text-gray-500">Plantation Date:</span>
+                      <p className="font-medium">{user.plantation_date}</p>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Plantation Type:</span>
                       <p className="font-medium">{user.plantation_type}</p>
                     </div>
                     <div>

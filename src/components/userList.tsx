@@ -460,7 +460,31 @@
 
 import React, { useState, useEffect } from 'react';
 import { Download, Edit, Search, Trash2, Save, X, Loader2, Users } from 'lucide-react';
-import { getContactDetails, getUsers, updateUser } from '../api';
+import {
+  getContactDetails,
+  getAllUsersPaginated,
+  getCurrentUser,
+  getFarmersForFieldOfficers,
+  getFarmerUserProfiles,
+  getFarmsWithFarmerDetailsPaginated,
+  getRecentFarmers,
+  getTeamConnect,
+  updateUser,
+} from '../api';
+import {
+  buildEnrichmentFromUserRecord,
+  buildFarmerEnrichmentLookup,
+  buildFarmerEnrichmentLookupFromFarmRows,
+  buildFarmerEnrichmentLookupFromFarmerProfiles,
+  extractFieldOfficersFromTeamConnect,
+  extractUserRoleName,
+  getFarmerEnrichment,
+  isFarmerUser,
+  mergeFarmerEnrichmentLookups,
+  pickDisplayAddress,
+  pickDisplayEmail,
+  type FarmerEnrichmentLookup,
+} from '../utils/plantation';
 
 interface User {
   id: number;
@@ -474,6 +498,8 @@ interface User {
   role?: string;
   role_id?: number;
   created_by?: number;
+  plantation_date?: string | null;
+  plantation_type?: string | null;
 }
 
 interface UserListProps {
@@ -481,9 +507,137 @@ interface UserListProps {
   currentUserRole: 'owner' | 'manager' | 'fieldofficer' | 'farmer';
 }
 
+const isFarmerRole = (role?: string) =>
+  (role ?? '').toLowerCase().includes('farmer');
+
+const displayOrNA = (value?: string | null) => {
+  const text = value?.trim();
+  return text ? text : 'N/A';
+};
+
+const EMPTY_ENRICHMENT_LOOKUP: FarmerEnrichmentLookup = {
+  byId: new Map(),
+  byPhone: new Map(),
+};
+
+const ENRICHMENT_TIMEOUT_MS = 20_000;
+
+const withTimeout = <T,>(promise: Promise<T>, ms: number, fallback: T): Promise<T> =>
+  Promise.race([
+    promise,
+    new Promise<T>((resolve) => {
+      window.setTimeout(() => resolve(fallback), ms);
+    }),
+  ]);
+
+const transformUserRow = (
+  user: any,
+  enrichmentLookup: FarmerEnrichmentLookup,
+): User => {
+  const role = extractUserRoleName(user) || String(user.role?.name || user.role || '');
+  const farmer = isFarmerUser(user);
+  const enrichment =
+    (farmer ? getFarmerEnrichment(user, enrichmentLookup) : undefined) ??
+    (farmer ? buildEnrichmentFromUserRecord(user) : undefined);
+
+  return {
+    id: user.id,
+    username: user.username || '',
+    first_name: user.first_name || '',
+    last_name: user.last_name || '',
+    email: pickDisplayEmail(user, enrichment),
+    phone_number: user.phone_number || user.phone || '',
+    phone: user.phone_number || user.phone || '',
+    address: pickDisplayAddress(user, enrichment),
+    role,
+    role_id: user.role?.id || user.role_id,
+    created_by: user.created_by,
+    plantation_date:
+      enrichment?.plantation_date && enrichment.plantation_date !== 'N/A'
+        ? enrichment.plantation_date
+        : null,
+    plantation_type:
+      enrichment?.plantation_type && enrichment.plantation_type !== 'N/A'
+        ? enrichment.plantation_type
+        : null,
+  };
+};
+
+const loadFarmerEnrichmentLookup = async (
+  farmerUsers: any[],
+): Promise<FarmerEnrichmentLookup> => {
+  const load = async (): Promise<FarmerEnrichmentLookup> => {
+    const lookups: FarmerEnrichmentLookup[] = [];
+    const farmerIds = farmerUsers.map((user) => user.id).filter(Boolean);
+
+    const [profilesResult, recentResult, farmsResult, teamResult] =
+      await Promise.allSettled([
+        getFarmerUserProfiles(farmerIds),
+        getRecentFarmers(),
+        getFarmsWithFarmerDetailsPaginated(15),
+        getCurrentUser().then(async (me) => {
+          const industryId = me?.data?.industry_id ?? me?.data?.industry?.id;
+          try {
+            return await getTeamConnect(industryId);
+          } catch {
+            return await getTeamConnect();
+          }
+        }),
+      ]);
+
+    if (profilesResult.status === 'fulfilled' && profilesResult.value.length > 0) {
+      lookups.push(
+        buildFarmerEnrichmentLookupFromFarmerProfiles(profilesResult.value),
+      );
+    }
+
+    if (recentResult.status === 'fulfilled') {
+      let farmers = recentResult.value?.data;
+      if (farmers?.farmers && Array.isArray(farmers.farmers)) {
+        farmers = farmers.farmers;
+      } else if (farmers?.results && Array.isArray(farmers.results)) {
+        farmers = farmers.results;
+      }
+      if (Array.isArray(farmers) && farmers.length > 0) {
+        lookups.push(buildFarmerEnrichmentLookupFromFarmerProfiles(farmers));
+      }
+    }
+
+    if (farmsResult.status === 'fulfilled') {
+      const farmRows = Array.isArray(farmsResult.value) ? farmsResult.value : [];
+      if (farmRows.length > 0) {
+        lookups.push(buildFarmerEnrichmentLookupFromFarmRows(farmRows));
+      }
+    }
+
+    if (teamResult.status === 'fulfilled') {
+      const teamData = teamResult.value.data;
+      lookups.push(buildFarmerEnrichmentLookup(teamData));
+
+      const officerIds = extractFieldOfficersFromTeamConnect(teamData).map(
+        (officer) => officer.id,
+      );
+      if (officerIds.length > 0) {
+        const foFarmers = await getFarmersForFieldOfficers(officerIds);
+        if (foFarmers.length > 0) {
+          lookups.push(buildFarmerEnrichmentLookupFromFarmerProfiles(foFarmers));
+        }
+      }
+    }
+
+    return lookups.length > 0
+      ? mergeFarmerEnrichmentLookups(...lookups)
+      : EMPTY_ENRICHMENT_LOOKUP;
+  };
+
+  return withTimeout(load(), ENRICHMENT_TIMEOUT_MS, EMPTY_ENRICHMENT_LOOKUP);
+};
+
 export const UserList: React.FC<UserListProps> = ({ currentUserId, currentUserRole }) => {
+  const showPlantationColumns = currentUserRole === 'manager';
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(false);
+  const [enriching, setEnriching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
@@ -495,46 +649,42 @@ export const UserList: React.FC<UserListProps> = ({ currentUserId, currentUserRo
 
   useEffect(() => {
     fetchUsers();
-  }, [currentUserId]);
+  }, [currentUserId, currentUserRole]);
 
   const fetchUsers = async () => {
     setLoading(true);
     setError(null);
     try {
-      // Try to get all users first
       let usersData: any[] = [];
-      
       try {
-        const response = await getUsers();
-        usersData = response.data.results || response.data || [];
-      } catch (err) {
-        // Fallback to getContactDetails
-        const response = await getContactDetails();
-        const contactData = response.data.contacts;
-        usersData = contactData.field_officers || contactData.owners || [];
+        usersData = await getAllUsersPaginated();
+      } catch {
+        const usersResult = await getContactDetails();
+        const contactData = usersResult.data.contacts;
+        usersData =
+          contactData.field_officers || contactData.owners || [];
       }
 
-      // Transform the data to match our interface
-      const transformedUsers: User[] = usersData.map((user: any) => ({
-        id: user.id,
-        username: user.username || '',
-        first_name: user.first_name || '',
-        last_name: user.last_name || '',
-        email: user.email || '',
-        phone_number: user.phone_number || user.phone || '',
-        phone: user.phone_number || user.phone || '',
-        address: user.address || '',
-        role: user.role?.name || user.role || '',
-        role_id: user.role?.id || user.role_id,
-        created_by: user.created_by,
-      }));
+      setUsers(usersData.map((user) => transformUserRow(user, EMPTY_ENRICHMENT_LOOKUP)));
+      setLoading(false);
 
-      setUsers(transformedUsers);
+      const farmerUsers = usersData.filter((user) => isFarmerUser(user));
+      if (farmerUsers.length === 0) {
+        return;
+      }
+
+      setEnriching(true);
+      try {
+        const enrichmentLookup = await loadFarmerEnrichmentLookup(farmerUsers);
+        setUsers(usersData.map((user) => transformUserRow(user, enrichmentLookup)));
+      } finally {
+        setEnriching(false);
+      }
     } catch (error: any) {
       setError(error.message || 'Failed to fetch users');
       setUsers([]);
-    } finally {
       setLoading(false);
+      setEnriching(false);
     }
   };
 
@@ -634,18 +784,62 @@ export const UserList: React.FC<UserListProps> = ({ currentUserId, currentUserRo
     }
   };
 
+  const getPlantationDateForUser = (user: User) =>
+    isFarmerRole(user.role) ? displayOrNA(user.plantation_date) : 'N/A';
+
+  const getPlantationTypeForUser = (user: User) =>
+    isFarmerRole(user.role) ? displayOrNA(user.plantation_type) : 'N/A';
+
   const handleDownload = () => {
+    const headers = showPlantationColumns
+      ? [
+          'Username',
+          'First Name',
+          'Last Name',
+          'Email',
+          'Phone Number',
+          'Address',
+          'Role',
+          'Plantation Date',
+          'Plantation Type',
+        ]
+      : ['Username', 'First Name', 'Last Name', 'Email', 'Phone Number', 'Address', 'Role'];
+
     const csv = [
-      ['Username', 'First Name', 'Last Name', 'Email', 'Phone Number', 'Address', 'Role'],
-      ...users.map(({ username, first_name, last_name, email, phone_number, phone, address, role }) => [
-        username || '', 
-        first_name || '', 
-        last_name || '', 
-        email || '', 
-        phone_number || phone || '', 
-        address || '', 
-        role || ''
-      ])
+      headers,
+      ...users.map(
+        ({
+          username,
+          first_name,
+          last_name,
+          email,
+          phone_number,
+          phone,
+          address,
+          role,
+          plantation_date,
+          plantation_type,
+        }) => {
+          const row = [
+            username || '',
+            first_name || '',
+            last_name || '',
+            email || '',
+            phone_number || phone || '',
+            address || '',
+            role || '',
+          ];
+
+          if (showPlantationColumns) {
+            row.push(
+              isFarmerRole(role) ? displayOrNA(plantation_date) : 'N/A',
+              isFarmerRole(role) ? displayOrNA(plantation_type) : 'N/A',
+            );
+          }
+
+          return row;
+        },
+      ),
     ]
       .map(row => row.map(field => `"${field}"`).join(','))
       .join('\n');
@@ -776,10 +970,22 @@ export const UserList: React.FC<UserListProps> = ({ currentUserId, currentUserRo
             </div>
           </div>
           <div className="space-y-2 text-sm">
-            <div><span className="font-medium text-gray-700">Email:</span> {user.email || 'N/A'}</div>
-            <div><span className="font-medium text-gray-700">Phone:</span> {user.phone_number || user.phone || 'N/A'}</div>
-            <div><span className="font-medium text-gray-700">Address:</span> {user.address || 'N/A'}</div>
+            <div><span className="font-medium text-gray-700">Email:</span> {displayOrNA(user.email)}</div>
+            <div><span className="font-medium text-gray-700">Phone:</span> {displayOrNA(user.phone_number || user.phone)}</div>
+            <div><span className="font-medium text-gray-700">Address:</span> {displayOrNA(user.address)}</div>
             <div><span className="font-medium text-gray-700">Role:</span> {user.role || 'N/A'}</div>
+            {showPlantationColumns && (
+              <>
+                <div>
+                  <span className="font-medium text-gray-700">Plantation Date:</span>{' '}
+                  {getPlantationDateForUser(user)}
+                </div>
+                <div>
+                  <span className="font-medium text-gray-700">Plantation Type:</span>{' '}
+                  {getPlantationTypeForUser(user)}
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -837,6 +1043,12 @@ export const UserList: React.FC<UserListProps> = ({ currentUserId, currentUserRo
           </div>
         ) : (
           <>
+            {enriching && (
+              <div className="flex items-center gap-2 px-4 py-2 mb-3 text-sm text-blue-700 bg-blue-50 rounded-lg border border-blue-100">
+                {/* <Loader2 className="w-4 h-4 animate-spin shrink-0" /> */}
+                {/* <span>Loading farmer email, address, and plantation details…</span> */}
+              </div>
+            )}
             {/* Mobile view - Cards */}
             <div className="block lg:hidden">
               {paginatedData.length === 0 ? (
@@ -858,13 +1070,19 @@ export const UserList: React.FC<UserListProps> = ({ currentUserId, currentUserRo
                     <th className="px-4 py-3">Phone</th>
                     <th className="px-4 py-3">Address</th>
                     <th className="px-4 py-3">Role</th>
+                    {showPlantationColumns && (
+                      <>
+                        <th className="px-4 py-3">Plantation Date</th>
+                        <th className="px-4 py-3">Plantation Type</th>
+                      </>
+                    )}
                     <th className="px-4 py-3">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {paginatedData.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="text-center py-8 text-gray-500">No users found</td>
+                      <td colSpan={showPlantationColumns ? 10 : 8} className="text-center py-8 text-gray-500">No users found</td>
                     </tr>
                   ) : (
                     paginatedData.map((user) => (
@@ -928,6 +1146,12 @@ export const UserList: React.FC<UserListProps> = ({ currentUserId, currentUserRo
                             <td className="px-4 py-3">
                               <span className="text-gray-600">{user.role || 'N/A'}</span>
                             </td>
+                            {showPlantationColumns && (
+                              <>
+                                <td className="px-4 py-3 text-gray-500">—</td>
+                                <td className="px-4 py-3 text-gray-500">—</td>
+                              </>
+                            )}
                             <td className="px-4 py-3">
                               <div className="flex space-x-2">
                                 <button
@@ -958,10 +1182,18 @@ export const UserList: React.FC<UserListProps> = ({ currentUserId, currentUserRo
                             <td className="px-4 py-3 font-medium">{user.username || 'N/A'}</td>
                             <td className="px-4 py-3">{user.first_name || 'N/A'}</td>
                             <td className="px-4 py-3">{user.last_name || 'N/A'}</td>
-                            <td className="px-4 py-3">{user.email || 'N/A'}</td>
-                            <td className="px-4 py-3">{user.phone_number || user.phone || 'N/A'}</td>
-                            <td className="px-4 py-3">{user.address || 'N/A'}</td>
+                            <td className="px-4 py-3">{displayOrNA(user.email)}</td>
+                            <td className="px-4 py-3">{displayOrNA(user.phone_number || user.phone)}</td>
+                            <td className="px-4 py-3 max-w-[14rem] truncate" title={displayOrNA(user.address)}>
+                              {displayOrNA(user.address)}
+                            </td>
                             <td className="px-4 py-3">{user.role || 'N/A'}</td>
+                            {showPlantationColumns && (
+                              <>
+                                <td className="px-4 py-3">{getPlantationDateForUser(user)}</td>
+                                <td className="px-4 py-3">{getPlantationTypeForUser(user)}</td>
+                              </>
+                            )}
                             <td className="px-4 py-3">
                               <div className="flex space-x-2">
                                 <button
