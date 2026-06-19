@@ -96,8 +96,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
     switch (userRole) {
       case 'farmer':
         return [
-          // renderMenu('Progress Dashboard', <Route size={20} />),
-          // renderMenu('Progress Grid', <LayoutGrid size={20} />),
+          //  renderMenu('Progress Dashboard', <Route size={20} />),
+          //  renderMenu('Progress Grid', <LayoutGrid size={20} />),
           renderMenu('FarmerDashboard', <BarChart3 size={20} />),
           renderMenu('MyTask', <Calendar size={20} />, ['Calendar', 'ViewList']),
           renderMenu('Irrigation', <BiWater size={20} />),

@@ -1,8 +1,6 @@
 import React, { useMemo } from 'react';
 import {
   CartesianGrid,
-  Cell,
-  LabelList,
   Legend,
   ResponsiveContainer,
   Scatter,
@@ -12,65 +10,31 @@ import {
   YAxis,
   ZAxis,
 } from 'recharts';
-import type { DistrictId } from './districts';
-
-const TOTAL_WEEKS = 13;
+import { DISTRICT_OPTIONS, type DistrictId } from './districts';
+import {
+  DEFAULT_MONTH_SECTION,
+  getSectionIndex,
+} from './progressConstants';
+import { DISTRICT_PROGRESS, getProgressShare } from './progressData';
+import { requestProgressDashboardNav } from './progressNavigation';
 
 const COLORS = {
   grid: '#E8ECF0',
   axis: '#6B7280',
 };
 
-/** Excel-style bubble palette (blue, orange, grey) */
 const BUBBLE_FILLS = ['#4472C4', '#ED7D31', '#A5A5A5'];
+const YIELD_TICKS = [75, 85, 100];
 
 interface FarmerBubbleRow {
+  farmerId: string;
+  districtId: DistrictId;
+  districtLabel: string;
   name: string;
-  shortName: string;
   tons: number;
-  progress: number;
+  xPos: number;
   share: number;
 }
-
-const buildRow = (
-  name: string,
-  tons: number,
-  completedUpTo: number,
-): FarmerBubbleRow => {
-  const progressWeeks = completedUpTo + 1;
-  return {
-    name,
-    shortName: name.replace('Farmer ', ''),
-    tons,
-    progress: progressWeeks,
-    share: Math.round((progressWeeks / TOTAL_WEEKS) * 100),
-  };
-};
-
-const DISTRICT_CHART_DATA: Record<DistrictId, FarmerBubbleRow[]> = {
-  kalburagi: [
-    buildRow('Farmer 1', 100, 12),
-    buildRow('Farmer 2', 85, 5),
-    buildRow('Farmer 3', 75, 8),
-  ],
-  vijayapura: [
-    buildRow('Farmer 1', 95, 10),
-    buildRow('Farmer 2', 80, 7),
-    buildRow('Farmer 3', 70, 4),
-  ],
-  bagalkot: [
-    buildRow('Farmer 1', 105, 11),
-    buildRow('Farmer 2', 88, 6),
-    buildRow('Farmer 3', 78, 9),
-  ],
-  mandya: [
-    buildRow('Farmer 1', 98, 9),
-    buildRow('Farmer 2', 72, 3),
-    buildRow('Farmer 3', 82, 12),
-  ],
-};
-
-const WEEK_TICKS = Array.from({ length: TOTAL_WEEKS }, (_, i) => i + 1);
 
 interface BubbleTooltipProps {
   active?: boolean;
@@ -83,9 +47,10 @@ const BubbleTooltip: React.FC<BubbleTooltipProps> = ({ active, payload }) => {
   return (
     <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-md">
       <p className="font-semibold text-slate-800">{row.name}</p>
-      <p className="text-slate-600">Weeks completed: {row.progress}</p>
+      <p className="text-slate-600">{row.districtLabel}</p>
       <p className="text-slate-600">Yield: {row.tons} ton</p>
-      <p className="text-slate-600">Progress share: {row.share}%</p>
+      <p className="text-slate-600">Progress: {row.share}%</p>
+      <p className="mt-1 text-[10px] text-emerald-600">Click to open weekly timeline</p>
     </div>
   );
 };
@@ -97,35 +62,55 @@ interface ProgressGridChartProps {
 const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
   districtId = 'kalburagi',
 }) => {
-  const chartData = useMemo(
-    () => DISTRICT_CHART_DATA[districtId] ?? DISTRICT_CHART_DATA.kalburagi,
-    [districtId],
-  );
+  const sectionIndex = getSectionIndex(DEFAULT_MONTH_SECTION);
+  const districtMeta = DISTRICT_OPTIONS.find((d) => d.id === districtId)!;
 
-  const bubbleData = useMemo(
-    () =>
-      chartData.map((row, index) => ({
-        ...row,
-        fill: BUBBLE_FILLS[index % BUBBLE_FILLS.length],
-      })),
-    [chartData],
-  );
+  const bubbleData = useMemo(() => {
+    const configs = DISTRICT_PROGRESS[districtId] ?? DISTRICT_PROGRESS.kalburagi;
+    return configs.map((cfg, index) => ({
+      farmerId: cfg.farmerId,
+      districtId,
+      districtLabel: districtMeta?.shortLabel ?? '',
+      name: cfg.farmerName,
+      tons: cfg.tons,
+      xPos: index,
+      share: getProgressShare(cfg, sectionIndex),
+      fill: BUBBLE_FILLS[index % BUBBLE_FILLS.length],
+    }));
+  }, [districtId, districtMeta, sectionIndex]);
+
+  const handleBubbleClick = (row: FarmerBubbleRow) => {
+    requestProgressDashboardNav({
+      districtId: row.districtId,
+      monthSection: DEFAULT_MONTH_SECTION,
+      farmerId: row.farmerId,
+      searchQuery: row.name,
+    });
+  };
 
   return (
     <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm sm:p-6">
-      <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
-        <div>
-          <h2 className="text-sm font-semibold text-slate-800 sm:text-base">
-            Farmer progress bubble chart
-          </h2>
-          <p className="text-xs text-slate-500">
-            X: weeks completed · Y: yield (ton) · Bubble size: progress %
-          </p>
-        </div>
+      <div className="mb-4 rounded-lg border border-emerald-100 bg-emerald-50/60 px-4 py-3 text-center">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
+          District
+        </p>
+        <p className="mt-0.5 text-sm font-bold text-slate-800 sm:text-base">
+          {districtMeta?.label}
+        </p>
       </div>
+
+      <div className="mb-3">
+        <h2 className="text-sm font-semibold text-slate-800 sm:text-base">
+          Farmer progress bubble chart
+        </h2>
+        <p className="text-xs text-slate-500">
+          Y: yield (ton) · Size: progress % · Click bubble → weekly timeline
+        </p>
+      </div>
+
       <div className="h-72 sm:h-80">
         <ResponsiveContainer width="100%" height="100%">
-          <ScatterChart margin={{ top: 16, right: 24, left: 8, bottom: 8 }}>
+          <ScatterChart margin={{ top: 12, right: 24, left: 8, bottom: 8 }}>
             <defs>
               {BUBBLE_FILLS.map((color, i) => (
                 <radialGradient key={color} id={`bubbleGrad${i}`} cx="35%" cy="30%">
@@ -138,25 +123,22 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
             <CartesianGrid strokeDasharray="3 3" stroke={COLORS.grid} />
             <XAxis
               type="number"
-              dataKey="progress"
-              name="Weeks"
-              domain={[0, TOTAL_WEEKS]}
-              ticks={WEEK_TICKS}
-              tick={{ fontSize: 11, fill: COLORS.axis }}
+              dataKey="xPos"
+              name="Farmer"
+              domain={[-0.5, 2.5]}
+              ticks={[0, 1, 2]}
+              tickFormatter={(value) => `Farmer ${value + 1}`}
+              tick={{ fontSize: 12, fill: COLORS.axis, fontWeight: 600 }}
               axisLine={{ stroke: '#CBD5E1' }}
               tickLine={{ stroke: '#CBD5E1' }}
-              label={{
-                value: 'Weeks completed',
-                position: 'insideBottom',
-                offset: -4,
-                style: { fontSize: 11, fill: COLORS.axis },
-              }}
             />
             <YAxis
               type="number"
               dataKey="tons"
               name="Tons"
-              tick={{ fontSize: 11, fill: COLORS.axis }}
+              domain={[72, 108]}
+              ticks={YIELD_TICKS}
+              tick={{ fontSize: 12, fill: COLORS.axis }}
               axisLine={{ stroke: '#CBD5E1' }}
               tickLine={{ stroke: '#CBD5E1' }}
               label={{
@@ -166,7 +148,7 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
                 style: { fontSize: 11, fill: COLORS.axis },
               }}
             />
-            <ZAxis type="number" dataKey="share" range={[120, 520]} name="Progress %" />
+            <ZAxis type="number" dataKey="share" range={[180, 520]} name="Progress %" />
             <Tooltip content={<BubbleTooltip />} cursor={{ strokeDasharray: '3 3' }} />
             <Legend
               verticalAlign="top"
@@ -177,19 +159,16 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
             />
             {bubbleData.map((row, index) => (
               <Scatter
-                key={row.name}
+                key={row.farmerId}
                 name={row.name}
                 data={[row]}
                 fill={`url(#bubbleGrad${index})`}
-              >
-                <Cell fill={`url(#bubbleGrad${index})`} />
-                <LabelList
-                  dataKey="shortName"
-                  position="right"
-                  offset={8}
-                  style={{ fontSize: 12, fontWeight: 600, fill: '#374151' }}
-                />
-              </Scatter>
+                cursor="pointer"
+                onClick={(data: FarmerBubbleRow & { payload?: FarmerBubbleRow }) => {
+                  const point = data?.payload ?? data;
+                  if (point?.farmerId) handleBubbleClick(point);
+                }}
+              />
             ))}
           </ScatterChart>
         </ResponsiveContainer>

@@ -39,6 +39,7 @@ import Map from "./components/Map";
 import FarmerDashboard from "./components/FarmerDashboard";
 import ProgressBarDashboard from "./components/ProgressBarDashboard";
 import ProgressGridDashboard from "./components/ProgressGridDashboard";
+import { PROGRESS_NAV_EVENT } from "./components/progressbar/progressNavigation";
 import OfficerDashboard from "./components/FarmCropStatus";
 import AgroDashboard from "./components/AgroDash/AgroDashboard";
 import ManagerFarmDash from "./components/ManagerFarmDash";
@@ -116,6 +117,7 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
     fertilityStatus: "Moderate",
   });
   const [isChatbotOpen, setIsChatbotOpen] = useState(false);
+  const [progressNavKey, setProgressNavKey] = useState(0);
 
   // NEW: Add currentUser state
   const [currentUser, setCurrentUser] = useState<{
@@ -436,6 +438,21 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
     window.history.pushState({ view: urlName }, '', newURL);
   };
 
+  useEffect(() => {
+    const openProgressDashboard = () => {
+      setCurrentView(View.ProgressDashboard);
+      setCachedViews((prev) => {
+        if (prev.includes(View.ProgressDashboard)) return prev;
+        const others = prev.filter((v) => v !== View.Home);
+        return [View.Home, ...others, View.ProgressDashboard].slice(-VIEW_CACHE_SIZE);
+      });
+      setIsSidebarOpen(false);
+      setProgressNavKey((k) => k + 1);
+    };
+    window.addEventListener(PROGRESS_NAV_EVENT, openProgressDashboard);
+    return () => window.removeEventListener(PROGRESS_NAV_EVENT, openProgressDashboard);
+  }, []);
+
   const handleHomeClick = () => {
     setCurrentView(View.Home);
     if (!cachedViews.includes(View.Home)) {
@@ -719,7 +736,7 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
 
             {cachedViews.includes(View.ProgressDashboard) && (
               <div style={{ display: currentView === View.ProgressDashboard ? 'block' : 'none' }}>
-                <ProgressBarDashboard />
+                <ProgressBarDashboard key={progressNavKey} navKey={progressNavKey} />
               </div>
             )}
 
