@@ -47,6 +47,7 @@ import HarvestDashboard from "./components/HarvestDashboard";
 import Chatbot from "./components/Chatbot";
 import MyProfile from "./components/MyProfile";
 import { MessageCircle } from "lucide-react";
+import { getUserData, isPlanetEyeDemoUser } from "./utils/auth";
 
 enum View {
   Home = "home",
@@ -91,7 +92,7 @@ enum View {
 }
 
 interface AppProps {
-  userRole: "manager" | "admin" | "fieldofficer" | "farmer" | "owner";
+  userRole: "manager" | "admin" | "fieldofficer" | "farmer" | "owner" | "planeteye";
   onLogout: () => void;
 }
 
@@ -128,6 +129,16 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
 
   // NEW: Get user from JWT token
   useEffect(() => {
+    if (isPlanetEyeDemoUser()) {
+      const demoUser = getUserData();
+      setCurrentUser({
+        id: 0,
+        role: "planeteye",
+        name: demoUser?.username || "planeteye",
+      });
+      return;
+    }
+
     const token = localStorage.getItem("token");
 
     if (token) {
@@ -510,6 +521,10 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
         );
       case "farmer":
         return <FarmerHomeGrid onMenuClick={handleMenuSelect} />;
+      case "planeteye":
+        return (
+          <ProgressBarDashboard key={progressNavKey} navKey={progressNavKey} />
+        );
       default:
         return <div>Invalid user role: {userRole}</div>;
     }

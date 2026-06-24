@@ -23,7 +23,7 @@ interface SidebarProps {
   onMenuSelect: (menu: string) => void;
   onHomeClick: () => void;
   onLogout: () => void;
-  userRole: 'farmer' | 'admin' | 'fieldofficer' | 'manager' | 'owner';
+  userRole: 'farmer' | 'admin' | 'fieldofficer' | 'manager' | 'owner' | 'planeteye';
   expandedMenu?: string | null; // Menu to expand when sidebar opens
 }
 
@@ -94,10 +94,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
   
   const getMenuItems = () => {
     switch (userRole) {
+      case 'planeteye':
+        return [
+          renderMenu('Progress Dashboard', <Route size={20} />),
+          renderMenu('Progress Grid', <LayoutGrid size={20} />),
+        ];
       case 'farmer':
         return [
-          //  renderMenu('Progress Dashboard', <Route size={20} />),
-          //  renderMenu('Progress Grid', <LayoutGrid size={20} />),
           renderMenu('FarmerDashboard', <BarChart3 size={20} />),
           renderMenu('MyTask', <Calendar size={20} />, ['Calendar', 'ViewList']),
           renderMenu('Irrigation', <BiWater size={20} />),
@@ -172,7 +175,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   };
 
   // Check if logout should be shown (for all roles including farmer)
-  const shouldShowLogout = ['farmer', 'fieldofficer', 'manager', 'owner', 'admin'].includes(userRole);
+  const shouldShowLogout = ['farmer', 'fieldofficer', 'manager', 'owner', 'admin', 'planeteye'].includes(userRole);
 
   return (
     <aside

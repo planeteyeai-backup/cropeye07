@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Check, X } from 'lucide-react';
-import type { DistrictId } from './districts';
-import { DISTRICT_PROGRESS } from './progressData';
+import { Check, X, ChevronLeft, ChevronRight } from 'lucide-react';
+import type { FactoryId } from './factoryProgressTypes';
+import type { FarmerProgressConfig } from './progressData';
 import {
   DEFAULT_MONTH_SECTION,
   MONTH_SECTIONS,
@@ -9,8 +9,14 @@ import {
   WEEKS_PER_SECTION,
   getLocalWeekNumber,
   getMonthRangeForWeek,
+  getSectionIndex,
+  resolveLatestMonthSectionFromConfigs,
   type MonthSectionLabel,
 } from './progressConstants';
+import { PROGRESS_THEME as T } from './progressTheme';
+import {
+  buildSectionTimelineNodes,
+} from './buildSectionTimelineNodes';
 
 export type { MonthSectionLabel };
 export type CallStatus = 'completed' | 'pending';
@@ -24,6 +30,10 @@ export interface TimelineNode {
   yield: string;
   callStatus: CallStatus;
   note: string;
+  /** True when dot value comes from industrial / public yield API. */
+  isFromApi?: boolean;
+  /** True for the farmer's latest API yield reading. */
+  isLatest?: boolean;
 }
 
 export interface FarmerTimeline {
@@ -37,7 +47,8 @@ export interface FarmerTimeline {
 }
 
 interface ProgressBarProps {
-  districtId?: DistrictId;
+  factoryId?: FactoryId;
+  farmerConfigs?: FarmerProgressConfig[];
   farmers?: FarmerTimeline[];
   searchQuery?: string;
   initialMonthSection?: MonthSectionLabel;
@@ -60,91 +71,144 @@ const isPastWeek = (node: TimelineNode): boolean => {
 };
 
 const buildInitialActions = (
-  farmerId: string,
-  weeksDonePerSection: [number, number, number, number],
-  missedCallWeeks: number[] = [],
+  _farmerId: string,
+  _weeksDonePerSection: [number, number, number, number],
+  _missedCallWeeks: number[] = [],
 ): Record<string, ActionTaken> => {
-  const actions: Record<string, ActionTaken> = {};
-  for (let section = 0; section < 4; section++) {
-    const sectionStart = section * WEEKS_PER_SECTION;
-    const done = weeksDonePerSection[section] ?? 0;
-    for (let local = 0; local < done; local++) {
-      const globalIdx = sectionStart + local;
-      const key = `${farmerId}-${farmerId}-w${globalIdx + 1}`;
-      actions[key] = missedCallWeeks.includes(globalIdx) ? 'no' : 'yes';
-    }
-  }
-  return actions;
+  // Actions start empty — green bar fills only after you save "Action taken".
+  return {};
 };
 
 const buildWeeklyNodes = (
   farmerId: string,
   baseYield: number,
   plantationStart = '2025-01-15',
+  yieldReadings: { yield: number; date: string }[] = [],
 ): TimelineNode[] => {
   const start = new Date(plantationStart);
+  const sortedYields = [...yieldReadings].sort(
+    (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
+  );
+  const useApiYields = sortedYields.length > 0;
 
   return Array.from({ length: TOTAL_WEEKS }, (_, i) => {
-    const milestoneDate = new Date(start);
-    milestoneDate.setDate(start.getDate() + i * 7);
+    const weekStart = new Date(start);
+    weekStart.setDate(start.getDate() + i * 7);
+    weekStart.setHours(0, 0, 0, 0);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekStart.getDate() + 6);
+    weekEnd.setHours(23, 59, 59, 999);
+
+    let milestoneDate: Date;
+    let yieldValue: number;
+
+    if (useApiYields) {
+      const reading = sortedYields[i];
+      if (reading) {
+        milestoneDate = new Date(reading.date);
+        yieldValue = reading.yield;
+      } else {
+        const readingInWeek = sortedYields.find((item) => {
+          const readingDate = new Date(item.date);
+          return readingDate >= weekStart && readingDate <= weekEnd;
+        });
+        const readingsBeforeWeekEnd = sortedYields.filter(
+          (item) => new Date(item.date) <= weekEnd,
+        );
+        const closestReading =
+          readingInWeek ?? readingsBeforeWeekEnd[readingsBeforeWeekEnd.length - 1];
+        milestoneDate = closestReading
+          ? new Date(closestReading.date)
+          : new Date(weekStart);
+        yieldValue = closestReading?.yield ?? baseYield + i * 0.08;
+      }
+    } else {
+      milestoneDate = new Date(weekStart);
+      yieldValue = baseYield + i * 0.08;
+    }
+
     const localWeek = getLocalWeekNumber(i);
+
     return {
       id: `${farmerId}-w${i + 1}`,
       day: localWeek,
       date: formatDisplayDate(milestoneDate),
       monthRange: getMonthRangeForWeek(i),
-      yield: `${(baseYield + i * 0.08).toFixed(1)} T/acre`,
+      yield: `${Number(yieldValue).toFixed(1)} T/acre`,
       callStatus: 'pending',
       note: '',
     };
   });
 };
 
-const buildFarmer = (config: (typeof DISTRICT_PROGRESS)[DistrictId][number]): FarmerTimeline => ({
+const buildFarmer = (config: FarmerProgressConfig): FarmerTimeline => ({
   farmerId: config.farmerId,
   farmerName: config.farmerName,
-  currentDayIndex: Math.max(...config.weeksDonePerSection.map((n, i) =>
-    n > 0 ? i * WEEKS_PER_SECTION + n - 1 : -1,
-  )),
-  nodes: buildWeeklyNodes(config.farmerId, config.baseYield),
+  currentDayIndex: Math.max(
+    ...config.weeksDonePerSection.map((n, i) =>
+      n > 0 ? i * WEEKS_PER_SECTION + n - 1 : -1,
+    ),
+  ),
+  nodes: buildWeeklyNodes(
+    config.farmerId,
+    config.baseYield,
+    config.plantationDate ?? undefined,
+    config.yieldReadings ?? [],
+  ),
   weeksDonePerSection: config.weeksDonePerSection,
   missedCallWeeks: config.missedCallWeeks ?? [],
 });
 
-const DISTRICT_FARMERS: Record<DistrictId, FarmerTimeline[]> = Object.fromEntries(
-  Object.entries(DISTRICT_PROGRESS).map(([districtId, configs]) => [
-    districtId,
-    configs.map((cfg) => buildFarmer(cfg)),
-  ]),
-) as Record<DistrictId, FarmerTimeline[]>;
+const buildTimelinesFromConfigs = (
+  configs: FarmerProgressConfig[],
+): FarmerTimeline[] => configs.map(buildFarmer);
+
+const buildInitialActionsForConfigs = (
+  configs: FarmerProgressConfig[],
+): Record<string, ActionTaken> => {
+  const actions: Record<string, ActionTaken> = {};
+  for (const cfg of configs) {
+    Object.assign(
+      actions,
+      buildInitialActions(
+        cfg.farmerId,
+        cfg.weeksDonePerSection,
+        cfg.missedCallWeeks ?? [],
+      ),
+    );
+  }
+  return actions;
+};
+
+const VISIBLE_FARMER_ROWS = 3;
+const FARMER_LIST_MAX_HEIGHT = '23.5rem';
 
 const getNodePosition = (index: number, total: number) =>
   total <= 1 ? 0 : (index / (total - 1)) * 100;
 
-const MonthSectionHeader: React.FC<{
-  selectedSection: MonthSectionLabel;
-  onSelect: (label: MonthSectionLabel) => void;
-}> = ({ selectedSection, onSelect }) => (
-  <div className="mb-4 flex flex-wrap items-center justify-center gap-2 sm:gap-3">
-    {MONTH_SECTIONS.map((section) => {
-      const isActive = selectedSection === section.label;
-      return (
-        <button
-          key={section.label}
-          type="button"
-          onClick={() => onSelect(section.label)}
-          className={[
-            'flex min-w-[7.5rem] cursor-pointer items-center justify-center rounded-full px-4 py-2 text-xs font-semibold transition-all sm:min-w-[8.5rem] sm:px-5 sm:py-2.5 sm:text-sm',
-            isActive
-              ? 'bg-emerald-600 text-white shadow-md ring-2 ring-emerald-500'
-              : 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-100 hover:bg-emerald-100',
-          ].join(' ')}
-        >
-          {section.label}
-        </button>
-      );
-    })}
-  </div>
+const SlotNavButton: React.FC<{
+  direction: 'prev' | 'next';
+  disabled: boolean;
+  onClick: () => void;
+}> = ({ direction, disabled, onClick }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    disabled={disabled}
+    aria-label={direction === 'prev' ? 'Previous slot' : 'Next slot'}
+    className="flex h-8 w-7 shrink-0 items-center justify-center rounded-md border transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-30 sm:h-9 sm:w-8"
+    style={{
+      borderColor: `${T.active}55`,
+      color: T.active,
+      backgroundColor: T.activeLight,
+    }}
+  >
+    {direction === 'prev' ? (
+      <ChevronLeft className="h-4 w-4" strokeWidth={2.5} />
+    ) : (
+      <ChevronRight className="h-4 w-4" strokeWidth={2.5} />
+    )}
+  </button>
 );
 
 const getPopupAlignClass = (dotIndex: number, total: number): string => {
@@ -169,10 +233,17 @@ const ActionEditPanel: React.FC<{
   }, [noteValue, actionTaken, node.id]);
 
   return (
-    <div className="mt-2 rounded-lg border border-slate-200 bg-white p-2.5 shadow-sm">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <p className="text-[11px] font-semibold text-slate-700">
-          Week {node.day} · {node.date} · {node.yield}
+    <div
+      className="w-[200px] max-w-[min(200px,calc(100vw-2rem))] rounded-lg border border-slate-200 bg-white p-2.5 shadow-xl ring-1 ring-black/5"
+      onClick={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <div className="mb-1.5 flex items-start justify-between gap-1">
+        <p className="text-[10px] font-semibold leading-tight" style={{ color: T.text }}>
+          Wk {node.day} · {node.date}
+          <span className="mt-0.5 block font-semibold" style={{ color: T.taskDone }}>
+            {node.yield}
+          </span>
         </p>
         <button
           type="button"
@@ -180,35 +251,35 @@ const ActionEditPanel: React.FC<{
           className="shrink-0 rounded p-0.5 text-slate-400 hover:text-slate-600"
           aria-label="Close"
         >
-          <X className="h-3.5 w-3.5" />
+          <X className="h-3 w-3" />
         </button>
       </div>
 
-      <p className="mb-1.5 text-[10px] font-medium text-slate-500">Action taken?</p>
-      <div className="mb-2 flex gap-1.5">
+      <p className="mb-1 text-[9px] font-medium text-slate-500">Action taken?</p>
+      <div className="mb-1.5 flex gap-1">
         <button
           type="button"
           onClick={() => setDraftAction('yes')}
           className={[
-            'flex flex-1 items-center justify-center gap-1 rounded-md border py-1 text-[11px] font-semibold',
+            'flex flex-1 items-center justify-center gap-0.5 rounded border py-0.5 text-[10px] font-semibold',
             draftAction === 'yes'
-              ? 'border-emerald-500 bg-emerald-50 text-emerald-700'
+              ? 'border-[#22C55E] bg-[#F0FDF4] text-[#166534]'
               : 'border-slate-200 text-slate-600 hover:bg-slate-50',
           ].join(' ')}
         >
-          <Check className="h-3 w-3" /> Yes
+          <Check className="h-2.5 w-2.5" /> Yes
         </button>
         <button
           type="button"
           onClick={() => setDraftAction('no')}
           className={[
-            'flex flex-1 items-center justify-center gap-1 rounded-md border py-1 text-[11px] font-semibold',
+            'flex flex-1 items-center justify-center gap-0.5 rounded border py-0.5 text-[10px] font-semibold',
             draftAction === 'no'
-              ? 'border-amber-500 bg-amber-50 text-amber-700'
+              ? 'border-[#D97706] bg-[#FFFBEB] text-[#B45309]'
               : 'border-slate-200 text-slate-600 hover:bg-slate-50',
           ].join(' ')}
         >
-          <X className="h-3 w-3" /> No
+          <X className="h-2.5 w-2.5" /> No
         </button>
       </div>
 
@@ -216,9 +287,10 @@ const ActionEditPanel: React.FC<{
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         placeholder="Note (optional)..."
-        className="mb-2 w-full rounded-md border border-slate-200 px-2 py-1 text-[11px] text-slate-700 focus:border-emerald-500 focus:outline-none"
+        className="mb-1.5 w-full rounded border border-slate-200 px-1.5 py-0.5 text-[10px] focus:outline-none"
+        style={{ color: T.text }}
       />
-      <div className="flex gap-1.5">
+      <div className="flex gap-1">
         <button
           type="button"
           onClick={() => {
@@ -226,14 +298,15 @@ const ActionEditPanel: React.FC<{
             onSave(draft.trim(), draftAction);
           }}
           disabled={!draftAction}
-          className="flex-1 rounded-md bg-emerald-600 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700 disabled:bg-slate-300"
+          className="flex-1 rounded py-0.5 text-[10px] font-semibold text-white disabled:bg-slate-300"
+          style={{ backgroundColor: T.active }}
         >
           Save
         </button>
         <button
           type="button"
           onClick={onClose}
-          className="rounded-md border border-slate-200 px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-50"
+          className="rounded border border-slate-200 px-1.5 py-0.5 text-[10px] text-slate-600 hover:bg-slate-50"
         >
           Cancel
         </button>
@@ -250,6 +323,8 @@ const ProgressDot: React.FC<{
   noteValue: string;
   actionTaken: ActionTaken | null;
   isPast: boolean;
+  isLatest?: boolean;
+  isFromApi?: boolean;
   dotIndex: number;
   totalDots: number;
   onActivate: (key: string | null) => void;
@@ -263,6 +338,8 @@ const ProgressDot: React.FC<{
   noteValue,
   actionTaken,
   isPast,
+  isLatest,
+  isFromApi,
   dotIndex,
   totalDots,
   onActivate,
@@ -273,31 +350,39 @@ const ProgressDot: React.FC<{
   const isActionNo = actionTaken === 'no';
   const alignClass = getPopupAlignClass(dotIndex, totalDots);
 
-  const dotRingClass = isSelected
-    ? 'ring-blue-500 shadow-blue-200/50 scale-125'
-    : isActionYes
-      ? 'ring-emerald-500 shadow-emerald-200/50'
+  const dotRingColor = isSelected
+    ? '#2563EB'
+    : isLatest
+      ? '#15803D'
+      : isActionYes
+      ? T.taskDoneRing
       : isActionNo
-        ? 'ring-amber-500 shadow-amber-200/50'
+        ? T.taskNotDoneRing
         : isPast
-          ? 'ring-red-500 shadow-red-200/50'
-          : 'ring-slate-300 shadow-slate-200/50';
+          ? T.pastNotRecordedRing
+          : '#CBD5E1';
 
-  const dotInnerClass = isActionYes
-    ? 'bg-gradient-to-br from-emerald-400 to-green-600'
+  const dotInnerClass = isActionYes || isActionNo || isPast ? '' : 'bg-slate-400';
+
+  const dotInnerStyle = isActionYes
+    ? { backgroundColor: T.taskDone }
     : isActionNo
-      ? 'bg-amber-500'
+      ? { backgroundColor: T.taskNotDone }
       : isPast
-        ? 'bg-red-500'
-        : 'bg-slate-400';
+        ? { backgroundColor: T.pastNotRecorded }
+        : undefined;
 
   return (
-    <div className="flex justify-center">
+    <div
+      className="relative flex justify-center"
+      onMouseEnter={() => onActivate(nodeKey)}
+      onMouseLeave={() => {
+        if (!isSelected) onActivate(null);
+      }}
+    >
       <button
         type="button"
-        className="relative flex h-10 w-full items-center justify-center focus:outline-none"
-        onMouseEnter={() => onActivate(nodeKey)}
-        onMouseLeave={() => onActivate(null)}
+        className="relative z-10 flex h-10 w-full items-center justify-center focus:outline-none"
         onClick={(e) => {
           e.stopPropagation();
           if (isPast) onSelect();
@@ -307,57 +392,73 @@ const ProgressDot: React.FC<{
       >
         <span
           className={[
-            'relative flex items-center justify-center rounded-full bg-white transition-all duration-300 ring-[3px]',
+            'relative flex items-center justify-center rounded-full bg-white transition-all duration-300',
             'h-3.5 w-3.5 sm:h-4 sm:w-4 shadow-md',
-            dotRingClass,
+            isSelected ? 'scale-125' : '',
             isActive && !isSelected ? 'scale-110' : '',
           ].join(' ')}
+          style={{ boxShadow: `0 0 0 3px ${dotRingColor}, 0 1px 3px rgba(0,0,0,0.12)` }}
         >
           {isActionYes ? (
-            <Check className="h-2 w-2 text-emerald-600 sm:h-2.5 sm:w-2.5" strokeWidth={3} />
+            <Check className="h-2 w-2 sm:h-2.5 sm:w-2.5" strokeWidth={3} style={{ color: T.taskDone }} />
           ) : isActionNo ? (
-            <X className="h-2 w-2 text-amber-600 sm:h-2.5 sm:w-2.5" strokeWidth={3} />
+            <X className="h-2 w-2 sm:h-2.5 sm:w-2.5" strokeWidth={3} style={{ color: T.taskNotDone }} />
           ) : (
-            <span className={['block h-1.5 w-1.5 rounded-full sm:h-2 sm:w-2', dotInnerClass].join(' ')} />
+            <span
+              className={['block h-1.5 w-1.5 rounded-full sm:h-2 sm:w-2', dotInnerClass].join(' ')}
+              style={dotInnerStyle}
+            />
           )}
         </span>
 
         {isActive && !isSelected && (
           <div
-            className={`absolute top-full z-30 mt-2 whitespace-nowrap ${alignClass}`}
+            className={`pointer-events-none absolute top-full z-30 mt-2 whitespace-nowrap ${alignClass}`}
           >
-            <div className="min-w-[160px] rounded-xl border border-slate-100 bg-white px-3 py-2.5 text-center shadow-xl ring-1 ring-black/5">
-              <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+            <div className="min-w-[140px] rounded-lg border border-slate-100 bg-white px-2.5 py-2 text-center shadow-lg ring-1 ring-black/5">
+              {isLatest && (
+                <p className="mb-1 text-[9px] font-bold uppercase tracking-wide text-emerald-700">
+                  Latest yield
+                </p>
+              )}
+              {isFromApi && !isLatest && (
+                <p className="mb-1 text-[9px] font-semibold uppercase tracking-wide text-sky-600">
+                  {/* API reading */}
+                </p>
+              )}
+              <p className="text-[9px] font-semibold uppercase tracking-wide text-slate-400">
                 {node.date}
               </p>
-              <p className="mt-1 text-sm font-bold text-emerald-600">{node.yield}</p>
+              <p className="mt-0.5 text-xs font-bold" style={{ color: T.taskDone }}>
+                {node.yield}
+              </p>
               {isPast ? (
                 <>
-                  <p className="mt-1.5 border-t border-slate-100 pt-1.5 text-[10px] font-semibold text-slate-600">
+                  <p className="mt-1 border-t border-slate-100 pt-1 text-[9px] font-semibold text-slate-600">
                     Action taken?
                   </p>
                   {isActionYes ? (
-                    <p className="mt-0.5 flex items-center justify-center gap-1 text-[11px] font-bold text-emerald-600">
-                      <Check className="h-3 w-3" /> Yes
+                    <p className="mt-0.5 flex items-center justify-center gap-1 text-[10px] font-bold" style={{ color: T.taskDone }}>
+                      <Check className="h-2.5 w-2.5" /> Yes
                     </p>
                   ) : isActionNo ? (
-                    <p className="mt-0.5 flex items-center justify-center gap-1 text-[11px] font-bold text-amber-600">
-                      <X className="h-3 w-3" /> No
+                    <p className="mt-0.5 flex items-center justify-center gap-1 text-[10px] font-bold" style={{ color: T.taskNotDone }}>
+                      <X className="h-2.5 w-2.5" /> No
                     </p>
                   ) : (
-                    <p className="mt-0.5 text-[10px] font-medium text-red-500">
+                    <p className="mt-0.5 text-[9px] font-medium" style={{ color: T.pastNotRecorded }}>
                       Not recorded
                     </p>
                   )}
                   {noteValue && (
-                    <p className="mt-1 max-w-[180px] truncate text-[10px] text-slate-600">
+                    <p className="mt-0.5 max-w-[160px] truncate text-[9px] text-slate-600">
                       Note: {noteValue}
                     </p>
                   )}
-                  <p className="mt-1 text-[9px] text-slate-400">Click to edit</p>
+                  <p className="mt-0.5 text-[8px] text-slate-400">Click to edit</p>
                 </>
               ) : (
-                <p className="mt-1.5 text-[9px] font-medium text-slate-400">Upcoming week</p>
+                <p className="mt-1 text-[8px] font-medium text-slate-400">Upcoming week</p>
               )}
             </div>
           </div>
@@ -380,6 +481,10 @@ const FarmerRow: React.FC<{
   onNoteSave: (key: string, value: string, action: ActionTaken) => void;
   rowIndex: number;
   highlightFarmerId?: string;
+  canGoPrevSection: boolean;
+  canGoNextSection: boolean;
+  onPrevSection: () => void;
+  onNextSection: () => void;
 }> = ({
   farmer,
   visibleNodes,
@@ -393,6 +498,10 @@ const FarmerRow: React.FC<{
   onNoteSave,
   rowIndex,
   highlightFarmerId,
+  canGoPrevSection,
+  canGoNextSection,
+  onPrevSection,
+  onNextSection,
 }) => {
   const getActionForNode = (nodeKey: string) => actions[nodeKey] ?? null;
 
@@ -401,177 +510,216 @@ const FarmerRow: React.FC<{
     const nodeKey = `${farmer.farmerId}-${visibleNodes[i].id}`;
     if (getActionForNode(nodeKey) === 'yes') {
       lastYesIndex = i;
-    } else if (isPastWeek(visibleNodes[i]) && getActionForNode(nodeKey) !== null) {
-      break;
-    } else if (isPastWeek(visibleNodes[i])) {
-      break;
     }
   }
-
-  const completedInView = visibleNodes.filter((node) => {
-    const nodeKey = `${farmer.farmerId}-${node.id}`;
-    return getActionForNode(nodeKey) === 'yes';
-  }).length;
 
   const progressPercent =
     lastYesIndex >= 0 ? getNodePosition(lastYesIndex, columnCount) : 0;
 
-  const openNodeKey = noteOpenKey?.startsWith(`${farmer.farmerId}-`)
-    ? noteOpenKey
-    : null;
-  const openNode = openNodeKey
-    ? visibleNodes.find((n) => `${farmer.farmerId}-${n.id}` === openNodeKey)
-    : null;
+  const openDotIndex =
+    noteOpenKey?.startsWith(`${farmer.farmerId}-`)
+      ? visibleNodes.findIndex(
+          (node) => `${farmer.farmerId}-${node.id}` === noteOpenKey,
+        )
+      : -1;
+
+  const openNode = openDotIndex >= 0 ? visibleNodes[openDotIndex] : null;
+  const openNodeKey = openNode ? `${farmer.farmerId}-${openNode.id}` : null;
+  const hasOpenPanel = openNodeKey != null;
+
+  const panelStyle: React.CSSProperties =
+    openDotIndex === 0
+      ? { left: 0 }
+      : openDotIndex === columnCount - 1
+        ? { right: 0 }
+        : {
+            left: `${getNodePosition(openDotIndex, columnCount)}%`,
+            transform: 'translateX(-50%)',
+          };
 
   return (
     <div
       className={[
         'overflow-visible rounded-2xl border bg-white p-3 shadow-sm sm:p-4',
+        hasOpenPanel ? 'relative z-30 pb-40' : '',
         highlightFarmerId === farmer.farmerId
-          ? 'border-emerald-400 ring-2 ring-emerald-200'
+          ? 'border-[#22C55E] ring-2 ring-[#22C55E]/30'
           : 'border-slate-200/80',
       ].join(' ')}
     >
-      <div className="mb-3 flex items-center justify-between gap-2 sm:mb-4">
-        <div className="flex min-w-0 items-center gap-2">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-emerald-500 to-green-600 text-xs font-bold text-white">
-            {rowIndex + 1}
-          </div>
-          <p className="truncate text-sm font-semibold text-slate-800">{farmer.farmerName}</p>
-        </div>
-        <span className="shrink-0 text-xs font-medium text-slate-500">
-          {completedInView} / {columnCount} weeks
-        </span>
-      </div>
-
-      <div
-        className="relative grid items-center overflow-visible pb-1"
-        style={{ gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))` }}
-      >
-        <div className="pointer-events-none absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-red-100" />
+      <div className="mb-3 flex items-center gap-2 sm:mb-4">
         <div
-          className="pointer-events-none absolute left-0 top-1/2 h-2 -translate-y-1/2 rounded-full bg-gradient-to-r from-emerald-400 via-green-500 to-teal-500 transition-all duration-700"
-          style={{ width: `${progressPercent}%` }}
-        />
-
-        {visibleNodes.map((node, dotIndex) => {
-          const nodeKey = `${farmer.farmerId}-${node.id}`;
-          const noteValue = notes[nodeKey] ?? node.note;
-          const actionTaken = getActionForNode(nodeKey);
-          const past = isPastWeek(node);
-
-          return (
-            <ProgressDot
-              key={nodeKey}
-              node={node}
-              farmerName={farmer.farmerName}
-              isActive={activeNode === nodeKey}
-              isSelected={noteOpenKey === nodeKey}
-              noteValue={noteValue}
-              actionTaken={actionTaken}
-              isPast={past}
-              dotIndex={dotIndex}
-              totalDots={visibleNodes.length}
-              onActivate={onNodeChange}
-              onSelect={() =>
-                onNoteOpen(noteOpenKey === nodeKey ? null : nodeKey)
-              }
-              nodeKey={nodeKey}
-            />
-          );
-        })}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold text-white"
+          style={{ backgroundColor: T.active }}
+        >
+          {rowIndex + 1}
+        </div>
+        <p className="min-w-0 truncate text-sm font-semibold" style={{ color: T.text }}>
+          {farmer.farmerName}
+        </p>
       </div>
 
-      {openNode && openNodeKey && (
-        <ActionEditPanel
-          node={openNode}
-          noteValue={notes[openNodeKey] ?? openNode.note}
-          actionTaken={getActionForNode(openNodeKey)}
-          onSave={(value, action) => {
-            onNoteSave(openNodeKey, value, action);
-            onNoteOpen(null);
-          }}
-          onClose={() => onNoteOpen(null)}
+      <div className="flex items-center gap-1 sm:gap-1.5">
+        <SlotNavButton
+          direction="prev"
+          disabled={!canGoPrevSection}
+          onClick={onPrevSection}
         />
-      )}
+
+        <div className="relative min-w-0 flex-1 overflow-visible">
+        {visibleNodes.length === 0 ? (
+          <div className="h-10" aria-hidden />
+        ) : (
+        <div
+          className="relative grid h-10 items-center overflow-visible"
+          style={{ gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))` }}
+        >
+          <div
+            className="pointer-events-none absolute inset-x-0 top-1/2 z-0 h-1.5 -translate-y-1/2 rounded-full"
+            style={{ backgroundColor: T.trackBg }}
+          />
+          <div
+            className="pointer-events-none absolute left-0 top-1/2 z-0 h-1.5 -translate-y-1/2 rounded-full transition-all duration-700"
+            style={{
+              width: `${progressPercent}%`,
+              background: `linear-gradient(to right, ${T.trackFillFrom}, ${T.trackFillTo})`,
+            }}
+          />
+
+          {visibleNodes.map((node, dotIndex) => {
+            const nodeKey = `${farmer.farmerId}-${node.id}`;
+            const noteValue = notes[nodeKey] ?? node.note;
+            const actionTaken = getActionForNode(nodeKey);
+            const past = isPastWeek(node);
+
+            return (
+              <ProgressDot
+                key={nodeKey}
+                node={node}
+                farmerName={farmer.farmerName}
+                isActive={activeNode === nodeKey}
+                isSelected={noteOpenKey === nodeKey}
+                noteValue={noteValue}
+                actionTaken={actionTaken}
+                isPast={past}
+                isLatest={node.isLatest}
+                isFromApi={node.isFromApi}
+                dotIndex={dotIndex}
+                totalDots={visibleNodes.length}
+                onActivate={onNodeChange}
+                onSelect={() =>
+                  onNoteOpen(noteOpenKey === nodeKey ? null : nodeKey)
+                }
+                nodeKey={nodeKey}
+              />
+            );
+          })}
+
+          {openNode && openNodeKey && openDotIndex >= 0 && (
+            <div
+              className="pointer-events-none absolute top-full z-50 mt-2"
+              style={panelStyle}
+            >
+              <div className="pointer-events-auto">
+                <ActionEditPanel
+                  node={openNode}
+                  noteValue={notes[openNodeKey] ?? openNode.note}
+                  actionTaken={getActionForNode(openNodeKey)}
+                  onSave={(value, action) => {
+                    onNoteSave(openNodeKey, value, action);
+                    onNoteOpen(null);
+                  }}
+                  onClose={() => onNoteOpen(null)}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+        )}
+        </div>
+
+        <SlotNavButton
+          direction="next"
+          disabled={!canGoNextSection}
+          onClick={onNextSection}
+        />
+      </div>
     </div>
   );
 };
 
 const ProgressBar: React.FC<ProgressBarProps> = ({
-  districtId = 'kalburagi',
+  farmerConfigs = [],
   farmers,
   searchQuery = '',
-  initialMonthSection = DEFAULT_MONTH_SECTION,
+  initialMonthSection: _initialMonthSection = DEFAULT_MONTH_SECTION,
   highlightFarmerId,
 }) => {
+  const configTimelines = useMemo(
+    () => buildTimelinesFromConfigs(farmerConfigs),
+    [farmerConfigs],
+  );
+
+  const sourceFarmers = farmers ?? configTimelines;
+
   const [activeNode, setActiveNode] = useState<string | null>(null);
   const [noteOpenKey, setNoteOpenKey] = useState<string | null>(null);
   const [notes, setNotes] = useState<Record<string, string>>({});
-  const [actions, setActions] = useState<Record<string, ActionTaken>>(() => {
-    const initial: Record<string, ActionTaken> = {};
-    const list = DISTRICT_FARMERS[districtId] ?? DISTRICT_FARMERS.kalburagi;
-    for (const farmer of list) {
-      const cfg = DISTRICT_PROGRESS[districtId]?.find((c) => c.farmerId === farmer.farmerId);
-      if (cfg) {
-        Object.assign(
-          initial,
-          buildInitialActions(
-            farmer.farmerId,
-            cfg.weeksDonePerSection,
-            cfg.missedCallWeeks ?? [],
-          ),
-        );
-      }
-    }
-    return initial;
-  });
-  const [selectedSection, setSelectedSection] = useState<MonthSectionLabel>(initialMonthSection);
+  const [actions, setActions] = useState<Record<string, ActionTaken>>(() =>
+    buildInitialActionsForConfigs(farmerConfigs),
+  );
+  const [farmerSections, setFarmerSections] = useState<
+    Record<string, MonthSectionLabel>
+  >({});
 
   useEffect(() => {
-    setSelectedSection(initialMonthSection);
-  }, [initialMonthSection]);
+    if (farmerConfigs.length === 0) {
+      setFarmerSections({});
+      return;
+    }
+
+    setFarmerSections((prev) => {
+      const next: Record<string, MonthSectionLabel> = {};
+      for (const cfg of farmerConfigs) {
+        if (highlightFarmerId && cfg.farmerId === highlightFarmerId) {
+          next[cfg.farmerId] = resolveLatestMonthSectionFromConfigs([cfg]);
+        } else if (prev[cfg.farmerId]) {
+          next[cfg.farmerId] = prev[cfg.farmerId];
+        } else {
+          next[cfg.farmerId] = resolveLatestMonthSectionFromConfigs([cfg]);
+        }
+      }
+      return next;
+    });
+  }, [farmerConfigs, highlightFarmerId]);
 
   useEffect(() => {
-    const list = DISTRICT_FARMERS[districtId] ?? DISTRICT_FARMERS.kalburagi;
-    const initial: Record<string, ActionTaken> = {};
-    for (const farmer of list) {
-      const cfg = DISTRICT_PROGRESS[districtId]?.find((c) => c.farmerId === farmer.farmerId);
-      if (cfg) {
-        Object.assign(
-          initial,
-          buildInitialActions(
-            farmer.farmerId,
-            cfg.weeksDonePerSection,
-            cfg.missedCallWeeks ?? [],
-          ),
-        );
-      }
-    }
-    setActions(initial);
+    setActions(buildInitialActionsForConfigs(farmerConfigs));
     setNotes({});
     setActiveNode(null);
     setNoteOpenKey(null);
-  }, [districtId]);
+  }, [farmerConfigs]);
 
   const displayFarmers = useMemo(() => {
-    const list = farmers ?? DISTRICT_FARMERS[districtId] ?? DISTRICT_FARMERS.kalburagi;
     const query = searchQuery.trim().toLowerCase();
-    if (!query) return list;
-    return list.filter(
+    if (!query) return sourceFarmers;
+    return sourceFarmers.filter(
       (farmer) =>
         farmer.farmerName.toLowerCase().includes(query) ||
         farmer.farmerId.toLowerCase().includes(query),
     );
-  }, [farmers, districtId, searchQuery]);
+  }, [sourceFarmers, searchQuery]);
 
-  const activeRange = useMemo(() => {
-    const section = MONTH_SECTIONS.find((s) => s.label === selectedSection)!;
-    return { start: section.start, end: section.end, count: section.count };
-  }, [selectedSection]);
+  const configByFarmerId = useMemo(
+    () => new Map(farmerConfigs.map((cfg) => [cfg.farmerId, cfg])),
+    [farmerConfigs],
+  );
 
-  const getVisibleNodes = (farmer: FarmerTimeline) =>
-    farmer.nodes.slice(activeRange.start, activeRange.end + 1);
+  const setFarmerSection = (farmerId: string, label: MonthSectionLabel) => {
+    setFarmerSections((prev) => ({ ...prev, [farmerId]: label }));
+    setActiveNode(null);
+    setNoteOpenKey(null);
+  };
 
   const handleNoteSave = (key: string, value: string, action: ActionTaken) => {
     setActions((prev) => ({ ...prev, [key]: action }));
@@ -580,25 +728,23 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     }
   };
 
-  const handleSectionSelect = (label: MonthSectionLabel) => {
-    setSelectedSection(label);
-    setActiveNode(null);
-    setNoteOpenKey(null);
-  };
-
   return (
     <div className="space-y-4">
       <div className="overflow-visible rounded-xl border border-slate-100 bg-slate-50/60 p-3 sm:p-4">
-        <MonthSectionHeader
-          selectedSection={selectedSection}
-          onSelect={handleSectionSelect}
-        />
+        {displayFarmers.length > VISIBLE_FARMER_ROWS && (
+          <p className="mb-2 text-center text-xs font-medium text-slate-500">
+            {/* Showing {VISIBLE_FARMER_ROWS} of {displayFarmers.length} farmers — scroll down for */}
+            {/* more */}
+          </p>
+        )}
 
-        <p className="mb-3 text-center text-xs font-medium text-emerald-700">
-          {/* {selectedSection} — {WEEKS_PER_SECTION} weekly check-ins (Farmer 1, 2, 3) */}
-        </p>
-
-        <div className="space-y-3 overflow-visible pb-2">
+        <div
+          className={[
+            'space-y-3 pr-1',
+            noteOpenKey ? 'overflow-visible' : 'overflow-x-hidden overflow-y-auto',
+          ].join(' ')}
+          style={{ maxHeight: FARMER_LIST_MAX_HEIGHT }}
+        >
           {displayFarmers.length === 0 ? (
             <div className="rounded-xl border border-dashed border-slate-200 bg-white px-4 py-10 text-center">
               <p className="text-sm font-medium text-slate-600">No farmers found</p>
@@ -607,12 +753,30 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
               </p>
             </div>
           ) : (
-            displayFarmers.map((farmer, index) => (
+            displayFarmers.map((farmer, index) => {
+              const cfg = configByFarmerId.get(farmer.farmerId);
+              const farmerSection =
+                farmerSections[farmer.farmerId] ?? DEFAULT_MONTH_SECTION;
+              const section =
+                MONTH_SECTIONS.find((s) => s.label === farmerSection) ??
+                MONTH_SECTIONS[0];
+              const farmerSectionIndex = getSectionIndex(farmerSection);
+              const visibleNodes = buildSectionTimelineNodes(
+                farmer.farmerId,
+                section.start,
+                section.count,
+                {
+                  plantationDate: cfg?.plantationDate,
+                  yieldReadings: cfg?.yieldReadings,
+                },
+              );
+
+              return (
               <FarmerRow
                 key={farmer.farmerId}
                 farmer={farmer}
-                visibleNodes={getVisibleNodes(farmer)}
-                columnCount={activeRange.count}
+                visibleNodes={visibleNodes}
+                columnCount={Math.max(visibleNodes.length, 1)}
                 activeNode={activeNode}
                 noteOpenKey={noteOpenKey}
                 notes={notes}
@@ -622,33 +786,73 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
                 onNoteSave={handleNoteSave}
                 rowIndex={index}
                 highlightFarmerId={highlightFarmerId}
+                canGoPrevSection={farmerSectionIndex > 0}
+                canGoNextSection={
+                  farmerSectionIndex < MONTH_SECTIONS.length - 1
+                }
+                onPrevSection={() => {
+                  if (farmerSectionIndex <= 0) return;
+                  setFarmerSection(
+                    farmer.farmerId,
+                    MONTH_SECTIONS[farmerSectionIndex - 1].label,
+                  );
+                }}
+                onNextSection={() => {
+                  if (farmerSectionIndex >= MONTH_SECTIONS.length - 1) return;
+                  setFarmerSection(
+                    farmer.farmerId,
+                    MONTH_SECTIONS[farmerSectionIndex + 1].label,
+                  );
+                }}
               />
-            ))
+              );
+            })
           )}
         </div>
       </div>
 
       <div className="flex flex-wrap items-center gap-4 rounded-xl border border-slate-100 bg-white px-4 py-3 text-xs text-slate-500">
         <span className="flex items-center gap-2">
-          <span className="relative flex h-3 w-3 items-center justify-center rounded-full bg-white ring-2 ring-emerald-500">
-            <Check className="h-2 w-2 text-emerald-600" strokeWidth={3} />
+          <span
+            className="relative flex h-3 w-3 items-center justify-center rounded-full bg-white"
+            style={{ boxShadow: `0 0 0 2px ${T.taskDoneRing}` }}
+          >
+            <Check className="h-2 w-2" strokeWidth={3} style={{ color: T.taskDone }} />
           </span>
           Action taken — Yes
         </span>
         <span className="flex items-center gap-2">
-          <span className="relative flex h-3 w-3 items-center justify-center rounded-full bg-white ring-2 ring-amber-500">
-            <X className="h-2 w-2 text-amber-600" strokeWidth={3} />
+          <span
+            className="relative flex h-3 w-3 items-center justify-center rounded-full bg-white"
+            style={{ boxShadow: `0 0 0 2px ${T.taskNotDoneRing}` }}
+          >
+            <X className="h-2 w-2" strokeWidth={3} style={{ color: T.taskNotDone }} />
           </span>
           Action taken — No
         </span>
         <span className="flex items-center gap-2">
-          <span className="relative flex h-3 w-3 items-center justify-center rounded-full bg-white ring-2 ring-red-500">
-            <span className="block h-1.5 w-1.5 rounded-full bg-red-500" />
+          <span
+            className="relative flex h-3 w-3 items-center justify-center rounded-full bg-white"
+            style={{ boxShadow: '0 0 0 2px #15803D' }}
+          >
+            <span className="block h-1.5 w-1.5 rounded-full bg-emerald-600" />
+          </span>
+          Latest API yield
+        </span>
+        <span className="flex items-center gap-2">
+          <span
+            className="relative flex h-3 w-3 items-center justify-center rounded-full bg-white"
+            style={{ boxShadow: `0 0 0 2px ${T.pastNotRecordedRing}` }}
+          >
+            <span
+              className="block h-1.5 w-1.5 rounded-full"
+              style={{ backgroundColor: T.pastNotRecorded }}
+            />
           </span>
           Past week — not recorded
         </span>
         <span className="text-slate-400">
-          Select a month → 10 weekly dots · click dot for Yes/No action
+          {/* Select a month → 10 weekly dots · click dot for Yes/No action */}
         </span>
       </div>
     </div>

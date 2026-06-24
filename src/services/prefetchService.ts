@@ -6,7 +6,7 @@ import {
   getFieldOfficerAgroStats,
   getManagerFieldOfficersAgroStats,
 } from '../api';
-import { getFastApiToken } from '../utils/auth';
+import { getFastApiToken, isPlanetEyeDemoUser } from '../utils/auth';
 import { getCache } from '../components/utils/cache';
 import { getOrFetchJson } from "../utils/requestCache";
 
@@ -30,6 +30,7 @@ type UserRole = 'farmer' | 'manager' | 'admin' | 'fieldofficer' | 'owner';
 export const prefetchFarmerProfile = async (
   setCached: (key: string, data: any) => void
 ): Promise<boolean> => {
+  if (isPlanetEyeDemoUser()) return true;
   try {
     const response: any = await getFarmerMyProfile();
     setCached('farmerProfile', response?.data);
@@ -71,6 +72,10 @@ export const prefetchAllData = async (
   selectedPlotName?: string | null,
   role?: UserRole | null
 ): Promise<PrefetchResult> => {
+  if (isPlanetEyeDemoUser()) {
+    return { success: true, fetchedEndpoints: [], errors: [] };
+  }
+
   const errors: string[] = [];
   const fetchedEndpoints: string[] = [];
   const today = new Date().toISOString().split('T')[0];

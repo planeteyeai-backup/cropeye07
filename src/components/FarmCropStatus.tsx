@@ -50,10 +50,11 @@ import {
 import "leaflet/dist/leaflet.css";
 import axios from "axios";
 import { getCache, setCache } from "../utils/cache";
-import { getRecentFarmers, getFieldOfficerAgroStats } from "../api";
+import { getRecentFarmers, getFieldOfficerAgroStats, fetchPlotBoundaryCoordinates } from "../api";
 import { getUserData } from "../utils/auth";
 import { useAppContext } from "../context/AppContext";
-import { fetchFieldScoreForPlot } from "../utils/fieldScore";
+import { fetchFieldScoreForPlot, fieldScoreCacheKey } from "../utils/fieldScore";
+import { findPlotRef } from "../utils/plotName";
 import { getPlantationFromRecord } from "../utils/plantation";
 import MapCropStatusOverlay from "./MapCropStatusOverlay";
 
@@ -250,13 +251,13 @@ const OfficerDashboard: React.FC = () => {
   const setPlotCoordinatesFromState = (plotId: string): void => {
     // Find the selected farmer and their plot
     const farmer = farmers.find((f) => String(f.id) === selectedFarmerId);
-    const plot = farmer?.plots?.find((p: any) => p.fastapi_plot_id === plotId);
+    const plot = findPlotRef(farmer?.plots, plotId);
 
-    if (plot && plot.boundary?.coordinates) {
-      const geom = plot.boundary.coordinates[0];
+    if (plot?.boundary?.coordinates) {
+      const geom = (plot.boundary.coordinates as [number, number][][])[0];
       if (geom) {
         // The API gives [lng, lat], Leaflet needs [lat, lng]
-        const coords = geom.map(([lng, lat]: [number, number]) => [lat, lng]);
+        const coords = geom.map(([lng, lat]: [number, number]) => [lat, lng]) as [number, number][];
         setPlotCoordinates(coords);
 
         // Calculate and set map center
@@ -322,9 +323,7 @@ const OfficerDashboard: React.FC = () => {
       return { plantationDate: null, plantationType: null };
     }
     const farmer = farmers.find((f) => String(f.id) === selectedFarmerId);
-    const plot = farmer?.plots?.find(
-      (p: any) => p.fastapi_plot_id === selectedPlotId,
-    );
+    const plot = findPlotRef(farmer?.plots, selectedPlotId);
     const info = getPlantationFromRecord(plot ?? farmer);
     return {
       plantationDate:
@@ -475,11 +474,11 @@ const OfficerDashboard: React.FC = () => {
       // Check other plot-level caches too (so we can avoid showing loading when everything is already cached)
       const indicesCacheKey = `indices_${selectedPlotId}`;
       const stressCacheKey = `stress_${selectedPlotId}_NDRE_0.15`;
-      const fieldScoreCacheKey = `fieldScore_${selectedPlotId}`;
+      const scoreCacheKey = fieldScoreCacheKey(selectedPlotId);
 
       const cachedIndices = getCache(indicesCacheKey);
       const cachedStress = getCache(stressCacheKey);
-      const cachedFieldScore = getCache(fieldScoreCacheKey);
+      const cachedFieldScore = getCache(scoreCacheKey);
 
       const cachedCurrentPlotData = allPlotsData
         ? allPlotsData[selectedPlotId] ??
@@ -619,7 +618,7 @@ const OfficerDashboard: React.FC = () => {
         fetchPromises.push(
           fetchFieldScoreForPlot(selectedPlotId, farmer?.plots)
             .then((score) => {
-              if (score != null) setCache(fieldScoreCacheKey, score);
+              if (score != null) setCache(scoreCacheKey, score);
               return { type: "fieldScore", data: score };
             })
             .catch(() => ({ type: "fieldScore", data: null })),
@@ -725,20 +724,10 @@ const OfficerDashboard: React.FC = () => {
     }
 
     try {
-      const today = new Date().toISOString().slice(0, 10);
-      const response = await axios.post(
-        `${BASE_URL}/analyze?plot_name=${plotId}&date=${today}`,
-      );
-
-      const geom = response.data?.features?.[0]?.geometry?.coordinates?.[0];
-      if (geom) {
-        const coords = geom.map(([lng, lat]: [number, number]) => [lat, lng]);
+      const coords = await fetchPlotBoundaryCoordinates(plotId);
+      if (coords && coords.length > 0) {
         setPlotCoordinates(coords);
-
-        // Cache the coordinates
         setPlotCoordinatesCache((prev) => new Map(prev.set(plotId, coords)));
-
-        // Calculate and set map center
         const center = calculateCenter(coords);
         setMapCenter(center);
         setMapKey((prev) => prev + 1);
@@ -1087,8 +1076,8 @@ const OfficerDashboard: React.FC = () => {
     const percent = Math.max(0, Math.min(1, value / max));
     const angle = 180 * percent;
     const cx = width / 2;
-    const cy = height * 0.8;
-    const r = width * 0.35;
+    const cy = height * 0.82;
+    const r = Math.min(width, height) * 0.38;
     const needleLength = r * 0.9;
     const needleAngle = 180 - angle;
     const rad = (Math.PI * needleAngle) / 180;
@@ -1104,7 +1093,13 @@ const OfficerDashboard: React.FC = () => {
 
     return (
       <div className="flex flex-col items-center">
-        <svg width={width} height={height} className="overflow-visible">
+        <div className="text-center">
+          <div className="text-xl font-bold text-gray-800 leading-tight">
+            {value.toFixed(1)}
+            <span className="text-sm font-semibold text-gray-600">{unit}</span>
+          </div>
+        </div>
+        <svg width={width} height={height} className="overflow-hidden">
           <path
             d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`}
             fill="none"
@@ -1130,14 +1125,6 @@ const OfficerDashboard: React.FC = () => {
             strokeLinecap="round"
           />
           <circle cx={cx} cy={cy} r="4" fill="#374151" />
-          <text
-            x={cx}
-            y={cy - r - 15}
-            textAnchor="middle"
-            className="text-lg font-bold fill-gray-700"
-          >
-            {value.toFixed(1)} {unit}
-          </text>
         </svg>
         <p className="text-sm text-gray-600 mt-2 font-medium">{title}</p>
       </div>
@@ -1614,21 +1601,21 @@ const OfficerDashboard: React.FC = () => {
                   height={130}
                 />
                 <div className="mt-2 text-center">
-                  <div className="flex items-center justify-center gap-2 text-xs flex-wrap">
-                    <div className="flex items-center gap-1">
+                  <div className="grid grid-cols-1 gap-y-1 text-xs sm:grid-cols-3 sm:gap-x-3">
+                    <div className="flex items-center justify-center gap-1">
                       <div className="w-2 h-2 rounded bg-red-500"></div>
                       <span className="text-red-700 font-semibold">
                         min: {(metrics.sugarYieldMin || 0).toFixed(1)} T/acre
                       </span>
                     </div>
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center justify-center gap-1">
                       <div className="w-2 h-2 rounded bg-purple-500"></div>
                       <span className="text-purple-700 font-semibold">
                         mean: {(metrics.sugarYieldMean || 0).toFixed(1)}{" "}
                         T/acre
                       </span>
                     </div>
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center justify-center gap-1">
                       <div className="w-2 h-2 rounded bg-green-500"></div>
                       <span className="text-green-700 font-semibold">
                         max: {(metrics.sugarYieldMax || 0).toFixed(1)} T/acre

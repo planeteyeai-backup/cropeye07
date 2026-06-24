@@ -2,10 +2,16 @@
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 import { Satellite, Leaf, Mail, Lock, Eye, EyeOff } from 'lucide-react';
-import { setAuthData, setRefreshToken } from '../utils/auth';
+import {
+  matchesPlanetEyeDemoLogin,
+  PLANETEYE_DEMO_TOKEN,
+  PLANETEYE_DEMO_USERNAME,
+  setAuthData,
+  setRefreshToken,
+} from '../utils/auth';
 import { login, setAuthToken as setApiAuthToken } from '../api';
 
-export type UserRole = "manager" | "admin" | "fieldofficer" | "farmer" | "owner";
+export type UserRole = "manager" | "admin" | "fieldofficer" | "farmer" | "owner" | "planeteye";
 
 interface LoginProps {
   onLoginSuccess: (role: UserRole, token: string) => void;
@@ -213,6 +219,21 @@ const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
       const identifier = phone_number.trim();
       const pass = password.trim();
 
+      if (matchesPlanetEyeDemoLogin(identifier, pass)) {
+        const userDataToStore = {
+          first_name: 'Planet',
+          last_name: 'Eye',
+          phone_number: '',
+          username: PLANETEYE_DEMO_USERNAME,
+          id: 'demo-planeteye',
+          isPlanetEyeDemo: true,
+        };
+
+        setAuthData(PLANETEYE_DEMO_TOKEN, 'planeteye', userDataToStore);
+        onLoginSuccess('planeteye', PLANETEYE_DEMO_TOKEN);
+        return;
+      }
+
       // Keep existing login exactly as-is (phone_number + password on Django).
       const response = await login(identifier, pass);
       const result = response.data;
@@ -373,8 +394,8 @@ const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
                       <div className="flex items-center border border-gray-300 rounded-lg px-3 py-3 bg-white focus-within:ring-2 focus-within:ring-emerald-500 focus-within:border-emerald-500">
                         <Mail className="w-5 h-5 mr-3 text-gray-500" />
                         <input
-                          type="phone_number"
-                      placeholder="Enter phone_number"
+                          type="text"
+                      placeholder="Phone number or username"
                       value={phone_number}
                       onChange={(e) => setPhoneNumber(e.target.value)}
                           className="w-full outline-none text-gray-700"

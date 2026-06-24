@@ -127,8 +127,8 @@ const PieChartWithNeedle: React.FC<PieChartWithNeedleProps> = ({
   const percent = Math.max(0, Math.min(1, value / max));
   const angle = 180 * percent;
   const cx = width / 2;
-  const cy = height * 0.9;
-  const r = width * 0.35;
+  const cy = height * 0.82;
+  const r = Math.min(width, height) * 0.38;
   const needleLength = r * 0.9;
   const needleAngle = 180 - angle;
   const rad = (Math.PI * needleAngle) / 180;
@@ -144,7 +144,13 @@ const PieChartWithNeedle: React.FC<PieChartWithNeedleProps> = ({
 
   return (
     <div className="flex flex-col items-center">
-      <svg width={width} height={height} className="overflow-visible">
+      <div className="text-center">
+        <div className="text-base font-bold text-gray-800 leading-tight">
+          {value.toFixed(1)}
+          <span className="text-xs font-semibold text-gray-600">{unit}</span>
+        </div>
+      </div>
+      <svg width={width} height={height} className="overflow-hidden">
         <path
           d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`}
           fill="none"
@@ -170,15 +176,6 @@ const PieChartWithNeedle: React.FC<PieChartWithNeedleProps> = ({
           strokeLinecap="round"
         />
         <circle cx={cx} cy={cy} r="3" fill="#374151" />
-        <text
-          x={cx}
-          y={cy - r - 8}
-          textAnchor="middle"
-          className="text-sm font-semibold fill-gray-700"
-        >
-          {value.toFixed(1)}
-          {unit}
-        </text>
       </svg>
       <p className="text-xs text-gray-600 mt-1 text-center">{title}</p>
     </div>
@@ -1545,7 +1542,7 @@ const FarmerDashboard: React.FC = () => {
               </div>
               <p className="text-xs text-gray-600">
                 {t("farmerDashboard.card.stressEvents", {
-                  defaultValue: "pest Stress Events",
+                  defaultValue: "Stress Events",
                 })}
               </p>
             </div>
@@ -1662,8 +1659,8 @@ const FarmerDashboard: React.FC = () => {
                 })}
               </p>
               <div className="text-center">
-                <div className="flex items-center justify-center gap-2 text-xs flex-wrap">
-                  <div className="flex items-center gap-1">
+                <div className="grid grid-cols-1 gap-y-1 text-xs sm:grid-cols-3 sm:gap-x-3">
+                  <div className="flex items-center justify-center gap-1">
                     <div className="w-2 h-2 rounded bg-red-500"></div>
                     <span className="text-red-700 font-semibold">
                       {t("farmerDashboard.labels.minWithColon", {
@@ -1675,7 +1672,7 @@ const FarmerDashboard: React.FC = () => {
                       })}
                     </span>
                   </div>
-                  <div className="flex items-center gap-1">
+                  <div className="flex items-center justify-center gap-1">
                     <div className="w-2 h-2 rounded bg-purple-500"></div>
                     <span className="text-purple-700 font-semibold">
                       {t("farmerDashboard.labels.meanWithColon", {
@@ -1687,7 +1684,7 @@ const FarmerDashboard: React.FC = () => {
                       })}
                     </span>
                   </div>
-                  <div className="flex items-center gap-1">
+                  <div className="flex items-center justify-center gap-1">
                     <div className="w-2 h-2 rounded bg-green-500"></div>
                     <span className="text-green-700 font-semibold">
                       {t("farmerDashboard.labels.maxWithColon", {

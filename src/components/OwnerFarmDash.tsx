@@ -50,10 +50,12 @@ import {
 import "leaflet/dist/leaflet.css";
 import axios from "axios";
 import { getCache, setCache } from "../utils/cache";
-import { fetchFieldScoreForPlot } from "../utils/fieldScore";
+import { fetchFieldScoreForPlot, fieldScoreCacheKey } from "../utils/fieldScore";
+import { findPlotRef } from "../utils/plotName";
 import MapCropStatusOverlay from "./MapCropStatusOverlay";
 import api, {
   encodePlotIdForEventsUrl,
+  fetchPlotBoundaryCoordinates,
   getCurrentUser,
   getFarmersByFieldOfficer,
   getTeamConnect,
@@ -837,18 +839,8 @@ const OwnerFarmDash: React.FC = () => {
       (f) => getFarmerId(f) === String(selectedFarmerId),
     );
     if (!farmer) return null;
-    return (
-      extractPlotsFromFarmer(farmer).find((plot: any) => {
-        const candidates = [
-          plot?.fastapi_plot_id,
-          plot?.events_plot_id,
-          plot?.plot_name,
-          plot?.plot_id,
-          plot?.id,
-        ].filter((pid) => pid != null && `${pid}`.trim() !== "");
-        return candidates.some((pid) => String(pid) === String(plotId));
-      }) ?? null
-    );
+    const allPlots = extractPlotsFromFarmer(farmer);
+    return findPlotRef(allPlots, plotId) ?? null;
   };
 
   const selectedPlotPlantation = React.useMemo(() => {
@@ -1519,19 +1511,23 @@ const OwnerFarmDash: React.FC = () => {
       }
 
       // Field score - background
-      const fieldScoreCacheKey = `fieldScore_${selectedPlotId}`;
-      const cachedFieldScore = getCache(fieldScoreCacheKey);
+      const scoreCacheKey = fieldScoreCacheKey(selectedPlotId);
+      const cachedFieldScore = getCache(scoreCacheKey);
 
       if (cachedFieldScore === undefined || cachedFieldScore === null) {
         const plotRef = findPlotInSelection(selectedPlotId);
         const farmer = farmersForSelectedOfficer.find(
           (f) => getFarmerId(f) === String(selectedFarmerId),
         );
-        const plotRefs = farmer?.plots ?? (plotRef ? [plotRef] : null);
+        const plotRefs = farmer
+          ? extractPlotsFromFarmer(farmer)
+          : plotRef
+            ? [plotRef]
+            : null;
 
         fetchFieldScoreForPlot(selectedPlotId, plotRefs)
           .then((score) => {
-            if (score != null) setCache(fieldScoreCacheKey, score);
+            if (score != null) setCache(scoreCacheKey, score);
             setMetrics((prev) => ({
               ...prev,
               fieldScore: score,
@@ -1869,14 +1865,8 @@ const OwnerFarmDash: React.FC = () => {
     }
 
     try {
-      const today = new Date().toISOString().slice(0, 10);
-      const response = await axios.post(
-        `${BASE_URL}/analyze?plot_name=${plotId}&date=${today}`,
-      );
-
-      const geom = response.data?.features?.[0]?.geometry?.coordinates?.[0];
-      if (geom) {
-        const coords = geom.map(([lng, lat]: [number, number]) => [lat, lng]);
+      const coords = await fetchPlotBoundaryCoordinates(plotId);
+      if (coords && coords.length > 0) {
         setPlotCoordinates(coords);
         setPlotCoordinatesCache((prev) => new Map(prev.set(plotId, coords)));
         setMapCenter(calculateCenterFromCoords(coords));
@@ -2242,8 +2232,8 @@ const OwnerFarmDash: React.FC = () => {
     const percent = Math.max(0, Math.min(1, value / max));
     const angle = 180 * percent;
     const cx = width / 2;
-    const cy = height * 0.8;
-    const r = width * 0.35;
+    const cy = height * 0.82;
+    const r = Math.min(width, height) * 0.38;
     const needleLength = r * 0.9;
     const needleAngle = 180 - angle;
     const rad = (Math.PI * needleAngle) / 180;
@@ -2259,7 +2249,13 @@ const OwnerFarmDash: React.FC = () => {
 
     return (
       <div className="flex flex-col items-center">
-        <svg width={width} height={height} className="overflow-visible">
+        <div className="text-center">
+          <div className="text-xl font-bold text-gray-800 leading-tight">
+            {value.toFixed(1)}
+            <span className="text-sm font-semibold text-gray-600">{unit}</span>
+          </div>
+        </div>
+        <svg width={width} height={height} className="overflow-hidden">
           <path
             d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`}
             fill="none"
@@ -2285,14 +2281,6 @@ const OwnerFarmDash: React.FC = () => {
             strokeLinecap="round"
           />
           <circle cx={cx} cy={cy} r="4" fill="#374151" />
-          <text
-            x={cx}
-            y={cy - r - 15}
-            textAnchor="middle"
-            className="text-lg font-bold fill-gray-700"
-          >
-            {value.toFixed(1)} {unit}
-          </text>
         </svg>
         <p className="text-sm text-gray-600 mt-2 font-medium">{title}</p>
       </div>
@@ -2939,21 +2927,21 @@ const OwnerFarmDash: React.FC = () => {
                   height={130}
                 />
                 <div className="mt-2 text-center">
-                  <div className="flex items-center justify-center gap-2 text-xs flex-wrap">
-                    <div className="flex items-center gap-1">
+                  <div className="grid grid-cols-1 gap-y-1 text-xs sm:grid-cols-3 sm:gap-x-3">
+                    <div className="flex items-center justify-center gap-1">
                       <div className="w-2 h-2 rounded bg-red-500"></div>
                       <span className="text-red-700 font-semibold">
                         min: {(metrics.sugarYieldMin || 0).toFixed(1)} T/acre
                       </span>
                     </div>
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center justify-center gap-1">
                       <div className="w-2 h-2 rounded bg-purple-500"></div>
                       <span className="text-purple-700 font-semibold">
                         mean: {(metrics.expectedYield || 0).toFixed(1)}{" "}
                         T/acre
                       </span>
                     </div>
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center justify-center gap-1">
                       <div className="w-2 h-2 rounded bg-green-500"></div>
                       <span className="text-green-700 font-semibold">
                         max: {(metrics.sugarYieldMax || 0).toFixed(1)} T/acre

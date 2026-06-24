@@ -134,7 +134,32 @@ export const getAuthHeader = (): { Authorization: string } | {} => {
   return token ? { Authorization: `Bearer ${token}` } : {};
 };
 
-// Validate token format (basic validation)
+// Validate token format (basic validation) — demo session is not a JWT for API calls
 export const isValidToken = (token: string): boolean => {
+  if (isPlanetEyeDemoToken(token)) return false;
   return token && token.length > 0 && token.includes('.');
 };
+
+/** Demo login for progress dashboards only (no backend account). */
+export const PLANETEYE_DEMO_USERNAME = 'planeteye';
+export const PLANETEYE_DEMO_PASSWORD = 'pass@123';
+export const PLANETEYE_DEMO_TOKEN = 'planeteye-demo-session';
+
+export const isPlanetEyeDemoToken = (token: string | null | undefined): boolean =>
+  token === PLANETEYE_DEMO_TOKEN;
+
+export const isPlanetEyeDemoUser = (): boolean => {
+  if (isPlanetEyeDemoToken(getAuthToken())) return true;
+  const user = getUserData();
+  return (
+    user?.isPlanetEyeDemo === true ||
+    String(user?.username ?? '').toLowerCase() === PLANETEYE_DEMO_USERNAME
+  );
+};
+
+export const matchesPlanetEyeDemoLogin = (
+  identifier: string,
+  password: string,
+): boolean =>
+  identifier.trim().toLowerCase() === PLANETEYE_DEMO_USERNAME &&
+  password === PLANETEYE_DEMO_PASSWORD;

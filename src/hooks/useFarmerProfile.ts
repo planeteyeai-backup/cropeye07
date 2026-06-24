@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { getFarmerProfile, getFarmerMyProfile } from '../api';
-import { getAuthToken, isValidToken, getUserRole } from '../utils/auth';
+import { getAuthToken, isValidToken, getUserRole, isPlanetEyeDemoUser } from '../utils/auth';
 import { getCache } from '../components/utils/cache';
 
 interface FarmerProfile {
@@ -233,7 +233,12 @@ export const useFarmerProfile = () => {
     const token = getAuthToken();
     const userRole = getUserRole();
     
-    if (!token || !isValidToken(token) || userRole !== 'farmer') {
+    if (
+      !token ||
+      !isValidToken(token) ||
+      userRole !== 'farmer' ||
+      isPlanetEyeDemoUser()
+    ) {
       setLoading(false);
       setError(null);
       setProfile(null);
