@@ -63,7 +63,7 @@ function extractFetchError(err: unknown): string {
     null;
   if (apiMsg) return String(apiMsg);
   if (axiosErr.response?.status === 404) {
-    return 'Owner not found for this account. Set VITE_PROGRESS_OWNER_ID=5 in .env';
+    return 'Owner not found for this account. Set VITE_PROGRESS_OWNER_ID=2476 in .env';
   }
   return axiosErr.message ?? 'Failed to load sugar factories from server';
 }

@@ -159,3 +159,28 @@ export function buildSectionTimelineNodes(
 export function sectionUsesApiReadings(nodes: SectionTimelineNode[]): boolean {
   return nodes.length > 0;
 }
+
+/**
+ * Live view: one dot per farmer — newest API yield only.
+ */
+export function buildLiveTimelineNode(
+  farmerId: string,
+  options: {
+    plantationDate?: string | null;
+    yieldReadings?: YieldReading[];
+  } = {},
+): SectionTimelineNode[] {
+  const { plantationDate, yieldReadings = [] } = options;
+  const sortedAll = [...yieldReadings]
+    .filter((reading) => reading?.date && Number.isFinite(Number(reading.yield)))
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+  if (sortedAll.length === 0) return [];
+
+  const latestReading = sortedAll[sortedAll.length - 1];
+  const plantation = parsePlantationDate(plantationDate);
+
+  return [
+    readingToNode(farmerId, 0, latestReading, 0, plantation, true),
+  ];
+}

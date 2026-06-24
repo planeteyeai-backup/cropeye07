@@ -16,7 +16,10 @@ import {
 import { PROGRESS_THEME as T } from './progressTheme';
 import {
   buildSectionTimelineNodes,
+  buildLiveTimelineNode,
 } from './buildSectionTimelineNodes';
+
+export type ProgressViewMode = 'live' | 'history';
 
 export type { MonthSectionLabel };
 export type CallStatus = 'completed' | 'pending';
@@ -671,6 +674,26 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
   const [farmerSections, setFarmerSections] = useState<
     Record<string, MonthSectionLabel>
   >({});
+  const [viewMode, setViewMode] = useState<ProgressViewMode>('live');
+
+  const applyLatestSections = () => {
+    setFarmerSections(() => {
+      const next: Record<string, MonthSectionLabel> = {};
+      for (const cfg of farmerConfigs) {
+        next[cfg.farmerId] = resolveLatestMonthSectionFromConfigs([cfg]);
+      }
+      return next;
+    });
+    setActiveNode(null);
+    setNoteOpenKey(null);
+  };
+
+  const handleViewModeChange = (mode: ProgressViewMode) => {
+    setViewMode(mode);
+    if (mode === 'live') {
+      applyLatestSections();
+    }
+  };
 
   useEffect(() => {
     if (farmerConfigs.length === 0) {
@@ -730,6 +753,49 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
 
   return (
     <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-100 bg-white px-4 py-3">
+        <div>
+          <p className="text-sm font-semibold text-slate-800"></p>
+          <p className="text-xs text-slate-500">
+            {viewMode === 'live'
+              ? 'Showing latest yield only — updates when new data arrives'
+              : ''}
+          </p>
+        </div>
+        <div
+          className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5"
+          role="group"
+          aria-label="Timeline view mode"
+        >
+          <button
+            type="button"
+            onClick={() => handleViewModeChange('live')}
+            className={[
+              'rounded-md px-4 py-1.5 text-sm font-semibold transition',
+              viewMode === 'live'
+                ? 'bg-emerald-600 text-white shadow-sm'
+                : 'text-slate-600 hover:bg-white hover:text-slate-800',
+            ].join(' ')}
+            aria-pressed={viewMode === 'live'}
+          >
+            Live
+          </button>
+          <button
+            type="button"
+            onClick={() => handleViewModeChange('history')}
+            className={[
+              'rounded-md px-4 py-1.5 text-sm font-semibold transition',
+              viewMode === 'history'
+                ? 'bg-emerald-600 text-white shadow-sm'
+                : 'text-slate-600 hover:bg-white hover:text-slate-800',
+            ].join(' ')}
+            aria-pressed={viewMode === 'history'}
+          >
+            History
+          </button>
+        </div>
+      </div>
+
       <div className="overflow-visible rounded-xl border border-slate-100 bg-slate-50/60 p-3 sm:p-4">
         {displayFarmers.length > VISIBLE_FARMER_ROWS && (
           <p className="mb-2 text-center text-xs font-medium text-slate-500">
@@ -761,15 +827,21 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
                 MONTH_SECTIONS.find((s) => s.label === farmerSection) ??
                 MONTH_SECTIONS[0];
               const farmerSectionIndex = getSectionIndex(farmerSection);
-              const visibleNodes = buildSectionTimelineNodes(
-                farmer.farmerId,
-                section.start,
-                section.count,
-                {
-                  plantationDate: cfg?.plantationDate,
-                  yieldReadings: cfg?.yieldReadings,
-                },
-              );
+              const visibleNodes =
+                viewMode === 'live'
+                  ? buildLiveTimelineNode(farmer.farmerId, {
+                      plantationDate: cfg?.plantationDate,
+                      yieldReadings: cfg?.yieldReadings,
+                    })
+                  : buildSectionTimelineNodes(
+                      farmer.farmerId,
+                      section.start,
+                      section.count,
+                      {
+                        plantationDate: cfg?.plantationDate,
+                        yieldReadings: cfg?.yieldReadings,
+                      },
+                    );
 
               return (
               <FarmerRow
@@ -786,19 +858,27 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
                 onNoteSave={handleNoteSave}
                 rowIndex={index}
                 highlightFarmerId={highlightFarmerId}
-                canGoPrevSection={farmerSectionIndex > 0}
+                canGoPrevSection={
+                  viewMode === 'history' && farmerSectionIndex > 0
+                }
                 canGoNextSection={
+                  viewMode === 'history' &&
                   farmerSectionIndex < MONTH_SECTIONS.length - 1
                 }
                 onPrevSection={() => {
-                  if (farmerSectionIndex <= 0) return;
+                  if (viewMode !== 'history' || farmerSectionIndex <= 0) return;
                   setFarmerSection(
                     farmer.farmerId,
                     MONTH_SECTIONS[farmerSectionIndex - 1].label,
                   );
                 }}
                 onNextSection={() => {
-                  if (farmerSectionIndex >= MONTH_SECTIONS.length - 1) return;
+                  if (
+                    viewMode !== 'history' ||
+                    farmerSectionIndex >= MONTH_SECTIONS.length - 1
+                  ) {
+                    return;
+                  }
                   setFarmerSection(
                     farmer.farmerId,
                     MONTH_SECTIONS[farmerSectionIndex + 1].label,

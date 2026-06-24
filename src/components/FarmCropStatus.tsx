@@ -146,7 +146,11 @@ interface PieChartWithNeedleProps {
   height?: number;
   title?: string;
   unit?: string;
+  showTitle?: boolean;
 }
+
+const GAUGE_CHART_HEIGHT = 168;
+const GAUGE_ARC_WIDTH = 240;
 
 type TimePeriod = "daily" | "weekly" | "monthly" | "yearly";
 
@@ -1068,17 +1072,20 @@ const OfficerDashboard: React.FC = () => {
   const PieChartWithNeedle: React.FC<PieChartWithNeedleProps> = ({
     value,
     max,
-    width = 200,
-    height = 120,
+    width = GAUGE_ARC_WIDTH,
+    height,
     title = "Gauge",
     unit = "",
+    showTitle = false,
   }) => {
     const percent = Math.max(0, Math.min(1, value / max));
     const angle = 180 * percent;
+    const strokeW = 9;
+    const r = Math.round(width * 0.3);
     const cx = width / 2;
-    const cy = height * 0.82;
-    const r = Math.min(width, height) * 0.38;
-    const needleLength = r * 0.9;
+    const cy = r + strokeW / 2 + 3;
+    const svgHeight = height ?? cy + 4;
+    const needleLength = r * 0.88;
     const needleAngle = 180 - angle;
     const rad = (Math.PI * needleAngle) / 180;
     const x = cx + needleLength * Math.cos(rad);
@@ -1092,19 +1099,25 @@ const OfficerDashboard: React.FC = () => {
     };
 
     return (
-      <div className="flex flex-col items-center">
-        <div className="text-center">
-          <div className="text-xl font-bold text-gray-800 leading-tight">
+      <div className="flex flex-col items-center gap-0">
+        <div className="text-center leading-none">
+          <div className="text-lg font-bold text-gray-800">
             {value.toFixed(1)}
             <span className="text-sm font-semibold text-gray-600">{unit}</span>
           </div>
         </div>
-        <svg width={width} height={height} className="overflow-hidden">
+        <svg
+          width={width}
+          height={svgHeight}
+          viewBox={`0 0 ${width} ${svgHeight}`}
+          className="block -mt-1.5"
+          aria-hidden
+        >
           <path
             d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`}
             fill="none"
             stroke="#e5e7eb"
-            strokeWidth="8"
+            strokeWidth={strokeW}
           />
           <path
             d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${
@@ -1112,7 +1125,7 @@ const OfficerDashboard: React.FC = () => {
             } ${cy - r * Math.sin(Math.PI - (angle * Math.PI) / 180)}`}
             fill="none"
             stroke={getColor(percent)}
-            strokeWidth="8"
+            strokeWidth={strokeW}
             strokeLinecap="round"
           />
           <line
@@ -1126,7 +1139,9 @@ const OfficerDashboard: React.FC = () => {
           />
           <circle cx={cx} cy={cy} r="4" fill="#374151" />
         </svg>
-        <p className="text-sm text-gray-600 mt-2 font-medium">{title}</p>
+        {showTitle && (
+          <p className="text-xs font-medium text-gray-600">{title}</p>
+        )}
       </div>
     );
   };
@@ -1583,74 +1598,81 @@ const OfficerDashboard: React.FC = () => {
           </div>
 
           {/* Performance Gauges */}
-          <div className="space-y-4">
-            <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4">
-              <div className="flex items-center gap-2 mb-6">
-                <Target className="w-5 h-5 text-purple-600" />
+          <div className="space-y-3">
+            <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-3">
+              <div className="flex items-center gap-2 mb-1.5">
+                <Target className="w-5 h-5 shrink-0 text-purple-600" />
                 <h3 className="text-sm font-semibold text-gray-800">
                   Sugarcane Yield Projection
                 </h3>
               </div>
-              <div className="flex flex-col items-center">
+              <div
+                className="flex items-center justify-center"
+                style={{ height: GAUGE_CHART_HEIGHT }}
+              >
                 <PieChartWithNeedle
                   value={metrics.sugarYieldMean || 0}
                   max={metrics.sugarYieldMax || 400}
                   title="Sugarcane Yield Forecast"
                   unit=" T/acre"
-                  width={260}
-                  height={130}
+                  width={GAUGE_ARC_WIDTH}
                 />
-                <div className="mt-2 text-center">
-                  <div className="grid grid-cols-1 gap-y-1 text-xs sm:grid-cols-3 sm:gap-x-3">
-                    <div className="flex items-center justify-center gap-1">
-                      <div className="w-2 h-2 rounded bg-red-500"></div>
-                      <span className="text-red-700 font-semibold">
-                        min: {(metrics.sugarYieldMin || 0).toFixed(1)} T/acre
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-center gap-1">
-                      <div className="w-2 h-2 rounded bg-purple-500"></div>
-                      <span className="text-purple-700 font-semibold">
-                        mean: {(metrics.sugarYieldMean || 0).toFixed(1)}{" "}
-                        T/acre
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-center gap-1">
-                      <div className="w-2 h-2 rounded bg-green-500"></div>
-                      <span className="text-green-700 font-semibold">
-                        max: {(metrics.sugarYieldMax || 0).toFixed(1)} T/acre
-                      </span>
-                    </div>
+              </div>
+              <div className="mt-1 text-center">
+                <p className="mb-1 text-xs font-medium text-gray-600">
+                  Sugarcane Yield Forecast
+                </p>
+                <div className="grid grid-cols-1 gap-y-0.5 text-xs sm:grid-cols-3 sm:gap-x-2">
+                  <div className="flex items-center justify-center gap-1">
+                    <div className="h-2 w-2 rounded bg-red-500" />
+                    <span className="font-semibold text-red-700">
+                      min: {(metrics.sugarYieldMin || 0).toFixed(1)} T/acre
+                    </span>
                   </div>
-                  <div className="mt-1 text-xs text-gray-500">
-                    Performance:{" "}
-                    {metrics.sugarYieldMax
-                      ? (((metrics.sugarYieldMean || 0) / metrics.sugarYieldMax) * 100).toFixed(1)
-                      : "0.0"}% of optimal yield
+                  <div className="flex items-center justify-center gap-1">
+                    <div className="h-2 w-2 rounded bg-purple-500" />
+                    <span className="font-semibold text-purple-700">
+                      mean: {(metrics.sugarYieldMean || 0).toFixed(1)} T/acre
+                    </span>
                   </div>
+                  <div className="flex items-center justify-center gap-1">
+                    <div className="h-2 w-2 rounded bg-green-500" />
+                    <span className="font-semibold text-green-700">
+                      max: {(metrics.sugarYieldMax || 0).toFixed(1)} T/acre
+                    </span>
+                  </div>
+                </div>
+                <div className="mt-0.5 text-xs text-gray-500">
+                  Performance:{" "}
+                  {metrics.sugarYieldMax
+                    ? (
+                        ((metrics.sugarYieldMean || 0) / metrics.sugarYieldMax) *
+                        100
+                      ).toFixed(1)
+                    : "0.0"}
+                  % of optimal yield
                 </div>
               </div>
             </div>
 
-            {/* Biomass Performance */}
-            <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 sm:p-5">
-              <div className="flex items-center gap-2 mb-2">
-                <Activity className="w-5 h-5 sm:w-6 sm:h-6 text-green-600" />
-                <h3 className="text-sm sm:text-base font-semibold text-gray-800">
+            <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-3">
+              <div className="flex items-center gap-2 mb-1.5">
+                <Activity className="w-5 h-5 shrink-0 text-green-600" />
+                <h3 className="text-sm font-semibold text-gray-800">
                   Biomass Performance
                 </h3>
               </div>
-              <div className="h-32 sm:h-36 md:h-40 flex flex-col items-center justify-start relative pt-1">
-                <ResponsiveContainer width="100%" height="100%">
+              <div style={{ height: GAUGE_CHART_HEIGHT }}>
+                <ResponsiveContainer width="100%" height={GAUGE_CHART_HEIGHT}>
                   <PieChart>
                     <Pie
                       data={biomassData}
                       cx="50%"
-                      cy="80%"
+                      cy="82%"
                       startAngle={180}
                       endAngle={0}
-                      outerRadius={80}
-                      innerRadius={50}
+                      outerRadius={72}
+                      innerRadius={46}
                       dataKey="value"
                       labelLine={false}
                     >
@@ -1663,7 +1685,7 @@ const OfficerDashboard: React.FC = () => {
                       y="70%"
                       textAnchor="middle"
                       dominantBaseline="middle"
-                      className="text-sm sm:text-base font-semibold fill-blue-600"
+                      className="fill-blue-600 text-base font-semibold"
                     >
                       {totalBiomass.toFixed(1)} T/acre
                     </text>
@@ -1678,20 +1700,20 @@ const OfficerDashboard: React.FC = () => {
                   </PieChart>
                 </ResponsiveContainer>
               </div>
-              <p className="text-xs sm:text-sm text-gray-700 font-medium text-center mb-2">
-                Biomass Distribution Chart
-              </p>
-              <div className="text-center">
-                <div className="flex items-center justify-center gap-3 text-xs sm:text-sm flex-wrap">
-                  <div className="flex items-center gap-1.5">
-                    <div className="w-2.5 h-2.5 rounded bg-blue-500"></div>
-                    <span className="text-blue-700 font-semibold">
+              <div className="mt-1 text-center">
+                <p className="mb-1 text-xs font-medium text-gray-600">
+                  Biomass Distribution Chart
+                </p>
+                <div className="flex flex-wrap items-center justify-center gap-2 text-xs">
+                  <div className="flex items-center gap-1">
+                    <div className="h-2 w-2 rounded bg-blue-500" />
+                    <span className="font-semibold text-blue-700">
                       Total: {totalBiomass.toFixed(1)} T/acre
                     </span>
                   </div>
-                  <div className="flex items-center gap-1.5">
-                    <div className="w-2.5 h-2.5 rounded bg-green-500"></div>
-                    <span className="text-green-700 font-semibold">
+                  <div className="flex items-center gap-1">
+                    <div className="h-2 w-2 rounded bg-green-500" />
+                    <span className="font-semibold text-green-700">
                       Underground: {currentBiomass.toFixed(1)} T/acre
                     </span>
                   </div>
