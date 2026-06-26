@@ -6,6 +6,7 @@ import {
   setRefreshToken,
   clearAuthData,
   clearAllLocalStorage,
+  isPlanetEyeDemoToken,
 } from "./auth";
 import axios from "axios";
 
@@ -44,7 +45,7 @@ export const isTokenExpired = (
   token: string | null,
   bufferSeconds: number = 300,
 ): boolean => {
-  if (!token) return true;
+  if (!token || isPlanetEyeDemoToken(token)) return false;
 
   const decoded = decodeToken(token);
   if (!decoded || !decoded.exp) return true;
@@ -137,6 +138,8 @@ export const checkAndRefreshToken = async (
   bufferSeconds: number = 300,
 ): Promise<boolean> => {
   const accessToken = getAuthToken();
+
+  if (isPlanetEyeDemoToken(accessToken)) return true;
 
   // No token at all
   if (!accessToken) {

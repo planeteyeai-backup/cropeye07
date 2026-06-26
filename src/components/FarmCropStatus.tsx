@@ -33,7 +33,6 @@ import {
   Target,
   Leaf,
   BarChart3,
-  // PieChart as PieChartIcon,
   LineChart as LineChartIcon,
   Users,
   MapPin,
@@ -45,13 +44,19 @@ import {
   // Filter,
   // RefreshCw,
   Maximize2,
+  Gauge,
+  Loader2,
 } from "lucide-react";
 import "leaflet/dist/leaflet.css";
 import axios from "axios";
 import { getCache, setCache } from "../utils/cache";
-import { getRecentFarmers, getFieldOfficerAgroStats } from "../api";
+import { getRecentFarmers, getFieldOfficerAgroStats, fetchPlotBoundaryCoordinates } from "../api";
 import { getUserData } from "../utils/auth";
 import { useAppContext } from "../context/AppContext";
+import { fetchFieldScoreForPlot, fieldScoreCacheKey } from "../utils/fieldScore";
+import { findPlotRef } from "../utils/plotName";
+import { getPlantationFromRecord } from "../utils/plantation";
+import MapCropStatusOverlay from "./MapCropStatusOverlay";
 
 // Constants (same as FarmerDashboard)
 const BASE_URL = "https://events-cropeye.up.railway.app";
@@ -119,8 +124,10 @@ interface Metrics {
   area: number | null;
   biomass: number | null;
   totalBiomass: number | null;
+  biomassMin: number | null;
+  biomassMax: number | null;
   stressCount: number | null;
-  irrigationEvents: number | null;
+  fieldScore: number | null;
   sugarYieldMean: number | null;
   daysToHarvest: number | null;
   growthStage: string | null;
@@ -139,7 +146,11 @@ interface PieChartWithNeedleProps {
   height?: number;
   title?: string;
   unit?: string;
+  showTitle?: boolean;
 }
+
+const GAUGE_CHART_HEIGHT = 168;
+const GAUGE_ARC_WIDTH = 240;
 
 type TimePeriod = "daily" | "weekly" | "monthly" | "yearly";
 
@@ -194,8 +205,10 @@ const OfficerDashboard: React.FC = () => {
     area: null,
     biomass: null,
     totalBiomass: null,
+    biomassMin: null,
+    biomassMax: null,
     stressCount: null,
-    irrigationEvents: null,
+    fieldScore: null,
     sugarYieldMean: null,
     daysToHarvest: null,
     growthStage: null,
@@ -242,13 +255,13 @@ const OfficerDashboard: React.FC = () => {
   const setPlotCoordinatesFromState = (plotId: string): void => {
     // Find the selected farmer and their plot
     const farmer = farmers.find((f) => String(f.id) === selectedFarmerId);
-    const plot = farmer?.plots?.find((p: any) => p.fastapi_plot_id === plotId);
+    const plot = findPlotRef(farmer?.plots, plotId);
 
-    if (plot && plot.boundary?.coordinates) {
-      const geom = plot.boundary.coordinates[0];
+    if (plot?.boundary?.coordinates) {
+      const geom = (plot.boundary.coordinates as [number, number][][])[0];
       if (geom) {
         // The API gives [lng, lat], Leaflet needs [lat, lng]
-        const coords = geom.map(([lng, lat]: [number, number]) => [lat, lng]);
+        const coords = geom.map(([lng, lat]: [number, number]) => [lat, lng]) as [number, number][];
         setPlotCoordinates(coords);
 
         // Calculate and set map center
@@ -308,6 +321,21 @@ const OfficerDashboard: React.FC = () => {
   useEffect(() => {
     setSelectedPlotName(selectedPlotId || null);
   }, [selectedPlotId]);
+
+  const selectedPlotPlantation = React.useMemo(() => {
+    if (!selectedPlotId || !selectedFarmerId) {
+      return { plantationDate: null, plantationType: null };
+    }
+    const farmer = farmers.find((f) => String(f.id) === selectedFarmerId);
+    const plot = findPlotRef(farmer?.plots, selectedPlotId);
+    const info = getPlantationFromRecord(plot ?? farmer);
+    return {
+      plantationDate:
+        info.plantation_date !== "N/A" ? info.plantation_date : null,
+      plantationType:
+        info.plantation_type !== "N/A" ? info.plantation_type : null,
+    };
+  }, [selectedPlotId, selectedFarmerId, farmers]);
 
   useEffect(() => {
     if (lineChartData.length > 0) {
@@ -450,11 +478,11 @@ const OfficerDashboard: React.FC = () => {
       // Check other plot-level caches too (so we can avoid showing loading when everything is already cached)
       const indicesCacheKey = `indices_${selectedPlotId}`;
       const stressCacheKey = `stress_${selectedPlotId}_NDRE_0.15`;
-      const irrigationCacheKey = `irrigation_${selectedPlotId}`;
+      const scoreCacheKey = fieldScoreCacheKey(selectedPlotId);
 
       const cachedIndices = getCache(indicesCacheKey);
       const cachedStress = getCache(stressCacheKey);
-      const cachedIrrigation = getCache(irrigationCacheKey);
+      const cachedFieldScore = getCache(scoreCacheKey);
 
       const cachedCurrentPlotData = allPlotsData
         ? allPlotsData[selectedPlotId] ??
@@ -495,19 +523,16 @@ const OfficerDashboard: React.FC = () => {
           null
         : null;
 
-      // Step 2: Calculate biomass from sugarYieldMean (matching FarmerDashboard)
       const sugarYieldMeanValue =
         currentPlotData?.brix_sugar?.sugar_yield?.mean ?? null;
 
-      let calculatedBiomass = null;
-      let totalBiomassForMetric = null;
-
-      if (sugarYieldMeanValue !== null) {
-        const totalBiomass = sugarYieldMeanValue * 1.27;
-        const underGroundBiomassInTons = totalBiomass * 0.12;
-        calculatedBiomass = underGroundBiomassInTons;
-        totalBiomassForMetric = totalBiomass;
-      }
+      const biomassStats = currentPlotData?.biomass ?? null;
+      const biomassTotal = biomassStats?.mean ?? null;
+      const biomassMin = biomassStats?.min ?? null;
+      const biomassMax = biomassStats?.max ?? null;
+      const calculatedBiomass =
+        biomassTotal !== null ? biomassTotal * 0.12 : null;
+      const totalBiomassForMetric = biomassTotal;
 
       // Step 3: Update metrics immediately with available data for faster UI response
       if (currentPlotData) {
@@ -523,6 +548,8 @@ const OfficerDashboard: React.FC = () => {
           area: currentPlotData?.area_acres ?? null,
           biomass: calculatedBiomass,
           totalBiomass: totalBiomassForMetric,
+          biomassMin,
+          biomassMax,
           sugarYieldMean: sugarYieldMeanValue,
           daysToHarvest: currentPlotData?.days_to_harvest ?? null,
           growthStage:
@@ -590,25 +617,19 @@ const OfficerDashboard: React.FC = () => {
         );
       }
 
-      if (!cachedIrrigation) {
+      if (cachedFieldScore === undefined || cachedFieldScore === null) {
+        const farmer = farmers.find((f) => String(f.id) === selectedFarmerId);
         fetchPromises.push(
-          makeRequestWithRetry(
-            `${BASE_URL}/plots/${selectedPlotId}/irrigation?threshold_ndmi=0.05&threshold_ndwi=0.05&min_days_between_events=10`,
-            2,
-            25000,
-          )
-            .then((data: any) => {
-              setCache(irrigationCacheKey, data);
-              return { type: "irrigation", data };
+          fetchFieldScoreForPlot(selectedPlotId, farmer?.plots)
+            .then((score) => {
+              if (score != null) setCache(scoreCacheKey, score);
+              return { type: "fieldScore", data: score };
             })
-            .catch(() => ({
-              type: "irrigation",
-              data: { total_events: null },
-            })),
+            .catch(() => ({ type: "fieldScore", data: null })),
         );
       } else {
         fetchPromises.push(
-          Promise.resolve({ type: "irrigation", data: cachedIrrigation }),
+          Promise.resolve({ type: "fieldScore", data: cachedFieldScore }),
         );
       }
 
@@ -617,7 +638,7 @@ const OfficerDashboard: React.FC = () => {
 
       let rawIndices: LineChartData[] = [];
       let stressData: any = { events: [], total_events: 0 };
-      let irrigationData: any = { total_events: null };
+      let fieldScore: number | null = null;
 
       results.forEach((result) => {
         if (result.status === "fulfilled" && result.value) {
@@ -625,8 +646,7 @@ const OfficerDashboard: React.FC = () => {
           if (type === "indices") rawIndices = data || [];
           if (type === "stress")
             stressData = data || { events: [], total_events: 0 };
-          if (type === "irrigation")
-            irrigationData = data || { total_events: null };
+          if (type === "fieldScore") fieldScore = data ?? null;
         }
       });
 
@@ -638,7 +658,7 @@ const OfficerDashboard: React.FC = () => {
       setMetrics((prev) => ({
         ...prev,
         stressCount: stressData?.total_events ?? 0,
-        irrigationEvents: irrigationData?.total_events ?? null,
+        fieldScore,
         cnRatio: null,
       }));
     } catch (err: any) {
@@ -708,20 +728,10 @@ const OfficerDashboard: React.FC = () => {
     }
 
     try {
-      const today = new Date().toISOString().slice(0, 10);
-      const response = await axios.post(
-        `${BASE_URL}/analyze?plot_name=${plotId}&date=${today}`,
-      );
-
-      const geom = response.data?.features?.[0]?.geometry?.coordinates?.[0];
-      if (geom) {
-        const coords = geom.map(([lng, lat]: [number, number]) => [lat, lng]);
+      const coords = await fetchPlotBoundaryCoordinates(plotId);
+      if (coords && coords.length > 0) {
         setPlotCoordinates(coords);
-
-        // Cache the coordinates
         setPlotCoordinatesCache((prev) => new Map(prev.set(plotId, coords)));
-
-        // Calculate and set map center
         const center = calculateCenter(coords);
         setMapCenter(center);
         setMapKey((prev) => prev + 1);
@@ -1062,17 +1072,20 @@ const OfficerDashboard: React.FC = () => {
   const PieChartWithNeedle: React.FC<PieChartWithNeedleProps> = ({
     value,
     max,
-    width = 200,
-    height = 120,
+    width = GAUGE_ARC_WIDTH,
+    height,
     title = "Gauge",
     unit = "",
+    showTitle = false,
   }) => {
     const percent = Math.max(0, Math.min(1, value / max));
     const angle = 180 * percent;
+    const strokeW = 9;
+    const r = Math.round(width * 0.3);
     const cx = width / 2;
-    const cy = height * 0.8;
-    const r = width * 0.35;
-    const needleLength = r * 0.9;
+    const cy = r + strokeW / 2 + 3;
+    const svgHeight = height ?? cy + 4;
+    const needleLength = r * 0.88;
     const needleAngle = 180 - angle;
     const rad = (Math.PI * needleAngle) / 180;
     const x = cx + needleLength * Math.cos(rad);
@@ -1086,13 +1099,25 @@ const OfficerDashboard: React.FC = () => {
     };
 
     return (
-      <div className="flex flex-col items-center">
-        <svg width={width} height={height} className="overflow-visible">
+      <div className="flex flex-col items-center gap-0">
+        <div className="text-center leading-none">
+          <div className="text-lg font-bold text-gray-800">
+            {value.toFixed(1)}
+            <span className="text-sm font-semibold text-gray-600">{unit}</span>
+          </div>
+        </div>
+        <svg
+          width={width}
+          height={svgHeight}
+          viewBox={`0 0 ${width} ${svgHeight}`}
+          className="block -mt-1.5"
+          aria-hidden
+        >
           <path
             d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`}
             fill="none"
             stroke="#e5e7eb"
-            strokeWidth="8"
+            strokeWidth={strokeW}
           />
           <path
             d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${
@@ -1100,7 +1125,7 @@ const OfficerDashboard: React.FC = () => {
             } ${cy - r * Math.sin(Math.PI - (angle * Math.PI) / 180)}`}
             fill="none"
             stroke={getColor(percent)}
-            strokeWidth="8"
+            strokeWidth={strokeW}
             strokeLinecap="round"
           />
           <line
@@ -1113,16 +1138,10 @@ const OfficerDashboard: React.FC = () => {
             strokeLinecap="round"
           />
           <circle cx={cx} cy={cy} r="4" fill="#374151" />
-          <text
-            x={cx}
-            y={cy - r - 15}
-            textAnchor="middle"
-            className="text-lg font-bold fill-gray-700"
-          >
-            {value.toFixed(1)} {unit}
-          </text>
         </svg>
-        <p className="text-sm text-gray-600 mt-2 font-medium">{title}</p>
+        {showTitle && (
+          <p className="text-xs font-medium text-gray-600">{title}</p>
+        )}
       </div>
     );
   };
@@ -1378,6 +1397,27 @@ const OfficerDashboard: React.FC = () => {
             <p className="text-xs text-gray-600 font-medium">Recovery Rate</p>
           </div>
 
+          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-emerald-200 hover:shadow-xl transition-all duration-300">
+            <div className="flex items-center justify-between mb-2">
+              <Gauge className="w-6 h-6 text-emerald-600" />
+              <div className="text-right">
+                <div className="text-2xl font-bold text-gray-800">
+                  {!selectedPlotId ? (
+                    "-"
+                  ) : loadingData && metrics.fieldScore == null ? (
+                    <Loader2 className="w-5 h-5 animate-spin inline-block" />
+                  ) : metrics.fieldScore != null ? (
+                    metrics.fieldScore.toFixed(1)
+                  ) : (
+                    "-"
+                  )}
+                </div>
+                <div className="text-sm font-semibold text-emerald-600">%</div>
+              </div>
+            </div>
+            <p className="text-xs text-gray-600 font-medium">Field Score</p>
+          </div>
+
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-indigo-200 hover:shadow-xl transition-all duration-300">
             <div className="flex items-center justify-between mb-2">
               <BarChart3 className="w-6 h-6 text-indigo-600" />
@@ -1406,23 +1446,6 @@ const OfficerDashboard: React.FC = () => {
             <p className="text-xs text-gray-600 font-medium">Organic Carbon</p>
           </div>
 
-          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-cyan-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2">
-              <Droplets className="w-6 h-6 text-cyan-600" />
-              <div className="text-right">
-                <div className="text-2xl font-bold text-gray-800">
-                  {metrics.irrigationEvents ?? 0}
-                </div>
-                <div className="text-sm font-semibold text-cyan-600">
-                  Events
-                </div>
-              </div>
-            </div>
-            <p className="text-xs text-gray-600 font-medium">
-              Irrigation Events
-            </p>
-          </div>
-
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-yellow-200 hover:shadow-xl transition-all duration-300">
             <div className="flex items-center justify-between mb-2">
               <AlertTriangle className="w-6 h-6 text-yellow-600" />
@@ -1439,16 +1462,46 @@ const OfficerDashboard: React.FC = () => {
           </div>
 
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-pink-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center justify-between mb-3">
               <Activity className="w-6 h-6 text-pink-600" />
               <div className="text-right">
-                <div className="text-2xl font-bold text-gray-800">
-                  {metrics.biomass?.toFixed(1) || "-"}
+                <div className="text-2xl font-bold text-gray-800 flex items-center gap-1 justify-end">
+                  {metrics.totalBiomass !== null ? (
+                    metrics.totalBiomass.toFixed(1)
+                  ) : (
+                    "-"
+                  )}
+                  <span className="text-sm font-semibold text-pink-600">
+                    T/acre
+                  </span>
                 </div>
-                <div className="text-sm font-semibold text-pink-600">kg/acre</div>
               </div>
             </div>
-            <p className="text-xs text-gray-600 font-medium">Avg Biomass</p>
+            <div className="flex items-center justify-between text-xs text-gray-600">
+              <p className="text-xs font-medium">Avg Biomass</p>
+              <div className="flex gap-4">
+                <div className="text-center">
+                  <div className="font-semibold text-red-600 text-sm">
+                    {metrics.biomassMax !== null
+                      ? metrics.biomassMax.toFixed(1)
+                      : "-"}
+                  </div>
+                  <div className="text-[10px] text-gray-500 uppercase tracking-wide">
+                    Max
+                  </div>
+                </div>
+                <div className="text-center">
+                  <div className="font-semibold text-green-600 text-sm">
+                    {metrics.biomassMin !== null
+                      ? metrics.biomassMin.toFixed(1)
+                      : "-"}
+                  </div>
+                  <div className="text-[10px] text-gray-500 uppercase tracking-wide">
+                    Min
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1474,19 +1527,12 @@ const OfficerDashboard: React.FC = () => {
                 <Maximize2 className="w-4 h-4" />
               </div>
 
-              {/* Centered Growth Stage Indicator */}
-              <div className="absolute top-10 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-10 pointer-events-none">
-                <div className="bg-black/20 backdrop-blur-sm rounded-2xl px-6 py-4 border border-white/30 shadow-2xl">
-                  <div className="flex items-center gap-3">
-                    <div className="w-3 h-3 rounded-full bg-green-500 animate-pulse shadow-lg shadow-green-500/50" />
-                    <div className="text-center">
-                      <div className="text-white font-bold text-lg drop-shadow-lg">
-                        {metrics.growthStage ?? "Loading..."}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
+              <MapCropStatusOverlay
+                growthStage={metrics.growthStage}
+                plantationDate={selectedPlotPlantation.plantationDate}
+                plantationType={selectedPlotPlantation.plantationType}
+                loading={loadingData}
+              />
 
               <MapContainer
                 key={mapKey}
@@ -1552,74 +1598,81 @@ const OfficerDashboard: React.FC = () => {
           </div>
 
           {/* Performance Gauges */}
-          <div className="space-y-4">
-            <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4">
-              <div className="flex items-center gap-2 mb-6">
-                <Target className="w-5 h-5 text-purple-600" />
+          <div className="space-y-3">
+            <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-3">
+              <div className="flex items-center gap-2 mb-1.5">
+                <Target className="w-5 h-5 shrink-0 text-purple-600" />
                 <h3 className="text-sm font-semibold text-gray-800">
                   Sugarcane Yield Projection
                 </h3>
               </div>
-              <div className="flex flex-col items-center">
+              <div
+                className="flex items-center justify-center"
+                style={{ height: GAUGE_CHART_HEIGHT }}
+              >
                 <PieChartWithNeedle
                   value={metrics.sugarYieldMean || 0}
                   max={metrics.sugarYieldMax || 400}
                   title="Sugarcane Yield Forecast"
                   unit=" T/acre"
-                  width={260}
-                  height={130}
+                  width={GAUGE_ARC_WIDTH}
                 />
-                <div className="mt-2 text-center">
-                  <div className="flex items-center justify-center gap-2 text-xs flex-wrap">
-                    <div className="flex items-center gap-1">
-                      <div className="w-2 h-2 rounded bg-red-500"></div>
-                      <span className="text-red-700 font-semibold">
-                        min: {(metrics.sugarYieldMin || 0).toFixed(1)} T/acre
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <div className="w-2 h-2 rounded bg-purple-500"></div>
-                      <span className="text-purple-700 font-semibold">
-                        mean: {(metrics.sugarYieldMean || 0).toFixed(1)}{" "}
-                        T/acre
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <div className="w-2 h-2 rounded bg-green-500"></div>
-                      <span className="text-green-700 font-semibold">
-                        max: {(metrics.sugarYieldMax || 0).toFixed(1)} T/acre
-                      </span>
-                    </div>
+              </div>
+              <div className="mt-1 text-center">
+                <p className="mb-1 text-xs font-medium text-gray-600">
+                  Sugarcane Yield Forecast
+                </p>
+                <div className="grid grid-cols-1 gap-y-0.5 text-xs sm:grid-cols-3 sm:gap-x-2">
+                  <div className="flex items-center justify-center gap-1">
+                    <div className="h-2 w-2 rounded bg-red-500" />
+                    <span className="font-semibold text-red-700">
+                      min: {(metrics.sugarYieldMin || 0).toFixed(1)} T/acre
+                    </span>
                   </div>
-                  <div className="mt-1 text-xs text-gray-500">
-                    Performance:{" "}
-                    {metrics.sugarYieldMax
-                      ? (((metrics.sugarYieldMean || 0) / metrics.sugarYieldMax) * 100).toFixed(1)
-                      : "0.0"}% of optimal yield
+                  <div className="flex items-center justify-center gap-1">
+                    <div className="h-2 w-2 rounded bg-purple-500" />
+                    <span className="font-semibold text-purple-700">
+                      mean: {(metrics.sugarYieldMean || 0).toFixed(1)} T/acre
+                    </span>
                   </div>
+                  <div className="flex items-center justify-center gap-1">
+                    <div className="h-2 w-2 rounded bg-green-500" />
+                    <span className="font-semibold text-green-700">
+                      max: {(metrics.sugarYieldMax || 0).toFixed(1)} T/acre
+                    </span>
+                  </div>
+                </div>
+                <div className="mt-0.5 text-xs text-gray-500">
+                  Performance:{" "}
+                  {metrics.sugarYieldMax
+                    ? (
+                        ((metrics.sugarYieldMean || 0) / metrics.sugarYieldMax) *
+                        100
+                      ).toFixed(1)
+                    : "0.0"}
+                  % of optimal yield
                 </div>
               </div>
             </div>
 
-            {/* Biomass Performance */}
-            <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 sm:p-5">
-              <div className="flex items-center gap-2 mb-2">
-                <Activity className="w-5 h-5 sm:w-6 sm:h-6 text-green-600" />
-                <h3 className="text-sm sm:text-base font-semibold text-gray-800">
+            <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-3">
+              <div className="flex items-center gap-2 mb-1.5">
+                <Activity className="w-5 h-5 shrink-0 text-green-600" />
+                <h3 className="text-sm font-semibold text-gray-800">
                   Biomass Performance
                 </h3>
               </div>
-              <div className="h-32 sm:h-36 md:h-40 flex flex-col items-center justify-start relative pt-1">
-                <ResponsiveContainer width="100%" height="100%">
+              <div style={{ height: GAUGE_CHART_HEIGHT }}>
+                <ResponsiveContainer width="100%" height={GAUGE_CHART_HEIGHT}>
                   <PieChart>
                     <Pie
                       data={biomassData}
                       cx="50%"
-                      cy="80%"
+                      cy="82%"
                       startAngle={180}
                       endAngle={0}
-                      outerRadius={80}
-                      innerRadius={50}
+                      outerRadius={72}
+                      innerRadius={46}
                       dataKey="value"
                       labelLine={false}
                     >
@@ -1632,7 +1685,7 @@ const OfficerDashboard: React.FC = () => {
                       y="70%"
                       textAnchor="middle"
                       dominantBaseline="middle"
-                      className="text-sm sm:text-base font-semibold fill-blue-600"
+                      className="fill-blue-600 text-base font-semibold"
                     >
                       {totalBiomass.toFixed(1)} T/acre
                     </text>
@@ -1647,20 +1700,20 @@ const OfficerDashboard: React.FC = () => {
                   </PieChart>
                 </ResponsiveContainer>
               </div>
-              <p className="text-xs sm:text-sm text-gray-700 font-medium text-center mb-2">
-                Biomass Distribution Chart
-              </p>
-              <div className="text-center">
-                <div className="flex items-center justify-center gap-3 text-xs sm:text-sm flex-wrap">
-                  <div className="flex items-center gap-1.5">
-                    <div className="w-2.5 h-2.5 rounded bg-blue-500"></div>
-                    <span className="text-blue-700 font-semibold">
+              <div className="mt-1 text-center">
+                <p className="mb-1 text-xs font-medium text-gray-600">
+                  Biomass Distribution Chart
+                </p>
+                <div className="flex flex-wrap items-center justify-center gap-2 text-xs">
+                  <div className="flex items-center gap-1">
+                    <div className="h-2 w-2 rounded bg-blue-500" />
+                    <span className="font-semibold text-blue-700">
                       Total: {totalBiomass.toFixed(1)} T/acre
                     </span>
                   </div>
-                  <div className="flex items-center gap-1.5">
-                    <div className="w-2.5 h-2.5 rounded bg-green-500"></div>
-                    <span className="text-green-700 font-semibold">
+                  <div className="flex items-center gap-1">
+                    <div className="h-2 w-2 rounded bg-green-500" />
+                    <span className="font-semibold text-green-700">
                       Underground: {currentBiomass.toFixed(1)} T/acre
                     </span>
                   </div>

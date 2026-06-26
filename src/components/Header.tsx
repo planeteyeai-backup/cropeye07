@@ -185,7 +185,7 @@ export const Header: React.FC<HeaderProps> = ({
   const [userData, setUserData] = useState<any>(null);
   const { getCached, setCached } = useAppContext();
 
-  // Conditionally use farmer profile hook only for farmers
+  // Conditionally use farmer profile hook only for real farmers
   const userRole = getUserRole();
   const farmerProfile = useFarmerProfile();
   const { profile: farmerProfileData, loading: farmerProfileLoading } =

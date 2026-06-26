@@ -18,6 +18,7 @@ import {
   setAuthData,
   isValidToken,
   getUserData,
+  isPlanetEyeDemoToken,
 } from "../utils/auth";
 import { getCurrentUser } from "../api";
 import { initializeTokenRefresh } from "../utils/tokenManager";
@@ -29,7 +30,8 @@ export type UserRole =
   | "admin"
   | "fieldofficer"
   | "farmer"
-  | "owner";
+  | "owner"
+  | "planeteye";
 
 const AppRoutesContent: React.FC = () => {
   const navigate = useNavigate();
@@ -44,6 +46,13 @@ const AppRoutesContent: React.FC = () => {
     const savedRole = getUserRole() as UserRole | null;
 
     if (token && savedRole) {
+      if (isPlanetEyeDemoToken(token)) {
+        setAuthData(token, "planeteye", getUserData());
+        setUserRole("planeteye");
+        setIsAuthenticated(true);
+        setLoading(false);
+        return;
+      }
       // Validate token with backend
       validateToken(token, savedRole);
     } else {
@@ -51,9 +60,9 @@ const AppRoutesContent: React.FC = () => {
     }
   }, []);
 
-  // Initialize token refresh when authenticated
+  // Initialize token refresh when authenticated (skip demo session)
   useEffect(() => {
-    if (isAuthenticated && userRole) {
+    if (isAuthenticated && userRole && !isPlanetEyeDemoToken(getAuthToken())) {
       // Set up automatic token refresh
       const cleanup = initializeTokenRefresh();
       
@@ -67,6 +76,14 @@ const AppRoutesContent: React.FC = () => {
       // Check if token exists and is valid format
       if (!token || token.trim() === "") {
         handleLogout();
+        return;
+      }
+
+      if (isPlanetEyeDemoToken(token)) {
+        setAuthData(token, "planeteye", getUserData());
+        setUserRole("planeteye");
+        setIsAuthenticated(true);
+        setLoading(false);
         return;
       }
 
@@ -125,7 +142,7 @@ const AppRoutesContent: React.FC = () => {
 
       if (
         normalizedRole &&
-        ["manager", "admin", "fieldofficer", "farmer", "owner"].includes(
+        ["manager", "admin", "fieldofficer", "farmer", "owner", "planeteye"].includes(
           normalizedRole
         )
       ) {
@@ -192,13 +209,21 @@ const AppRoutesContent: React.FC = () => {
 
   const handleLoginSuccess = async (role: UserRole, token: string) => {
     const normalizedRole = role.toLowerCase() as UserRole;
+    const isDemoLogin = isPlanetEyeDemoToken(token);
 
-    // Store authentication data using utility function
-    setAuthData(token, normalizedRole);
+    if (!isDemoLogin) {
+      // Store authentication data using utility function
+      setAuthData(token, normalizedRole);
+    }
 
     // Update state
     setUserRole(normalizedRole);
     setIsAuthenticated(true);
+
+    if (isDemoLogin) {
+      navigate("/dashboard?view=progressdashboard");
+      return;
+    }
 
     // For farmer: await profile prefetch before navigate so dashboard loads fast (no "Loading farmer profile...")
     if (normalizedRole === "farmer") {
