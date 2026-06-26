@@ -1,5 +1,4 @@
 import {
-  WEEKS_PER_SECTION,
   getLocalWeekNumber,
   getMonthRangeForWeek,
   type MonthSectionLabel,
@@ -38,20 +37,6 @@ function parsePlantationDate(plantationDate?: string | null): Date {
   return base;
 }
 
-function sectionDateWindow(
-  plantationDate: string | null | undefined,
-  sectionStartWeek: number,
-  sectionWeekCount: number,
-): { start: Date; end: Date } {
-  const base = parsePlantationDate(plantationDate);
-  const start = new Date(base);
-  start.setDate(base.getDate() + sectionStartWeek * 7);
-  const end = new Date(base);
-  end.setDate(base.getDate() + (sectionStartWeek + sectionWeekCount) * 7 - 1);
-  end.setHours(23, 59, 59, 999);
-  return { start, end };
-}
-
 function globalWeekIndexFromReading(plantation: Date, readingDate: Date): number {
   const diffMs = readingDate.getTime() - plantation.getTime();
   return Math.max(0, Math.floor(diffMs / (7 * 24 * 60 * 60 * 1000)));
@@ -82,9 +67,9 @@ function readingToNode(
 }
 
 /**
- * One dot per API yield reading in the selected month slot.
- * If the slot is empty but the farmer has API readings, show the latest reading
- * when it is the farmer's newest yield (so today's / latest yield is always visible).
+ * History view: always 10 weekly dots for the selected month slot.
+ * API readings are placed on the matching week only — no "latest yield" highlight
+ * (that belongs in Live view).
  */
 export function buildSectionTimelineNodes(
   farmerId: string,
@@ -93,67 +78,56 @@ export function buildSectionTimelineNodes(
   options: {
     plantationDate?: string | null;
     yieldReadings?: YieldReading[];
+    baseYield?: number;
   } = {},
 ): SectionTimelineNode[] {
-  const { plantationDate, yieldReadings = [] } = options;
+  const { plantationDate, yieldReadings = [], baseYield = 2 } = options;
   const plantation = parsePlantationDate(plantationDate);
-  const { start: windowStart, end: windowEnd } = sectionDateWindow(
-    plantationDate,
-    sectionStartWeek,
-    sectionWeekCount,
-  );
 
   const sortedAll = [...yieldReadings]
     .filter((reading) => reading?.date && Number.isFinite(Number(reading.yield)))
     .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
-  if (sortedAll.length === 0) return [];
+  return Array.from({ length: sectionWeekCount }, (_, localIndex) => {
+    const globalWeek = sectionStartWeek + localIndex;
+    const weekStart = new Date(plantation);
+    weekStart.setDate(plantation.getDate() + globalWeek * 7);
+    weekStart.setHours(0, 0, 0, 0);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekStart.getDate() + 6);
+    weekEnd.setHours(23, 59, 59, 999);
 
-  const latestReading = sortedAll[sortedAll.length - 1];
-  const latestDate = new Date(latestReading.date);
-  const latestInWindow =
-    !Number.isNaN(latestDate.getTime()) &&
-    latestDate >= windowStart &&
-    latestDate <= windowEnd;
+    const readingInWeek = sortedAll.find((reading) => {
+      const readingDate = new Date(reading.date);
+      if (Number.isNaN(readingDate.getTime())) return false;
+      return readingDate >= weekStart && readingDate <= weekEnd;
+    });
 
-  const inSection = sortedAll.filter((reading) => {
-    const readingDate = new Date(reading.date);
-    if (Number.isNaN(readingDate.getTime())) return false;
-    return readingDate >= windowStart && readingDate <= windowEnd;
+    if (readingInWeek) {
+      return readingToNode(
+        farmerId,
+        sectionStartWeek,
+        readingInWeek,
+        localIndex,
+        plantation,
+        false,
+      );
+    }
+
+    const fallbackYield = baseYield + globalWeek * 0.08;
+
+    return {
+      id: `${farmerId}-w${globalWeek + 1}`,
+      day: getLocalWeekNumber(globalWeek),
+      date: formatTimelineDate(weekStart),
+      monthRange: getMonthRangeForWeek(globalWeek),
+      yield: `${Number(fallbackYield).toFixed(1)} T/acre`,
+      callStatus: 'pending' as const,
+      note: '',
+      isFromApi: false,
+      isLatest: false,
+    };
   });
-
-  if (inSection.length > 0) {
-    const readings = inSection.slice(-WEEKS_PER_SECTION);
-    return readings.map((reading, index) =>
-      readingToNode(
-        farmerId,
-        sectionStartWeek,
-        reading,
-        index,
-        plantation,
-        latestReading != null &&
-          reading.date === latestReading.date &&
-          Number(reading.yield) === Number(latestReading.yield),
-      ),
-    );
-  }
-
-  // Farmer has yield data but none in this slot — show latest yield dot if it
-  // belongs to this slot (user navigated to the right month range).
-  if (latestInWindow) {
-    return [
-      readingToNode(
-        farmerId,
-        sectionStartWeek,
-        latestReading,
-        0,
-        plantation,
-        true,
-      ),
-    ];
-  }
-
-  return [];
 }
 
 export function sectionUsesApiReadings(nodes: SectionTimelineNode[]): boolean {

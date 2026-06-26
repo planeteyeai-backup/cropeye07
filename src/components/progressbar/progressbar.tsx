@@ -1,5 +1,11 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { Check, X, ChevronLeft, ChevronRight } from 'lucide-react';
+import {
+  createFarmerNote,
+  getFarmerNotes,
+  type FarmerNote,
+} from '../../api';
+import { isPlanetEyeDemoUser } from '../../utils/auth';
 import type { FactoryId } from './factoryProgressTypes';
 import type { FarmerProgressConfig } from './progressData';
 import {
@@ -186,8 +192,12 @@ const buildInitialActionsForConfigs = (
 const VISIBLE_FARMER_ROWS = 3;
 const FARMER_LIST_MAX_HEIGHT = '23.5rem';
 
-const getNodePosition = (index: number, total: number) =>
-  total <= 1 ? 0 : (index / (total - 1)) * 100;
+/** Center of dot in equal-column grid (for panel alignment under the dot). */
+const getGridDotCenterPercent = (index: number, total: number): number => {
+  if (total <= 0) return 0;
+  if (total === 1) return 0;
+  return ((index + 0.5) / total) * 100;
+};
 
 const SlotNavButton: React.FC<{
   direction: 'prev' | 'next';
@@ -220,24 +230,48 @@ const getPopupAlignClass = (dotIndex: number, total: number): string => {
   return 'left-1/2 -translate-x-1/2';
 };
 
+const formatNoteTimestamp = (iso: string): string => {
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) return iso;
+  return parsed.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+};
+
 const ActionEditPanel: React.FC<{
   node: TimelineNode;
   noteValue: string;
   actionTaken: ActionTaken | null;
-  onSave: (value: string, action: ActionTaken) => void;
+  savedNotes: FarmerNote[];
+  notesLoading: boolean;
+  saving: boolean;
+  saveError: string | null;
+  onSave: (value: string, action: ActionTaken) => void | Promise<void>;
   onClose: () => void;
-}> = ({ node, noteValue, actionTaken, onSave, onClose }) => {
+}> = ({
+  node,
+  noteValue,
+  actionTaken,
+  savedNotes,
+  notesLoading,
+  saving,
+  saveError,
+  onSave,
+  onClose,
+}) => {
   const [draft, setDraft] = useState(noteValue);
   const [draftAction, setDraftAction] = useState<ActionTaken | null>(actionTaken);
 
   useEffect(() => {
-    setDraft(noteValue);
+    setDraft('');
     setDraftAction(actionTaken);
   }, [noteValue, actionTaken, node.id]);
 
   return (
     <div
-      className="w-[200px] max-w-[min(200px,calc(100vw-2rem))] rounded-lg border border-slate-200 bg-white p-2.5 shadow-xl ring-1 ring-black/5"
+      className="w-[220px] max-w-[min(220px,calc(100vw-2rem))] rounded-lg border border-slate-200 bg-white p-2.5 shadow-xl ring-1 ring-black/5"
       onClick={(e) => e.stopPropagation()}
       onMouseDown={(e) => e.stopPropagation()}
     >
@@ -286,25 +320,53 @@ const ActionEditPanel: React.FC<{
         </button>
       </div>
 
+      <div className="mb-1.5">
+        <p className="mb-0.5 text-[9px] font-medium text-slate-500">Previous notes</p>
+        {notesLoading ? (
+          <p className="text-[9px] text-slate-400">Loading notes…</p>
+        ) : savedNotes.length === 0 ? (
+          <p className="text-[9px] text-slate-400">No notes yet</p>
+        ) : (
+          <ul className="max-h-20 space-y-1 overflow-y-auto pr-0.5">
+            {savedNotes.map((note) => (
+              <li
+                key={note.id}
+                className="rounded border border-slate-100 bg-slate-50 px-1.5 py-1 text-[9px] leading-snug text-slate-700"
+              >
+                <p className="font-medium text-slate-800">{note.content}</p>
+                <p className="mt-0.5 text-[8px] text-slate-400">
+                  {formatNoteTimestamp(note.created_at)}
+                  {note.created_by_name ? ` · ${note.created_by_name}` : ''}
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
       <input
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
-        placeholder="Note (optional)..."
+        placeholder="Add a new note..."
         className="mb-1.5 w-full rounded border border-slate-200 px-1.5 py-0.5 text-[10px] focus:outline-none"
         style={{ color: T.text }}
+        disabled={saving}
       />
+      {saveError && (
+        <p className="mb-1 text-[9px] font-medium text-red-600">{saveError}</p>
+      )}
       <div className="flex gap-1">
         <button
           type="button"
           onClick={() => {
-            if (!draftAction) return;
-            onSave(draft.trim(), draftAction);
+            if (!draftAction || saving) return;
+            void onSave(draft.trim(), draftAction);
           }}
-          disabled={!draftAction}
+          disabled={!draftAction || saving}
           className="flex-1 rounded py-0.5 text-[10px] font-semibold text-white disabled:bg-slate-300"
           style={{ backgroundColor: T.active }}
         >
-          Save
+          {saving ? 'Saving…' : 'Save'}
         </button>
         <button
           type="button"
@@ -330,6 +392,7 @@ const ProgressDot: React.FC<{
   isFromApi?: boolean;
   dotIndex: number;
   totalDots: number;
+  alignStart?: boolean;
   onActivate: (key: string | null) => void;
   onSelect: () => void;
   nodeKey: string;
@@ -345,6 +408,7 @@ const ProgressDot: React.FC<{
   isFromApi,
   dotIndex,
   totalDots,
+  alignStart = false,
   onActivate,
   onSelect,
   nodeKey,
@@ -377,7 +441,10 @@ const ProgressDot: React.FC<{
 
   return (
     <div
-      className="relative flex justify-center"
+      className={[
+        'relative flex',
+        alignStart ? 'justify-start' : 'justify-center',
+      ].join(' ')}
       onMouseEnter={() => onActivate(nodeKey)}
       onMouseLeave={() => {
         if (!isSelected) onActivate(null);
@@ -385,10 +452,16 @@ const ProgressDot: React.FC<{
     >
       <button
         type="button"
-        className="relative z-10 flex h-10 w-full items-center justify-center focus:outline-none"
+        className={[
+          'relative z-10 flex h-10 items-center focus:outline-none',
+          alignStart ? 'w-auto justify-start' : 'w-full justify-center',
+        ].join(' ')}
         onClick={(e) => {
           e.stopPropagation();
-          if (isPast) onSelect();
+          if (isPast) {
+            onSelect();
+            e.currentTarget.blur();
+          }
         }}
         aria-label={`${farmerName} ${node.date} — ${node.yield}`}
         aria-pressed={isSelected}
@@ -479,9 +552,18 @@ const FarmerRow: React.FC<{
   noteOpenKey: string | null;
   notes: Record<string, string>;
   actions: Record<string, ActionTaken>;
+  savedNotes: FarmerNote[];
+  notesLoading: boolean;
+  savingNote: boolean;
+  noteSaveError: string | null;
   onNodeChange: (key: string | null) => void;
-  onNoteOpen: (key: string | null) => void;
-  onNoteSave: (key: string, value: string, action: ActionTaken) => void;
+  onNoteOpen: (key: string | null, farmerId: string | null) => void;
+  onNoteSave: (
+    key: string,
+    value: string,
+    action: ActionTaken,
+    farmerId: string,
+  ) => void | Promise<void>;
   rowIndex: number;
   highlightFarmerId?: string;
   canGoPrevSection: boolean;
@@ -496,6 +578,10 @@ const FarmerRow: React.FC<{
   noteOpenKey,
   notes,
   actions,
+  savedNotes,
+  notesLoading,
+  savingNote,
+  noteSaveError,
   onNodeChange,
   onNoteOpen,
   onNoteSave,
@@ -508,16 +594,16 @@ const FarmerRow: React.FC<{
 }) => {
   const getActionForNode = (nodeKey: string) => actions[nodeKey] ?? null;
 
-  let lastYesIndex = -1;
+  /** Green line only grows for consecutive "yes" from week 1 — skipping ahead does not fill the track. */
+  let lastConsecutiveYesIndex = -1;
   for (let i = 0; i < visibleNodes.length; i++) {
     const nodeKey = `${farmer.farmerId}-${visibleNodes[i].id}`;
     if (getActionForNode(nodeKey) === 'yes') {
-      lastYesIndex = i;
+      lastConsecutiveYesIndex = i;
+    } else {
+      break;
     }
   }
-
-  const progressPercent =
-    lastYesIndex >= 0 ? getNodePosition(lastYesIndex, columnCount) : 0;
 
   const openDotIndex =
     noteOpenKey?.startsWith(`${farmer.farmerId}-`)
@@ -529,16 +615,26 @@ const FarmerRow: React.FC<{
   const openNode = openDotIndex >= 0 ? visibleNodes[openDotIndex] : null;
   const openNodeKey = openNode ? `${farmer.farmerId}-${openNode.id}` : null;
   const hasOpenPanel = openNodeKey != null;
+  const isSingleDot = visibleNodes.length === 1;
+  const latestSavedNote = savedNotes[0]?.content ?? '';
 
-  const panelStyle: React.CSSProperties =
-    openDotIndex === 0
-      ? { left: 0 }
-      : openDotIndex === columnCount - 1
-        ? { right: 0 }
+  const panelStyle: React.CSSProperties = isSingleDot
+    ? { left: 0, transform: 'none' }
+    : openDotIndex <= 0
+      ? { left: 0, transform: 'none' }
+      : openDotIndex >= visibleNodes.length - 1
+        ? { right: 0, left: 'auto', transform: 'none' }
         : {
-            left: `${getNodePosition(openDotIndex, columnCount)}%`,
+            left: `${getGridDotCenterPercent(openDotIndex, columnCount)}%`,
             transform: 'translateX(-50%)',
           };
+
+  const progressPercent =
+    lastConsecutiveYesIndex >= 0
+      ? isSingleDot
+        ? 4
+        : getGridDotCenterPercent(lastConsecutiveYesIndex, columnCount)
+      : 0;
 
   return (
     <div
@@ -574,8 +670,15 @@ const FarmerRow: React.FC<{
           <div className="h-10" aria-hidden />
         ) : (
         <div
-          className="relative grid h-10 items-center overflow-visible"
-          style={{ gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))` }}
+          className={[
+            'relative h-10 items-center overflow-visible',
+            isSingleDot ? 'flex' : 'grid',
+          ].join(' ')}
+          style={
+            isSingleDot
+              ? undefined
+              : { gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))` }
+          }
         >
           <div
             className="pointer-events-none absolute inset-x-0 top-1/2 z-0 h-1.5 -translate-y-1/2 rounded-full"
@@ -591,7 +694,8 @@ const FarmerRow: React.FC<{
 
           {visibleNodes.map((node, dotIndex) => {
             const nodeKey = `${farmer.farmerId}-${node.id}`;
-            const noteValue = notes[nodeKey] ?? node.note;
+            const noteValue =
+              notes[nodeKey] ?? latestSavedNote ?? node.note;
             const actionTaken = getActionForNode(nodeKey);
             const past = isPastWeek(node);
 
@@ -609,10 +713,12 @@ const FarmerRow: React.FC<{
                 isFromApi={node.isFromApi}
                 dotIndex={dotIndex}
                 totalDots={visibleNodes.length}
+                alignStart={isSingleDot}
                 onActivate={onNodeChange}
-                onSelect={() =>
-                  onNoteOpen(noteOpenKey === nodeKey ? null : nodeKey)
-                }
+                onSelect={() => {
+                  const nextKey = noteOpenKey === nodeKey ? null : nodeKey;
+                  onNoteOpen(nextKey, nextKey ? farmer.farmerId : null);
+                }}
                 nodeKey={nodeKey}
               />
             );
@@ -626,13 +732,16 @@ const FarmerRow: React.FC<{
               <div className="pointer-events-auto">
                 <ActionEditPanel
                   node={openNode}
-                  noteValue={notes[openNodeKey] ?? openNode.note}
+                  noteValue={notes[openNodeKey] ?? latestSavedNote ?? openNode.note}
                   actionTaken={getActionForNode(openNodeKey)}
-                  onSave={(value, action) => {
-                    onNoteSave(openNodeKey, value, action);
-                    onNoteOpen(null);
+                  savedNotes={savedNotes}
+                  notesLoading={notesLoading}
+                  saving={savingNote}
+                  saveError={noteSaveError}
+                  onSave={async (value, action) => {
+                    await onNoteSave(openNodeKey, value, action, farmer.farmerId);
                   }}
-                  onClose={() => onNoteOpen(null)}
+                  onClose={() => onNoteOpen(null, null)}
                 />
               </div>
             </div>
@@ -667,7 +776,12 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
 
   const [activeNode, setActiveNode] = useState<string | null>(null);
   const [noteOpenKey, setNoteOpenKey] = useState<string | null>(null);
+  const [noteOpenFarmerId, setNoteOpenFarmerId] = useState<string | null>(null);
   const [notes, setNotes] = useState<Record<string, string>>({});
+  const [farmerNotes, setFarmerNotes] = useState<Record<string, FarmerNote[]>>({});
+  const [notesLoading, setNotesLoading] = useState(false);
+  const [savingNote, setSavingNote] = useState(false);
+  const [noteSaveError, setNoteSaveError] = useState<string | null>(null);
   const [actions, setActions] = useState<Record<string, ActionTaken>>(() =>
     buildInitialActionsForConfigs(farmerConfigs),
   );
@@ -686,12 +800,28 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     });
     setActiveNode(null);
     setNoteOpenKey(null);
+    setNoteOpenFarmerId(null);
+  };
+
+  const applyHistorySections = () => {
+    setFarmerSections(() => {
+      const next: Record<string, MonthSectionLabel> = {};
+      for (const cfg of farmerConfigs) {
+        next[cfg.farmerId] = DEFAULT_MONTH_SECTION;
+      }
+      return next;
+    });
+    setActiveNode(null);
+    setNoteOpenKey(null);
+    setNoteOpenFarmerId(null);
   };
 
   const handleViewModeChange = (mode: ProgressViewMode) => {
     setViewMode(mode);
     if (mode === 'live') {
       applyLatestSections();
+    } else {
+      applyHistorySections();
     }
   };
 
@@ -704,24 +834,52 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     setFarmerSections((prev) => {
       const next: Record<string, MonthSectionLabel> = {};
       for (const cfg of farmerConfigs) {
-        if (highlightFarmerId && cfg.farmerId === highlightFarmerId) {
-          next[cfg.farmerId] = resolveLatestMonthSectionFromConfigs([cfg]);
-        } else if (prev[cfg.farmerId]) {
+        if (prev[cfg.farmerId]) {
           next[cfg.farmerId] = prev[cfg.farmerId];
         } else {
-          next[cfg.farmerId] = resolveLatestMonthSectionFromConfigs([cfg]);
+          next[cfg.farmerId] = DEFAULT_MONTH_SECTION;
         }
       }
       return next;
     });
-  }, [farmerConfigs, highlightFarmerId]);
+  }, [farmerConfigs]);
 
   useEffect(() => {
     setActions(buildInitialActionsForConfigs(farmerConfigs));
     setNotes({});
+    setFarmerNotes({});
     setActiveNode(null);
     setNoteOpenKey(null);
+    setNoteOpenFarmerId(null);
+    setNoteSaveError(null);
   }, [farmerConfigs]);
+
+  const loadFarmerNotes = useCallback(async (farmerId: string) => {
+    if (isPlanetEyeDemoUser()) {
+      setFarmerNotes((prev) => ({ ...prev, [farmerId]: [] }));
+      return;
+    }
+
+    setNotesLoading(true);
+    setNoteSaveError(null);
+    try {
+      const { data } = await getFarmerNotes(farmerId);
+      setFarmerNotes((prev) => ({
+        ...prev,
+        [farmerId]: Array.isArray(data.results) ? data.results : [],
+      }));
+    } catch {
+      setNoteSaveError('Could not load notes for this farmer.');
+      setFarmerNotes((prev) => ({ ...prev, [farmerId]: [] }));
+    } finally {
+      setNotesLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!noteOpenFarmerId) return;
+    void loadFarmerNotes(noteOpenFarmerId);
+  }, [noteOpenFarmerId, loadFarmerNotes]);
 
   const displayFarmers = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -738,16 +896,43 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     [farmerConfigs],
   );
 
+  const handleNoteOpen = (key: string | null, farmerId: string | null) => {
+    setNoteOpenKey(key);
+    setNoteOpenFarmerId(farmerId);
+    setNoteSaveError(null);
+  };
+
   const setFarmerSection = (farmerId: string, label: MonthSectionLabel) => {
     setFarmerSections((prev) => ({ ...prev, [farmerId]: label }));
     setActiveNode(null);
-    setNoteOpenKey(null);
+    handleNoteOpen(null, null);
   };
 
-  const handleNoteSave = (key: string, value: string, action: ActionTaken) => {
+  const handleNoteSave = async (
+    key: string,
+    value: string,
+    action: ActionTaken,
+    farmerId: string,
+  ) => {
     setActions((prev) => ({ ...prev, [key]: action }));
-    if (value.trim()) {
-      setNotes((prev) => ({ ...prev, [key]: value.trim() }));
+    setSavingNote(true);
+    setNoteSaveError(null);
+
+    try {
+      if (value.trim()) {
+        if (isPlanetEyeDemoUser()) {
+          setNotes((prev) => ({ ...prev, [key]: value.trim() }));
+        } else {
+          await createFarmerNote(farmerId, value.trim());
+          await loadFarmerNotes(farmerId);
+          setNotes((prev) => ({ ...prev, [key]: value.trim() }));
+        }
+      }
+      handleNoteOpen(null, null);
+    } catch {
+      setNoteSaveError('Could not save note. Please try again.');
+    } finally {
+      setSavingNote(false);
     }
   };
 
@@ -759,7 +944,7 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
           <p className="text-xs text-slate-500">
             {viewMode === 'live'
               ? 'Showing latest yield only — updates when new data arrives'
-              : ''}
+              : ' '}
           </p>
         </div>
         <div
@@ -805,11 +990,12 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
         )}
 
         <div
-          className={[
-            'space-y-3 pr-1',
-            noteOpenKey ? 'overflow-visible' : 'overflow-x-hidden overflow-y-auto',
-          ].join(' ')}
-          style={{ maxHeight: FARMER_LIST_MAX_HEIGHT }}
+          className="space-y-3 overflow-x-hidden overflow-y-auto pr-1"
+          style={{
+            maxHeight: noteOpenKey
+              ? `calc(${FARMER_LIST_MAX_HEIGHT} + 11rem)`
+              : FARMER_LIST_MAX_HEIGHT,
+          }}
         >
           {displayFarmers.length === 0 ? (
             <div className="rounded-xl border border-dashed border-slate-200 bg-white px-4 py-10 text-center">
@@ -840,6 +1026,7 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
                       {
                         plantationDate: cfg?.plantationDate,
                         yieldReadings: cfg?.yieldReadings,
+                        baseYield: cfg?.baseYield,
                       },
                     );
 
@@ -848,13 +1035,23 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
                 key={farmer.farmerId}
                 farmer={farmer}
                 visibleNodes={visibleNodes}
-                columnCount={Math.max(visibleNodes.length, 1)}
+                columnCount={
+                  viewMode === 'history'
+                    ? WEEKS_PER_SECTION
+                    : Math.max(visibleNodes.length, 1)
+                }
                 activeNode={activeNode}
                 noteOpenKey={noteOpenKey}
                 notes={notes}
                 actions={actions}
+                savedNotes={farmerNotes[farmer.farmerId] ?? []}
+                notesLoading={notesLoading && noteOpenFarmerId === farmer.farmerId}
+                savingNote={savingNote && noteOpenFarmerId === farmer.farmerId}
+                noteSaveError={
+                  noteOpenFarmerId === farmer.farmerId ? noteSaveError : null
+                }
                 onNodeChange={setActiveNode}
-                onNoteOpen={setNoteOpenKey}
+                onNoteOpen={handleNoteOpen}
                 onNoteSave={handleNoteSave}
                 rowIndex={index}
                 highlightFarmerId={highlightFarmerId}

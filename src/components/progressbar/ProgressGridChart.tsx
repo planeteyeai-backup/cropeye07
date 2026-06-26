@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Download } from 'lucide-react';
 import {
   CartesianGrid,
@@ -11,11 +11,11 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { DEFAULT_MONTH_SECTION } from './progressConstants';
 import type { FarmerProgressConfig } from './progressData';
 import { YIELD_TARGET_TON } from './progressData';
 import { downloadYieldRangeFarmersExcel } from './exportUnderTargetExcel';
 import { requestProgressDashboardNav } from './progressNavigation';
+import { DEFAULT_MONTH_SECTION } from './progressConstants';
 import type { FactoryId } from './factoryProgressTypes';
 import {
   CHART_Y_DOMAIN,
@@ -67,7 +67,7 @@ const ChartTooltip: React.FC<ChartTooltipProps> = ({ active, payload }) => {
       <p className="font-semibold text-slate-800">{row.label} ton</p>
       <p className="text-slate-600">{row.count} farmer{row.count === 1 ? '' : 's'}</p>
       <p className="text-slate-500">Avg yield: {row.avgTons.toFixed(1)} ton</p>
-      <p className="mt-1 text-[10px]" style={{ color: T.active }}>Click dot — scroll list below for all farmers</p>
+      <p className="mt-1 text-[10px]" style={{ color: T.active }}>Click dot — farmer list opens below</p>
     </div>
   );
 };
@@ -96,10 +96,19 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
 }) => {
   const [selectedRangeIndex, setSelectedRangeIndex] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
+  const farmerTableRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setSelectedRangeIndex(null);
   }, [farmerConfigs]);
+
+  useEffect(() => {
+    if (selectedRangeIndex == null || !farmerTableRef.current) return;
+    farmerTableRef.current.scrollIntoView({
+      behavior: 'smooth',
+      block: 'nearest',
+    });
+  }, [selectedRangeIndex]);
 
   const handleRangeClick = (rangeIndex: number) => {
     setSelectedRangeIndex((prev) => (prev === rangeIndex ? null : rangeIndex));
@@ -216,7 +225,7 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
         </h2>
         <p className="mt-1 text-xs" style={{ color: C.textMuted }}>
           {rangeGroups.length} active yield range{rangeGroups.length === 1 ? '' : 's'} from API
-          · Click a dot — scroll the farmer list below
+          · Click a dot for the list below · Click a farmer to open Crop Growth Progress
         </p>
         <p className="mt-1 text-xs font-medium" style={{ color: C.zone75 }}>
           {underTargetCount} farmer{underTargetCount === 1 ? '' : 's'} under{' '}
@@ -331,7 +340,10 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
 
                   return (
                     <g
-                      onClick={() => handleRangeClick(payload.rangeIndex)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleRangeClick(payload.rangeIndex);
+                      }}
                       style={{ cursor: 'pointer' }}
                     >
                       <circle
@@ -366,7 +378,7 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
           </ResponsiveContainer>
 
           {selectedRangeIndex != null && selectedFarmers.length > 0 && (
-            <div className="border-t border-slate-200 bg-white">
+            <div ref={farmerTableRef} className="border-t border-slate-200 bg-white">
               <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-2">
                 <p className="text-xs font-semibold" style={{ color: C.text }}>
                   {selectedRangeLabel} ton — {selectedFarmers.length} farmers
@@ -437,6 +449,7 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
                         key={farmer.farmerId}
                         className="cursor-pointer border-b border-slate-100 last:border-0 hover:bg-[#F0FDF4]"
                         onClick={() => handleFarmerClick(farmer.farmerId, farmer.name)}
+                        title="Open this farmer in Crop Growth Progress"
                       >
                         <td className="w-10 px-2 py-1.5" style={{ color: C.textMuted }}>
                           {index + 1}

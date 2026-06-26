@@ -1981,4 +1981,35 @@ export const getPublicFactoryFarmers = (
 /** Authenticated: industries / sugar factories for dropdown labels. */
 export const getIndustries = () => api.get("/users/industries/");
 
+export interface FarmerNote {
+  id: number;
+  farmer: number;
+  farmer_name: string;
+  content: string;
+  created_by: number;
+  created_by_name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FarmerNotesListResponse {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: FarmerNote[];
+}
+
+/** GET /api/notes/?farmer={id} — notes for a farmer (newest first from API). */
+export const getFarmerNotes = (farmerId: number | string) =>
+  api.get<FarmerNotesListResponse>("/notes/", {
+    params: { farmer: farmerId },
+  });
+
+/** POST /api/notes/ — add a visit note for a farmer. */
+export const createFarmerNote = (farmerId: number | string, content: string) =>
+  api.post<FarmerNote>("/notes/", {
+    farmer: Number(farmerId),
+    content,
+  });
+
 export default api;

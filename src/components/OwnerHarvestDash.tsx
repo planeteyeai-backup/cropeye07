@@ -1,14 +1,14 @@
 import api from "../api";
 import React, { useState, useRef, useEffect, useMemo } from "react";
-import axios from "axios";
+//import axios from "axios";
 import {
   MapPin,
   ChevronDown,
   Loader2,
-  Calendar,
+ // Calendar,
   TrendingUp,
   BarChart3,
-  PieChart,
+ // PieChart,
   Activity,
   Maximize2,
 } from "lucide-react";
@@ -17,7 +17,7 @@ import {
   Pie,
   Cell,
   ResponsiveContainer,
-  LineChart,
+  //LineChart,
   Line,
   XAxis,
   YAxis,
