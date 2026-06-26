@@ -9,8 +9,6 @@ import {
   getUserRole,
   getFastApiToken,
   setFastApiToken,
-  isPlanetEyeDemoToken,
-  isPlanetEyeDemoUser,
 } from "./utils/auth";
 import { checkAndRefreshToken, isTokenExpired } from "./utils/tokenManager";
 
@@ -66,7 +64,7 @@ api.interceptors.request.use(
   async (config) => {
     // Check and refresh token if needed before making request
     const token = getAuthToken();
-    if (token && !isPlanetEyeDemoToken(token)) {
+    if (token) {
       // If token is expired or expiring soon, try to refresh it
       if (isTokenExpired(token, 300)) {
         // Token is expired or expiring within 5 minutes, refresh it
@@ -75,7 +73,7 @@ api.interceptors.request.use(
 
       // Get the (possibly refreshed) token
       const currentToken = getAuthToken();
-      if (currentToken && !isPlanetEyeDemoToken(currentToken)) {
+      if (currentToken) {
         config.headers.Authorization = `Bearer ${currentToken}`;
       }
     }
@@ -115,11 +113,6 @@ api.interceptors.response.use(
 
     // Suppress console errors for silent errors
     if (error.isSilent) {
-      return Promise.reject(error);
-    }
-
-    // Demo progress login — never clear session on API auth errors
-    if (isPlanetEyeDemoToken(getAuthToken())) {
       return Promise.reject(error);
     }
 
@@ -660,11 +653,6 @@ export const registerUser = (data: {
 // };
 
 export const getCurrentUser = () => {
-  if (isPlanetEyeDemoUser()) {
-    const error = new Error("Demo session has no backend user");
-    (error as any).isSilent = true;
-    return Promise.reject(error);
-  }
   return api.get("/users/me/");
 };
 
@@ -1016,13 +1004,6 @@ export const calculatePolygonArea = (
 let farmerMyProfileInFlight: ReturnType<typeof api.get> | null = null;
 
 export const getFarmerMyProfile = () => {
-  if (isPlanetEyeDemoUser()) {
-    const error = new Error("Demo session has no farmer profile");
-    (error as any).isSilent = true;
-    (error as any).response = { status: 403 };
-    return Promise.reject(error);
-  }
-
   // Check if token exists and is valid before making the call
   const token = getAuthToken();
   if (!token || !isValidToken(token)) {
@@ -1626,41 +1607,6 @@ export function encodePlotIdForEventsUrl(plotId: string | number): string {
   return encodeURIComponent(formatPlotIdForEventsApi(plotId));
 }
 
-const ADMIN_PLOT_API_URL = (
-  import.meta.env.VITE_DEV_PLOT_API_URL || "https://admin-cropeye.up.railway.app"
-).replace(/\/$/, "");
-
-/**
- * Plot boundary GeoJSON from Admin `/analyze` (not on Events service).
- * Plot ids with `/` must be encoded — e.g. `255/8` → `255_8` or `255%2F8`.
- */
-export async function fetchPlotBoundaryCoordinates(
-  plotId: string | number,
-  options?: { date?: string; signal?: AbortSignal },
-): Promise<[number, number][] | null> {
-  const today =
-    options?.date ?? new Date().toISOString().slice(0, 10);
-  const plotName = encodePlotIdForEventsUrl(
-    String(plotId).trim().replace(/\//g, "_"),
-  );
-  const url = `${ADMIN_PLOT_API_URL}/analyze?plot_name=${plotName}&date=${today}`;
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { Accept: "application/json" },
-    signal: options?.signal,
-  });
-  if (!response.ok) return null;
-
-  const data = await response.json();
-  const ring = data?.features?.[0]?.geometry?.coordinates?.[0];
-  if (!Array.isArray(ring)) return null;
-
-  return ring.map(
-    ([lng, lat]: [number, number]) => [lat, lng] as [number, number],
-  );
-}
-
 /** Shown when analyzeSinglePlot returns HTTP 400 (plantation date missing on backend). */
 export const PLANTATION_DATE_NOT_PROVIDED_MSG =
   "Plantation date not Provided";
@@ -1911,75 +1857,64 @@ export const patchFarmMyProfile = (data: {
   return api.patch("/farms/my-profile/", data);
 };
 
-/** Industrial yield timeline — factories, farmers, weekly yield dates (SEF service). */
-export async function fetchIndustrialYieldByOwner(
-  ownerId: number | string,
-): Promise<{ ok: boolean; status: number; data: unknown }> {
-  const base = (
-    import.meta.env.VITE_DEV_FIELD_API_URL || "https://sef-cropeye.up.railway.app"
-  ).replace(/\/$/, "");
-  const path =
-    import.meta.env.VITE_INDUSTRIAL_YIELD_BY_OWNER_PATH ||
-    "/industrial-yield-by-owner";
-  const url = new URL(`${base}${path.startsWith("/") ? path : `/${path}`}`);
-  url.searchParams.set("owner_id", String(ownerId));
-  const response = await fetch(url.toString(), {
-    headers: { Accept: "application/json" },
-    cache: "no-store",
-  });
-  const data = await response.json();
-  return { ok: response.ok, status: response.status, data };
-}
+// ==================== FACTORY PROGRESS API ====================
 
-function buildPublicFactoryFarmersUrl(
-  ownerId: number | string,
-  factoryName?: string,
-): string {
-  const base = API_BASE_URL.replace(/\/$/, "");
-  const path = (
-    import.meta.env.VITE_API_USERS_PUBLIC_FACTORY_FARMERS ||
-    "/users/public-factory-farmers/"
-  ).replace(/^\//, "");
-  const url = new URL(`${base}/${path}`);
-  url.searchParams.set("owner_id", String(ownerId));
-  const trimmedName = factoryName?.trim();
-  if (trimmedName) {
-    url.searchParams.set("name", trimmedName);
-  }
-  return url.toString();
-}
+export type FactoryApiResult =
+  | { ok: true; data: unknown }
+  | { ok: false; data: unknown };
 
-/** Native fetch — matches Postman; axios throws on 404 before body is read. */
+/** Public: farmers for sugar factories under an owner. */
 export async function fetchPublicFactoryFarmers(
-  ownerId: number | string,
+  ownerId: number,
   factoryName?: string,
-): Promise<{ ok: boolean; status: number; data: unknown }> {
-  const response = await fetch(buildPublicFactoryFarmersUrl(ownerId, factoryName), {
-    headers: { Accept: "application/json" },
-    cache: "no-store",
-  });
-  const data = await response.json();
-  return { ok: response.ok, status: response.status, data };
+): Promise<FactoryApiResult> {
+  const params: Record<string, string | number> = { owner_id: ownerId };
+  if (factoryName?.trim()) {
+    params.name = factoryName.trim();
+  }
+
+  try {
+    const response = await publicApi.get("/users/public-factory-farmers/", {
+      params,
+    });
+    return { ok: true, data: response.data };
+  } catch (error: any) {
+    return {
+      ok: false,
+      data:
+        error.response?.data ??
+        ({ error: error.message ?? "Failed to load factory farmers" } as const),
+    };
+  }
 }
 
-/** Public read-only: sugar factories + farmers under an owner. */
-export const getPublicFactoryFarmers = (
-  ownerId: number | string,
-  factoryName?: string,
-) => {
-  const path =
-    import.meta.env.VITE_API_USERS_PUBLIC_FACTORY_FARMERS ||
-    "/users/public-factory-farmers/";
-  const params: Record<string, string> = { owner_id: String(ownerId) };
-  const trimmedName = factoryName?.trim();
-  if (trimmedName) {
-    params.name = trimmedName;
+/** Authenticated: weekly industrial yield per factory/farmer for an owner. */
+export async function fetchIndustrialYieldByOwner(
+  ownerId: number,
+): Promise<FactoryApiResult> {
+  try {
+    const response = await api.get("/users/industrial-yield-by-owner/", {
+      params: { owner_id: ownerId },
+    });
+    return { ok: true, data: response.data };
+  } catch (error: any) {
+    return {
+      ok: false,
+      data:
+        error.response?.data ??
+        ({
+          error: error.message ?? "Failed to load industrial yield",
+        } as const),
+    };
   }
-  return publicApi.get(path, { params });
+}
+
+/** Authenticated: industries accessible to the logged-in user. */
+export const getIndustries = () => {
+  return api.get("/users/industries/");
 };
 
-/** Authenticated: industries / sugar factories for dropdown labels. */
-export const getIndustries = () => api.get("/users/industries/");
+export { fetchPlotBoundaryCoordinates } from "./utils/plotBoundary";
 
 export interface FarmerNote {
   id: number;

@@ -26,7 +26,7 @@ import {
 import {
   AlertTriangle,
   Calendar,
-  // Droplets,
+  Droplets,
   Thermometer,
   Activity,
   Target,
@@ -44,24 +44,17 @@ import {
   // Filter,
   // RefreshCw,
   Maximize2,
-  Gauge,
-  Loader2,
 } from "lucide-react";
 import "leaflet/dist/leaflet.css";
 import { getCache, setCache } from "../utils/cache";
 import api, {
   eventsApi,
   encodePlotIdForEventsUrl,
-  fetchPlotBoundaryCoordinates,
   getSinglePlotAgroStats,
   isAnalyzeSinglePlotPlantationDateError,
   PLANTATION_DATE_NOT_PROVIDED_MSG,
 } from "../api"; // Authenticated Django api + FastAPI events api
 import { useAppContext } from "../context/AppContext";
-import { fetchFieldScoreForPlot, fieldScoreCacheKey } from "../utils/fieldScore";
-import { findPlotRef } from "../utils/plotName";
-import { getPlantationFromRecord } from "../utils/plantation";
-import MapCropStatusOverlay from "./MapCropStatusOverlay";
 
 // Constants (same as FarmerDashboard)
 const BASE_URL = "https://events-cropeye.up.railway.app";
@@ -131,10 +124,8 @@ interface Metrics {
   area: number | null;
   biomass: number | null;
   totalBiomass: number | null;
-  biomassMin: number | null;
-  biomassMax: number | null;
   stressCount: number | null;
-  fieldScore: number | null;
+  irrigationEvents: number | null;
   expectedYield: number | null;
   daysToHarvest: number | null;
   growthStage: string | null;
@@ -154,11 +145,7 @@ interface PieChartWithNeedleProps {
   height?: number;
   title?: string;
   unit?: string;
-  showTitle?: boolean;
 }
-
-const GAUGE_CHART_HEIGHT = 168;
-const GAUGE_ARC_WIDTH = 240;
 
 type TimePeriod = "daily" | "weekly" | "monthly" | "yearly";
 
@@ -213,10 +200,8 @@ const ManagerFarmDash: React.FC = () => {
     area: null,
     biomass: null,
     totalBiomass: null,
-    biomassMin: null,
-    biomassMax: null,
     stressCount: null,
-    fieldScore: null,
+    irrigationEvents: null,
     expectedYield: null,
     daysToHarvest: null,
     growthStage: null,
@@ -265,13 +250,13 @@ const ManagerFarmDash: React.FC = () => {
     const farmer = farmersForSelectedOfficer.find(
       (f) => String(f.id) === selectedFarmerId,
     );
-    const plot = findPlotRef(farmer?.plots, plotId);
+    const plot = farmer?.plots?.find((p: any) => p.fastapi_plot_id === plotId);
 
-    if (plot?.boundary?.coordinates) {
-      const geom = (plot.boundary.coordinates as [number, number][][])[0];
+    if (plot && plot.boundary?.coordinates) {
+      const geom = plot.boundary.coordinates[0];
       if (geom) {
         // The API gives [lng, lat], Leaflet needs [lat, lng]
-        const coords = geom.map(([lng, lat]: [number, number]) => [lat, lng]) as [number, number][];
+        const coords = geom.map(([lng, lat]: [number, number]) => [lat, lng]);
         setPlotCoordinates(coords);
 
         // Calculate and set map center
@@ -292,10 +277,16 @@ const ManagerFarmDash: React.FC = () => {
       const officer = fieldOfficers.find(
         (fo) => String(fo.id) === selectedFieldOfficerId,
       );
-      const farmersList = officer ? officer.farmers : [];
+      const farmersList = officer ? officer.farmers ?? [] : [];
       setFarmersForSelectedOfficer(farmersList);
       if (farmersList.length > 0) {
-        setSelectedFarmerId(String(farmersList[0].id));
+        setSelectedFarmerId((prev) => {
+          const stillValid = farmersList.some(
+            (f: any) =>
+              String(f.id || f.farmer_id || f.farmerId) === String(prev),
+          );
+          return stillValid ? prev : String(farmersList[0].id);
+        });
       } else {
         setSelectedFarmerId("");
       }
@@ -312,17 +303,20 @@ const ManagerFarmDash: React.FC = () => {
       );
 
       if (selectedFarmer) {
-        // Extract fastapi_plot_id from plots array
         const farmerPlots = selectedFarmer.plots || [];
-        const plotIds = farmerPlots.map((plot: any) => plot.fastapi_plot_id);
+        const plotIds = farmerPlots
+          .map((plot: any) => plot.fastapi_plot_id)
+          .filter(Boolean);
 
         setPlots(plotIds);
 
-        // Auto-select first plot if available
         if (plotIds.length > 0) {
-          const firstPlotId = plotIds[0];
-          dashboardLoadedForPlotRef.current = "";
-          setSelectedPlotId(firstPlotId);
+          setSelectedPlotId((prev) => {
+            if (prev && plotIds.includes(prev)) {
+              return prev;
+            }
+            return plotIds[0];
+          });
         } else {
           dashboardLoadedForPlotRef.current = "";
           setSelectedPlotId("");
@@ -349,10 +343,8 @@ const ManagerFarmDash: React.FC = () => {
     }
 
     const fetchGen = ++plotFetchGenRef.current;
-    const ac = new AbortController();
-    void fetchAllData(selectedPlotId, ac.signal, fetchGen);
+    void fetchAllData(selectedPlotId, fetchGen);
     setPlotCoordinatesFromState(selectedPlotId);
-    return () => ac.abort();
   }, [selectedPlotId]);
 
   // Sync selected plot to global AppContext so the chatbot always has the
@@ -360,24 +352,6 @@ const ManagerFarmDash: React.FC = () => {
   useEffect(() => {
     setSelectedPlotName(selectedPlotId || null);
   }, [selectedPlotId]);
-
-  const selectedPlotPlantation = React.useMemo(() => {
-    if (!selectedPlotId || !selectedFarmerId) {
-      return { plantationDate: null, plantationType: null };
-    }
-    const farmer = farmersForSelectedOfficer.find(
-      (f) =>
-        String(f.id || f.farmer_id || f.farmerId) === String(selectedFarmerId),
-    );
-    const plot = findPlotRef(farmer?.plots, selectedPlotId);
-    const info = getPlantationFromRecord(plot ?? farmer);
-    return {
-      plantationDate:
-        info.plantation_date !== "N/A" ? info.plantation_date : null,
-      plantationType:
-        info.plantation_type !== "N/A" ? info.plantation_type : null,
-    };
-  }, [selectedPlotId, selectedFarmerId, farmersForSelectedOfficer]);
 
   useEffect(() => {
     if (lineChartData.length > 0) {
@@ -416,19 +390,12 @@ const ManagerFarmDash: React.FC = () => {
   const makeRequestWithRetry = async (
     url: string,
     retries = 1,
-    timeout = 15000,
-    outerSignal?: AbortSignal,
+    timeout = MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
   ): Promise<any> => {
     const abortController = new AbortController();
     const timeoutId = setTimeout(() => {
       abortController.abort();
     }, timeout);
-
-    const onOuterAbort = () => abortController.abort();
-    if (outerSignal) {
-      if (outerSignal.aborted) abortController.abort();
-      else outerSignal.addEventListener("abort", onOuterAbort);
-    }
 
     try {
       const response = await eventsApi.get(url, {
@@ -440,19 +407,19 @@ const ManagerFarmDash: React.FC = () => {
         },
       });
       clearTimeout(timeoutId);
-      if (outerSignal)
-        outerSignal.removeEventListener("abort", onOuterAbort);
       return response.data;
     } catch (error: any) {
       clearTimeout(timeoutId);
-      if (outerSignal)
-        outerSignal.removeEventListener("abort", onOuterAbort);
 
       if (
         error?.code === "ERR_CANCELED" ||
         error?.name === "CanceledError" ||
         error?.name === "AbortError"
       ) {
+        if (retries > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          return makeRequestWithRetry(url, retries - 1, timeout);
+        }
         throw error;
       }
 
@@ -477,7 +444,7 @@ const ManagerFarmDash: React.FC = () => {
       ) {
         if (retries > 0) {
           await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait 1 second before retry
-          return makeRequestWithRetry(url, retries - 1, timeout, outerSignal);
+          return makeRequestWithRetry(url, retries - 1, timeout);
         }
         throw new Error(
           `Request timeout: The server took too long to respond. Please try again later.`,
@@ -491,7 +458,7 @@ const ManagerFarmDash: React.FC = () => {
       ) {
         if (retries > 0) {
           await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait 2 seconds before retry
-          return makeRequestWithRetry(url, retries - 1, timeout, outerSignal);
+          return makeRequestWithRetry(url, retries - 1, timeout);
         }
         throw new Error(
           `Network error: Unable to connect to the server. Please check your internet connection.`,
@@ -502,7 +469,7 @@ const ManagerFarmDash: React.FC = () => {
       if (error.response?.status === 504) {
         if (retries > 0) {
           await new Promise((resolve) => setTimeout(resolve, 2000));
-          return makeRequestWithRetry(url, retries - 1, timeout, outerSignal);
+          return makeRequestWithRetry(url, retries - 1, timeout);
         }
         throw new Error(
           `Gateway timeout: The server is taking too long to process your request. Please try again later.`,
@@ -517,10 +484,12 @@ const ManagerFarmDash: React.FC = () => {
   // Fetch all data for selected plot — parallel network where possible (no backend changes).
   const fetchAllData = async (
     plotId: string,
-    signal: AbortSignal,
     fetchGen?: number,
   ): Promise<void> => {
     if (!plotId) return;
+
+    const isStale = () =>
+      fetchGen != null && fetchGen !== plotFetchGenRef.current;
 
     const eventsPlotId = encodePlotIdForEventsUrl(plotId);
 
@@ -536,12 +505,11 @@ const ManagerFarmDash: React.FC = () => {
         const harvestCacheKey = `harvest_${plotId}_${today}`;
         let harvestData = getCache(harvestCacheKey);
         if (harvestData) return { harvestData };
-        if (signal.aborted) return { harvestData: null as any };
         try {
           const harvestRes = await eventsApi.post(
             `${BASE_URL}/sugarcane-harvest?plot_name=${eventsPlotId}&end_date=${today}`,
             {},
-            { timeout: MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS, signal },
+            { timeout: MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS },
           );
           harvestData = harvestRes.data;
           setCache(harvestCacheKey, harvestData);
@@ -569,11 +537,8 @@ const ManagerFarmDash: React.FC = () => {
           return { currentPlotData: cached };
         }
 
-        if (signal.aborted) return null;
-
         try {
           const data = await getSinglePlotAgroStats(cleanId, {
-            signal,
             timeout: MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
           });
           if (data) {
@@ -598,11 +563,11 @@ const ManagerFarmDash: React.FC = () => {
 
       const indicesCacheKey = `indices_${plotId}`;
       const stressCacheKey = `stress_${plotId}_NDRE_0.15`;
-      const scoreCacheKey = fieldScoreCacheKey(plotId);
+      const irrigationCacheKey = `irrigation_${plotId}`;
 
       const cachedIndices = getCache(indicesCacheKey);
       const cachedStress = getCache(stressCacheKey);
-      const cachedFieldScore = getCache(scoreCacheKey);
+      const cachedIrrigation = getCache(irrigationCacheKey);
 
       const fetchPromises: Promise<{
         type: string;
@@ -615,7 +580,6 @@ const ManagerFarmDash: React.FC = () => {
             `${BASE_URL}/plots/${eventsPlotId}/indices`,
             1,
             MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
-            signal,
           )
             .then((data) => {
               const processed = data.map((item: any) => ({
@@ -642,7 +606,6 @@ const ManagerFarmDash: React.FC = () => {
             `${BASE_URL}/plots/${eventsPlotId}/stress?index_type=NDRE&threshold=0.15`,
             1,
             MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
-            signal,
           )
             .then((data) => {
               setCache(stressCacheKey, data);
@@ -659,22 +622,25 @@ const ManagerFarmDash: React.FC = () => {
         );
       }
 
-      if (cachedFieldScore === undefined || cachedFieldScore === null) {
-        const farmer = farmersForSelectedOfficer.find(
-          (f) =>
-            String(f.id || f.farmer_id || f.farmerId) === String(selectedFarmerId),
-        );
+      if (!cachedIrrigation) {
         fetchPromises.push(
-          fetchFieldScoreForPlot(plotId, farmer?.plots)
-            .then((score) => {
-              if (score != null) setCache(scoreCacheKey, score);
-              return { type: "fieldScore", data: score };
+          makeRequestWithRetry(
+            `${BASE_URL}/plots/${eventsPlotId}/irrigation?threshold_ndmi=0.05&threshold_ndwi=0.05&min_days_between_events=10`,
+            1,
+            MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
+          )
+            .then((data) => {
+              setCache(irrigationCacheKey, data);
+              return { type: "irrigation", data };
             })
-            .catch(() => ({ type: "fieldScore", data: null })),
+            .catch(() => ({
+              type: "irrigation",
+              data: { total_events: null },
+            })),
         );
       } else {
         fetchPromises.push(
-          Promise.resolve({ type: "fieldScore", data: cachedFieldScore }),
+          Promise.resolve({ type: "irrigation", data: cachedIrrigation }),
         );
       }
 
@@ -686,7 +652,7 @@ const ManagerFarmDash: React.FC = () => {
         chartsPromise,
       ]);
 
-      if (signal.aborted) return;
+      if (isStale()) return;
 
       const harvestData = harvestOutcome?.harvestData;
       const harvestStatus: string | null = harvestData
@@ -708,13 +674,20 @@ const ManagerFarmDash: React.FC = () => {
         currentPlotData?.brix_sugar?.sugar_yield?.min ??
         null;
 
-      const biomassStats = currentPlotData?.biomass ?? null;
-      const biomassTotal = biomassStats?.mean ?? null;
-      const biomassMin = biomassStats?.min ?? null;
-      const biomassMax = biomassStats?.max ?? null;
-      const calculatedBiomass =
-        biomassTotal !== null ? biomassTotal * 0.12 : null;
-      const totalBiomassForMetric = biomassTotal;
+      let calculatedBiomass = null;
+      let totalBiomassForMetric = null;
+
+      if (expectedYieldValue !== null) {
+        const totalBiomass = expectedYieldValue * 1.27;
+        const underGroundBiomassInTons = totalBiomass * 0.12;
+        calculatedBiomass = underGroundBiomassInTons;
+        totalBiomassForMetric = totalBiomass;
+      } else if (currentPlotData?.biomass?.mean) {
+        const totalBiomass = currentPlotData.biomass.mean;
+        const underGroundBiomassInTons = totalBiomass * 0.12;
+        calculatedBiomass = underGroundBiomassInTons;
+        totalBiomassForMetric = totalBiomass;
+      }
 
       if (currentPlotData) {
         const brixStats = currentPlotData?.brix_sugar?.brix ?? null;
@@ -729,8 +702,6 @@ const ManagerFarmDash: React.FC = () => {
           area: currentPlotData?.area_acres ?? null,
           biomass: calculatedBiomass,
           totalBiomass: totalBiomassForMetric,
-          biomassMin,
-          biomassMax,
           expectedYield: expectedYieldValue,
           daysToHarvest: currentPlotData?.days_to_harvest ?? null,
           growthStage:
@@ -752,7 +723,7 @@ const ManagerFarmDash: React.FC = () => {
 
       let rawIndices: LineChartData[] = [];
       let stressData: any = { events: [], total_events: 0 };
-      let fieldScore: number | null = null;
+      let irrigationData: any = { total_events: null };
 
       chartSettled.forEach((result) => {
         if (result.status === "fulfilled" && result.value) {
@@ -760,11 +731,12 @@ const ManagerFarmDash: React.FC = () => {
           if (type === "indices") rawIndices = data || [];
           if (type === "stress")
             stressData = data || { events: [], total_events: 0 };
-          if (type === "fieldScore") fieldScore = data ?? null;
+          if (type === "irrigation")
+            irrigationData = data || { total_events: null };
         }
       });
 
-      if (signal.aborted) return;
+      if (isStale()) return;
 
       setLineChartData(rawIndices);
       setStressEvents(stressData?.events ?? []);
@@ -772,7 +744,7 @@ const ManagerFarmDash: React.FC = () => {
       setMetrics((prev) => ({
         ...prev,
         stressCount: stressData?.total_events ?? 0,
-        fieldScore,
+        irrigationEvents: irrigationData?.total_events ?? null,
         cnRatio: null,
       }));
     } catch (err: any) {
@@ -784,10 +756,7 @@ const ManagerFarmDash: React.FC = () => {
         return;
       }
     } finally {
-      if (
-        !signal.aborted &&
-        (fetchGen == null || fetchGen === plotFetchGenRef.current)
-      ) {
+      if (!isStale()) {
         dashboardLoadedForPlotRef.current = plotId;
         setHasLoadedOnce(true);
         setLoadingData(false);
@@ -811,7 +780,11 @@ const ManagerFarmDash: React.FC = () => {
 
       // Auto-select first field officer if available
       if (officersData.length > 0) {
-        setSelectedFieldOfficerId(String(officersData[0].id));
+        setSelectedFieldOfficerId((prev) =>
+          prev && officersData.some((o: any) => String(o.id) === prev)
+            ? prev
+            : String(officersData[0].id),
+        );
       }
     } catch (error: any) {
       // Show user-friendly error message
@@ -852,10 +825,20 @@ const ManagerFarmDash: React.FC = () => {
     }
 
     try {
-      const coords = await fetchPlotBoundaryCoordinates(plotId);
-      if (coords && coords.length > 0) {
+      const today = new Date().toISOString().slice(0, 10);
+      const response = await eventsApi.post(
+        `${BASE_URL}/analyze?plot_name=${encodePlotIdForEventsUrl(plotId)}&date=${today}`,
+      );
+
+      const geom = response.data?.features?.[0]?.geometry?.coordinates?.[0];
+      if (geom) {
+        const coords = geom.map(([lng, lat]: [number, number]) => [lat, lng]);
         setPlotCoordinates(coords);
+
+        // Cache the coordinates
         setPlotCoordinatesCache((prev) => new Map(prev.set(plotId, coords)));
+
+        // Calculate and set map center
         const center = calculateCenter(coords);
         setMapCenter(center);
         setMapKey((prev) => prev + 1);
@@ -1137,20 +1120,17 @@ const ManagerFarmDash: React.FC = () => {
   const PieChartWithNeedle: React.FC<PieChartWithNeedleProps> = ({
     value,
     max,
-    width = GAUGE_ARC_WIDTH,
-    height,
+    width = 200,
+    height = 120,
     title = "Gauge",
     unit = "",
-    showTitle = false,
   }) => {
     const percent = Math.max(0, Math.min(1, value / max));
     const angle = 180 * percent;
-    const strokeW = 9;
-    const r = Math.round(width * 0.3);
     const cx = width / 2;
-    const cy = r + strokeW / 2 + 3;
-    const svgHeight = height ?? cy + 4;
-    const needleLength = r * 0.88;
+    const cy = height * 0.8;
+    const r = width * 0.35;
+    const needleLength = r * 0.9;
     const needleAngle = 180 - angle;
     const rad = (Math.PI * needleAngle) / 180;
     const x = cx + needleLength * Math.cos(rad);
@@ -1164,25 +1144,13 @@ const ManagerFarmDash: React.FC = () => {
     };
 
     return (
-      <div className="flex flex-col items-center gap-0">
-        <div className="text-center leading-none">
-          <div className="text-lg font-bold text-gray-800">
-            {value.toFixed(1)}
-            <span className="text-sm font-semibold text-gray-600">{unit}</span>
-          </div>
-        </div>
-        <svg
-          width={width}
-          height={svgHeight}
-          viewBox={`0 0 ${width} ${svgHeight}`}
-          className="block -mt-1.5"
-          aria-hidden
-        >
+      <div className="flex flex-col items-center">
+        <svg width={width} height={height} className="overflow-visible">
           <path
             d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`}
             fill="none"
             stroke="#e5e7eb"
-            strokeWidth={strokeW}
+            strokeWidth="8"
           />
           <path
             d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${
@@ -1190,7 +1158,7 @@ const ManagerFarmDash: React.FC = () => {
             } ${cy - r * Math.sin(Math.PI - (angle * Math.PI) / 180)}`}
             fill="none"
             stroke={getColor(percent)}
-            strokeWidth={strokeW}
+            strokeWidth="8"
             strokeLinecap="round"
           />
           <line
@@ -1203,10 +1171,16 @@ const ManagerFarmDash: React.FC = () => {
             strokeLinecap="round"
           />
           <circle cx={cx} cy={cy} r="4" fill="#374151" />
+          <text
+            x={cx}
+            y={cy - r - 15}
+            textAnchor="middle"
+            className="text-lg font-bold fill-gray-700"
+          >
+            {value.toFixed(1)} {unit}
+          </text>
         </svg>
-        {showTitle && (
-          <p className="text-xs font-medium text-gray-600">{title}</p>
-        )}
+        <p className="text-sm text-gray-600 mt-2 font-medium">{title}</p>
       </div>
     );
   };
@@ -1570,27 +1544,6 @@ const ManagerFarmDash: React.FC = () => {
             <p className="text-xs text-gray-600 font-medium">Recovery Rate</p>
           </div>
 
-          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-emerald-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2">
-              <Gauge className="w-6 h-6 text-emerald-600" />
-              <div className="text-right">
-                <div className="text-2xl font-bold text-gray-800">
-                  {!selectedPlotId ? (
-                    "-"
-                  ) : loadingData && metrics.fieldScore == null ? (
-                    <Loader2 className="w-5 h-5 animate-spin inline-block" />
-                  ) : metrics.fieldScore != null ? (
-                    metrics.fieldScore.toFixed(1)
-                  ) : (
-                    "-"
-                  )}
-                </div>
-                <div className="text-sm font-semibold text-emerald-600">%</div>
-              </div>
-            </div>
-            <p className="text-xs text-gray-600 font-medium">Field Score</p>
-          </div>
-
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-indigo-200 hover:shadow-xl transition-all duration-300">
             <div className="flex items-center justify-between mb-2">
               <BarChart3 className="w-6 h-6 text-indigo-600" />
@@ -1619,6 +1572,23 @@ const ManagerFarmDash: React.FC = () => {
             <p className="text-xs text-gray-600 font-medium">Organic Carbon</p>
           </div>
 
+          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-cyan-200 hover:shadow-xl transition-all duration-300">
+            <div className="flex items-center justify-between mb-2">
+              <Droplets className="w-6 h-6 text-cyan-600" />
+              <div className="text-right">
+                <div className="text-2xl font-bold text-gray-800">
+                  {metrics.irrigationEvents ?? 0}
+                </div>
+                <div className="text-sm font-semibold text-cyan-600">
+                  Events
+                </div>
+              </div>
+            </div>
+            <p className="text-xs text-gray-600 font-medium">
+              Irrigation Events
+            </p>
+          </div>
+
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-yellow-200 hover:shadow-xl transition-all duration-300">
             <div className="flex items-center justify-between mb-2">
               <AlertTriangle className="w-6 h-6 text-yellow-600" />
@@ -1635,46 +1605,16 @@ const ManagerFarmDash: React.FC = () => {
           </div>
 
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-pink-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center justify-between mb-2">
               <Activity className="w-6 h-6 text-pink-600" />
               <div className="text-right">
-                <div className="text-2xl font-bold text-gray-800 flex items-center gap-1 justify-end">
-                  {metrics.totalBiomass !== null ? (
-                    metrics.totalBiomass.toFixed(1)
-                  ) : (
-                    "-"
-                  )}
-                  <span className="text-sm font-semibold text-pink-600">
-                    T/acre
-                  </span>
+                <div className="text-2xl font-bold text-gray-800">
+                  {metrics.biomass?.toFixed(1) || "-"}
                 </div>
+                <div className="text-sm font-semibold text-pink-600">kg/acre</div>
               </div>
             </div>
-            <div className="flex items-center justify-between text-xs text-gray-600">
-              <p className="text-xs font-medium">Avg Biomass</p>
-              <div className="flex gap-4">
-                <div className="text-center">
-                  <div className="font-semibold text-red-600 text-sm">
-                    {metrics.biomassMax !== null
-                      ? metrics.biomassMax.toFixed(1)
-                      : "-"}
-                  </div>
-                  <div className="text-[10px] text-gray-500 uppercase tracking-wide">
-                    Max
-                  </div>
-                </div>
-                <div className="text-center">
-                  <div className="font-semibold text-green-600 text-sm">
-                    {metrics.biomassMin !== null
-                      ? metrics.biomassMin.toFixed(1)
-                      : "-"}
-                  </div>
-                  <div className="text-[10px] text-gray-500 uppercase tracking-wide">
-                    Min
-                  </div>
-                </div>
-              </div>
-            </div>
+            <p className="text-xs text-gray-600 font-medium">Avg Biomass</p>
           </div>
         </div>
 
@@ -1700,12 +1640,19 @@ const ManagerFarmDash: React.FC = () => {
                 <Maximize2 className="w-4 h-4" />
               </div>
 
-              <MapCropStatusOverlay
-                growthStage={metrics.growthStage}
-                plantationDate={selectedPlotPlantation.plantationDate}
-                plantationType={selectedPlotPlantation.plantationType}
-                loading={loadingData}
-              />
+              {/* Centered Growth Stage Indicator */}
+              <div className="absolute top-10 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-10 pointer-events-none">
+                <div className="bg-black/20 backdrop-blur-sm rounded-2xl px-6 py-4 border border-white/30 shadow-2xl">
+                  <div className="flex items-center gap-3">
+                    <div className="w-3 h-3 rounded-full bg-green-500 animate-pulse shadow-lg shadow-green-500/50" />
+                    <div className="text-center">
+                      <div className="text-white font-bold text-lg drop-shadow-lg">
+                        {metrics.growthStage ?? "Loading..."}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
 
               <MapContainer
                 key={mapKey}
@@ -1771,81 +1718,76 @@ const ManagerFarmDash: React.FC = () => {
           </div>
 
           {/* Performance Gauges */}
-          <div className="space-y-3">
-            <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-3">
-              <div className="flex items-center gap-2 mb-1.5">
-                <Target className="w-5 h-5 shrink-0 text-purple-600" />
-                <h3 className="text-sm font-semibold text-gray-800">
-                  Sugarcane Yield Projection
-                </h3>
-              </div>
-              <div
-                className="flex items-center justify-center"
-                style={{ height: GAUGE_CHART_HEIGHT }}
-              >
-                <PieChartWithNeedle
-                  value={metrics.sugarYieldMean || 0}
-                  max={metrics.sugarYieldMax || 400}
-                  title="Sugarcane Yield Forecast"
-                  unit=" T/acre"
-                  width={GAUGE_ARC_WIDTH}
-                />
-              </div>
-              <div className="mt-1 text-center">
-                <p className="mb-1 text-xs font-medium text-gray-600">
-                  Sugarcane Yield Forecast
-                </p>
-                <div className="grid grid-cols-1 gap-y-0.5 text-xs sm:grid-cols-3 sm:gap-x-2">
-                  <div className="flex items-center justify-center gap-1">
-                    <div className="h-2 w-2 rounded bg-red-500" />
-                    <span className="font-semibold text-red-700">
-                      min: {(metrics.sugarYieldMin || 0).toFixed(1)} T/acre
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-center gap-1">
-                    <div className="h-2 w-2 rounded bg-purple-500" />
-                    <span className="font-semibold text-purple-700">
-                      mean: {(metrics.sugarYieldMean || 0).toFixed(1)} T/acre
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-center gap-1">
-                    <div className="h-2 w-2 rounded bg-green-500" />
-                    <span className="font-semibold text-green-700">
-                      max: {(metrics.sugarYieldMax || 0).toFixed(1)} T/acre
-                    </span>
-                  </div>
-                </div>
-                <div className="mt-0.5 text-xs text-gray-500">
-                  Performance:{" "}
-                  {metrics.sugarYieldMax
-                    ? (
-                        ((metrics.sugarYieldMean || 0) / metrics.sugarYieldMax) *
-                        100
-                      ).toFixed(1)
-                    : "0.0"}
-                  % of optimal yield
-                </div>
-              </div>
+          <div className="space-y-4">
+            <div className="space-y-4">
+                        <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4">
+                          <div className="flex items-center gap-3 mb-6">
+                            <Target className="w-5 h-7 text-purple-600" />
+                            <h3 className="text-sm font-semibold text-gray-800">
+                              Sugarcane Yield Projection
+                            </h3>
+                          </div>
+                          <div className="flex flex-col items-center">
+                            <PieChartWithNeedle
+                              value={metrics.sugarYieldMean || 0}
+                              max={metrics.sugarYieldMax || 400}
+                              title="Sugarcane Yield Forecast"
+                              unit=" T/acre"
+                              width={260}
+                              height={130}
+                            />
+                            <div className="mt-2 text-center">
+                              <div className="flex items-center justify-center gap-2 text-xs flex-wrap">
+                                <div className="flex items-center gap-1">
+                                  <div className="w-2 h-2 rounded bg-red-500"></div>
+                                  <span className="text-red-700 font-semibold">
+                                    min: {(metrics.sugarYieldMin || 0).toFixed(1)} T/acre
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <div className="w-2 h-2 rounded bg-purple-500"></div>
+                                  <span className="text-purple-700 font-semibold">
+                                    mean: {(metrics.sugarYieldMean || 0).toFixed(1)}{" "}
+                                    T/acre
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <div className="w-2 h-2 rounded bg-green-500"></div>
+                                  <span className="text-green-700 font-semibold">
+                                    max: {(metrics.sugarYieldMax || 0).toFixed(1)} T/acre
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="mt-1 text-xs text-gray-500">
+                                Performance:{" "}
+                                {metrics.sugarYieldMax
+                                  ? (((metrics.sugarYieldMean || 0) / metrics.sugarYieldMax) * 100).toFixed(1)
+                                  : "0.0"}% of optimal yield
+                              </div>
+                            </div>
+                          </div>
+                        </div>
             </div>
 
-            <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-3">
-              <div className="flex items-center gap-2 mb-1.5">
-                <Activity className="w-5 h-5 shrink-0 text-green-600" />
-                <h3 className="text-sm font-semibold text-gray-800">
+            {/* Biomass Performance */}
+            <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-5 sm:p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <Activity className="w-6 h-6 sm:w-7 sm:h-7 text-green-600" />
+                <h3 className="text-base sm:text-lg font-semibold text-gray-800">
                   Biomass Performance
                 </h3>
               </div>
-              <div style={{ height: GAUGE_CHART_HEIGHT }}>
-                <ResponsiveContainer width="100%" height={GAUGE_CHART_HEIGHT}>
+              <div className="h-48 sm:h-56 md:h-64 flex flex-col items-center justify-center relative">
+                <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
                     <Pie
                       data={biomassData}
                       cx="50%"
-                      cy="82%"
+                      cy="80%"
                       startAngle={180}
                       endAngle={0}
-                      outerRadius={72}
-                      innerRadius={46}
+                      outerRadius={110}
+                      innerRadius={70}
                       dataKey="value"
                       labelLine={false}
                     >
@@ -1858,7 +1800,7 @@ const ManagerFarmDash: React.FC = () => {
                       y="70%"
                       textAnchor="middle"
                       dominantBaseline="middle"
-                      className="fill-blue-600 text-base font-semibold"
+                      className="text-base sm:text-lg font-semibold fill-blue-600"
                     >
                       {totalBiomass.toFixed(1)} T/acre
                     </text>
@@ -1873,20 +1815,20 @@ const ManagerFarmDash: React.FC = () => {
                   </PieChart>
                 </ResponsiveContainer>
               </div>
-              <div className="mt-1 text-center">
-                <p className="mb-1 text-xs font-medium text-gray-600">
-                  Biomass Distribution Chart
-                </p>
-                <div className="flex flex-wrap items-center justify-center gap-2 text-xs">
-                  <div className="flex items-center gap-1">
-                    <div className="h-2 w-2 rounded bg-blue-500" />
-                    <span className="font-semibold text-blue-700">
+              <p className="text-sm sm:text-base text-gray-700 font-medium text-center mb-3">
+                Biomass Distribution Chart
+              </p>
+              <div className="text-center">
+                <div className="flex items-center justify-center gap-3 text-sm sm:text-base flex-wrap">
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-3 h-3 rounded bg-blue-500"></div>
+                    <span className="text-blue-700 font-semibold">
                       Total: {totalBiomass.toFixed(1)} T/acre
                     </span>
                   </div>
-                  <div className="flex items-center gap-1">
-                    <div className="h-2 w-2 rounded bg-green-500" />
-                    <span className="font-semibold text-green-700">
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-3 h-3 rounded bg-green-500"></div>
+                    <span className="text-green-700 font-semibold">
                       Underground: {currentBiomass.toFixed(1)} T/acre
                     </span>
                   </div>
