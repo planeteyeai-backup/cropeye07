@@ -34,6 +34,7 @@ import Chatbot from "./Chatbot";
 import axios from "axios";
 import { eventsApi, getSinglePlotAgroStats } from "../api";
 import { getCache, setCache } from "../utils/cache";
+import { resolvePlotForEventsApi } from "../utils/plotName";
 import { useFarmerProfile } from "../hooks/useFarmerProfile";
 import { useAppContext } from "../context/AppContext";
 import CommonSpinner from "./CommanSpinner";
@@ -432,18 +433,23 @@ const FarmerDashboard: React.FC = () => {
       return;
     }
 
+    const { plotId, encoded: plotApiId } = resolvePlotForEventsApi(
+      currentPlotId,
+      profile?.plots,
+    );
+
     try {
       const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
       const endDate = new Date(Date.now() - tzOffsetMs)
         .toISOString()
         .slice(0, 10);
 
-      const indicesCacheKey = `indices_${currentPlotId}`;
+      const indicesCacheKey = `indices_${plotId}`;
       let rawIndices = getCache(indicesCacheKey);
 
       if (!rawIndices) {
         const indicesRes = await eventsApi.get(
-          `${BASE_URL}/plots/${currentPlotId}/indices`
+          `${BASE_URL}/plots/${plotApiId}/indices`
         );
         rawIndices = indicesRes.data.map((item: any) => ({
           date: new Date(item.date).toISOString().split("T")[0],
@@ -457,12 +463,12 @@ const FarmerDashboard: React.FC = () => {
 
       setLineChartData(rawIndices);
 
-      const stressCacheKey = `stress_${currentPlotId}_NDMI_0.15`;
+      const stressCacheKey = `stress_${plotId}_NDMI_0.15`;
       let stressData = getCache(stressCacheKey);
 
       if (!stressData) {
         const stressRes = await eventsApi.get(
-          `${BASE_URL}/plots/${currentPlotId}/stress?index_type=NDRE&threshold=0.15`
+          `${BASE_URL}/plots/${plotApiId}/stress?index_type=NDRE&threshold=0.15`
         );
         stressData = stressRes.data;
         setCache(stressCacheKey, stressData);
@@ -470,30 +476,30 @@ const FarmerDashboard: React.FC = () => {
 
       setStressEvents(stressData?.events ?? []);
 
-      const irrigationCacheKey = `irrigation_${currentPlotId}`;
+      const irrigationCacheKey = `irrigation_${plotId}`;
       let irrigationData = getCache(irrigationCacheKey);
 
       if (!irrigationData) {
         const irrigationRes = await eventsApi.get(
-          `${BASE_URL}/plots/${currentPlotId}/irrigation?threshold_ndmi=0.05&threshold_ndwi=0.05&min_days_between_events=10`
+          `${BASE_URL}/plots/${plotApiId}/irrigation?threshold_ndmi=0.05&threshold_ndwi=0.05&min_days_between_events=10`
         );
         irrigationData = irrigationRes.data;
         setCache(irrigationCacheKey, irrigationData);
       }
 
-      const soilCacheKey = `soil_${currentPlotId}_${SOIL_DATE}`;
+      const soilCacheKey = `soil_${plotId}_${SOIL_DATE}`;
       let soilData = getCache(soilCacheKey);
 
       if (!soilData) {
         const res = await axios.post(
-          `${SOIL_API_URL}/analyze?plot_name=${currentPlotId}&date=${SOIL_DATE}&fe_days_back=30`
+          `${SOIL_API_URL}/analyze?plot_name=${plotApiId}&date=${SOIL_DATE}&fe_days_back=30`
         );
         soilData = res.data;
         setCache(soilCacheKey, soilData);
       }
 
       // Fetch harvest status from sugarcane-harvest endpoint
-      const harvestCacheKey = `harvest_${currentPlotId}_${endDate}`;
+      const harvestCacheKey = `harvest_${plotId}_${endDate}`;
       let harvestStatus = null;
       let harvestData = getCache(harvestCacheKey);
       let harvestDate = null;
@@ -502,7 +508,7 @@ const FarmerDashboard: React.FC = () => {
       if (!harvestData) {
         try {
           const harvestRes = await eventsApi.post(
-            `${BASE_URL}/sugarcane-harvest?plot_name=${currentPlotId}&end_date=${endDate}`
+            `${BASE_URL}/sugarcane-harvest?plot_name=${plotApiId}&end_date=${endDate}`
           );
           harvestData = harvestRes.data;
           setCache(harvestCacheKey, harvestData);
@@ -533,12 +539,12 @@ const FarmerDashboard: React.FC = () => {
       const yieldDataDate = isHarvested && harvestDate ? harvestDate : endDate;
 
       // Prefer new single-plot agro stats endpoint for better performance
-      const singlePlotCacheKey = `agroSingle_v1_${currentPlotId}_${yieldDataDate}`;
+      const singlePlotCacheKey = `agroSingle_v1_${plotId}_${yieldDataDate}`;
       let currentPlotData = getCache(singlePlotCacheKey);
 
       if (!currentPlotData) {
         try {
-          currentPlotData = await getSinglePlotAgroStats(currentPlotId);
+          currentPlotData = await getSinglePlotAgroStats(plotId);
           setCache(singlePlotCacheKey, currentPlotData);
         } catch (singleErr) {
           console.error(
@@ -564,9 +570,9 @@ const FarmerDashboard: React.FC = () => {
           }
 
           if (allPlotsData) {
-            currentPlotData = allPlotsData[currentPlotId];
+            currentPlotData = allPlotsData[plotId];
             if (!currentPlotData) {
-              const quotedPlotId = `"${currentPlotId}"`;
+              const quotedPlotId = `"${plotId}"`;
               currentPlotData = allPlotsData[quotedPlotId];
             }
           }
@@ -625,9 +631,14 @@ const FarmerDashboard: React.FC = () => {
       return;
     }
 
+    const { encoded: plotApiId } = resolvePlotForEventsApi(
+      currentPlotId,
+      profile?.plots,
+    );
+
     try {
       const res = await axios.get(
-        `${BASE_URL}/plots/${currentPlotId}/stress?index_type=NDRE&threshold=0.15`
+        `${BASE_URL}/plots/${plotApiId}/stress?index_type=NDRE&threshold=0.15`
       );
       const data = res.data;
       setNdreStressEvents(data.events ?? []);

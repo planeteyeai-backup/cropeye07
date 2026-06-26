@@ -1,4 +1,9 @@
-/** Plot id sent to analyze_Growth / layer APIs (underscore form, not gat/plot display). */
+/**
+ * Plot id sent to admin layer APIs (analyze_Growth, wateruptake, SoilMoisture, etc.).
+ * Always prefer the exact `fastapi_plot_id` from `/farms/my-profile/` — do not rewrite `/` → `_`.
+ */
+import { encodePlotIdForEventsUrl } from "../api";
+
 export const resolveApiPlotName = (
   plotKey: string,
   plots?: Array<{
@@ -10,33 +15,48 @@ export const resolveApiPlotName = (
   const key = plotKey?.trim();
   if (!key) return key;
 
-  const plot = plots?.find((p) => {
+  const matchesKey = (p: {
+    fastapi_plot_id?: string;
+    gat_number?: string;
+    plot_number?: string;
+  }) => {
     if (!p) return false;
-    const gat = String(p.gat_number ?? '').trim();
-    const num = String(p.plot_number ?? '').trim();
-    const underscored = gat && num ? `${gat}_${num}`.replace(/\//g, '_') : '';
-    const slashed = gat && num ? `${gat}/${num}` : '';
+    const fastapi = p.fastapi_plot_id ? String(p.fastapi_plot_id).trim() : "";
+    if (fastapi && fastapi === key) return true;
+
+    const gat = String(p.gat_number ?? "").trim();
+    const num = String(p.plot_number ?? "").trim();
+    if (!gat || !num) return false;
+
+    const underscored = `${gat}_${num}`;
+    const slashed = `${gat}/${num}`;
     return (
-      p.fastapi_plot_id === key ||
       underscored === key ||
       slashed === key ||
-      underscored === key.replace(/\//g, '_') ||
-      slashed === key.replace(/_/g, '/')
+      underscored === key.replace(/\//g, "_") ||
+      slashed === key.replace(/_/g, "/")
     );
-  });
+  };
 
-  const fromGatPlot =
-    plot?.gat_number != null && plot?.plot_number != null
-      ? `${String(plot.gat_number).trim()}_${String(plot.plot_number).trim()}`.replace(
-          /\//g,
-          '_',
-        )
-      : '';
+  const plot = plots?.find(matchesKey);
 
-  const fastapi = plot?.fastapi_plot_id ? String(plot.fastapi_plot_id).trim() : '';
+  if (plot?.fastapi_plot_id) {
+    return String(plot.fastapi_plot_id).trim();
+  }
 
-  if (fastapi && !fastapi.includes('/')) return fastapi;
-  if (fromGatPlot) return fromGatPlot;
-  if (fastapi) return fastapi.replace(/\//g, '_');
-  return key.replace(/\//g, '_');
+  // No profile match — use the key as-is (selected value may already be fastapi_plot_id)
+  return key;
 };
+
+/** Exact fastapi_plot_id + URL-encoded form for Events/admin API paths and query params. */
+export function resolvePlotForEventsApi(
+  plotKey: string,
+  plots?: Array<{
+    fastapi_plot_id?: string;
+    gat_number?: string;
+    plot_number?: string;
+  }> | null,
+): { plotId: string; encoded: string } {
+  const plotId = resolveApiPlotName(plotKey, plots);
+  return { plotId, encoded: encodePlotIdForEventsUrl(plotId) };
+}

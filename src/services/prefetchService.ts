@@ -9,6 +9,7 @@ import {
 import { getFastApiToken } from '../utils/auth';
 import { getCache } from '../components/utils/cache';
 import { getOrFetchJson } from "../utils/requestCache";
+import { resolvePlotForEventsApi } from "../utils/plotName";
 
 // Base URLs for external APIs
 const BASE_URL = 'https://admin-cropeye.up.railway.app';
@@ -325,8 +326,12 @@ export const prefetchAllData = async (
       profile?.plots?.[0]?.id;
     let indicesPromise: Promise<any> | null = null;
     if (plotId) {
+      const { plotId: resolvedPlotId, encoded: plotApiId } = resolvePlotForEventsApi(
+        String(plotId),
+        profile?.plots,
+      );
       const fastToken = getFastApiToken();
-      indicesPromise = fetch(`${EVENTS_BASE_URL}/plots/${plotId}/indices`, {
+      indicesPromise = fetch(`${EVENTS_BASE_URL}/plots/${plotApiId}/indices`, {
         headers: fastToken ? { Authorization: `Bearer ${fastToken}` } : undefined,
       })
         .then(async (res) => {
@@ -339,7 +344,7 @@ export const prefetchAllData = async (
               water: item.NDWI,
               moisture: item.NDRE,
             }));
-            setCached(`indices_${plotId}`, formattedData);
+            setCached(`indices_${resolvedPlotId}`, formattedData);
             fetchedEndpoints.push('indices');
             return formattedData;
           }

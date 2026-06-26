@@ -277,10 +277,16 @@ const ManagerFarmDash: React.FC = () => {
       const officer = fieldOfficers.find(
         (fo) => String(fo.id) === selectedFieldOfficerId,
       );
-      const farmersList = officer ? officer.farmers : [];
+      const farmersList = officer ? officer.farmers ?? [] : [];
       setFarmersForSelectedOfficer(farmersList);
       if (farmersList.length > 0) {
-        setSelectedFarmerId(String(farmersList[0].id));
+        setSelectedFarmerId((prev) => {
+          const stillValid = farmersList.some(
+            (f: any) =>
+              String(f.id || f.farmer_id || f.farmerId) === String(prev),
+          );
+          return stillValid ? prev : String(farmersList[0].id);
+        });
       } else {
         setSelectedFarmerId("");
       }
@@ -297,17 +303,20 @@ const ManagerFarmDash: React.FC = () => {
       );
 
       if (selectedFarmer) {
-        // Extract fastapi_plot_id from plots array
         const farmerPlots = selectedFarmer.plots || [];
-        const plotIds = farmerPlots.map((plot: any) => plot.fastapi_plot_id);
+        const plotIds = farmerPlots
+          .map((plot: any) => plot.fastapi_plot_id)
+          .filter(Boolean);
 
         setPlots(plotIds);
 
-        // Auto-select first plot if available
         if (plotIds.length > 0) {
-          const firstPlotId = plotIds[0];
-          dashboardLoadedForPlotRef.current = "";
-          setSelectedPlotId(firstPlotId);
+          setSelectedPlotId((prev) => {
+            if (prev && plotIds.includes(prev)) {
+              return prev;
+            }
+            return plotIds[0];
+          });
         } else {
           dashboardLoadedForPlotRef.current = "";
           setSelectedPlotId("");
@@ -334,10 +343,8 @@ const ManagerFarmDash: React.FC = () => {
     }
 
     const fetchGen = ++plotFetchGenRef.current;
-    const ac = new AbortController();
-    void fetchAllData(selectedPlotId, ac.signal, fetchGen);
+    void fetchAllData(selectedPlotId, fetchGen);
     setPlotCoordinatesFromState(selectedPlotId);
-    return () => ac.abort();
   }, [selectedPlotId]);
 
   // Sync selected plot to global AppContext so the chatbot always has the
@@ -383,19 +390,12 @@ const ManagerFarmDash: React.FC = () => {
   const makeRequestWithRetry = async (
     url: string,
     retries = 1,
-    timeout = 15000,
-    outerSignal?: AbortSignal,
+    timeout = MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
   ): Promise<any> => {
     const abortController = new AbortController();
     const timeoutId = setTimeout(() => {
       abortController.abort();
     }, timeout);
-
-    const onOuterAbort = () => abortController.abort();
-    if (outerSignal) {
-      if (outerSignal.aborted) abortController.abort();
-      else outerSignal.addEventListener("abort", onOuterAbort);
-    }
 
     try {
       const response = await eventsApi.get(url, {
@@ -407,19 +407,19 @@ const ManagerFarmDash: React.FC = () => {
         },
       });
       clearTimeout(timeoutId);
-      if (outerSignal)
-        outerSignal.removeEventListener("abort", onOuterAbort);
       return response.data;
     } catch (error: any) {
       clearTimeout(timeoutId);
-      if (outerSignal)
-        outerSignal.removeEventListener("abort", onOuterAbort);
 
       if (
         error?.code === "ERR_CANCELED" ||
         error?.name === "CanceledError" ||
         error?.name === "AbortError"
       ) {
+        if (retries > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          return makeRequestWithRetry(url, retries - 1, timeout);
+        }
         throw error;
       }
 
@@ -444,7 +444,7 @@ const ManagerFarmDash: React.FC = () => {
       ) {
         if (retries > 0) {
           await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait 1 second before retry
-          return makeRequestWithRetry(url, retries - 1, timeout, outerSignal);
+          return makeRequestWithRetry(url, retries - 1, timeout);
         }
         throw new Error(
           `Request timeout: The server took too long to respond. Please try again later.`,
@@ -458,7 +458,7 @@ const ManagerFarmDash: React.FC = () => {
       ) {
         if (retries > 0) {
           await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait 2 seconds before retry
-          return makeRequestWithRetry(url, retries - 1, timeout, outerSignal);
+          return makeRequestWithRetry(url, retries - 1, timeout);
         }
         throw new Error(
           `Network error: Unable to connect to the server. Please check your internet connection.`,
@@ -469,7 +469,7 @@ const ManagerFarmDash: React.FC = () => {
       if (error.response?.status === 504) {
         if (retries > 0) {
           await new Promise((resolve) => setTimeout(resolve, 2000));
-          return makeRequestWithRetry(url, retries - 1, timeout, outerSignal);
+          return makeRequestWithRetry(url, retries - 1, timeout);
         }
         throw new Error(
           `Gateway timeout: The server is taking too long to process your request. Please try again later.`,
@@ -484,10 +484,12 @@ const ManagerFarmDash: React.FC = () => {
   // Fetch all data for selected plot — parallel network where possible (no backend changes).
   const fetchAllData = async (
     plotId: string,
-    signal: AbortSignal,
     fetchGen?: number,
   ): Promise<void> => {
     if (!plotId) return;
+
+    const isStale = () =>
+      fetchGen != null && fetchGen !== plotFetchGenRef.current;
 
     const eventsPlotId = encodePlotIdForEventsUrl(plotId);
 
@@ -503,12 +505,11 @@ const ManagerFarmDash: React.FC = () => {
         const harvestCacheKey = `harvest_${plotId}_${today}`;
         let harvestData = getCache(harvestCacheKey);
         if (harvestData) return { harvestData };
-        if (signal.aborted) return { harvestData: null as any };
         try {
           const harvestRes = await eventsApi.post(
             `${BASE_URL}/sugarcane-harvest?plot_name=${eventsPlotId}&end_date=${today}`,
             {},
-            { timeout: MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS, signal },
+            { timeout: MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS },
           );
           harvestData = harvestRes.data;
           setCache(harvestCacheKey, harvestData);
@@ -536,11 +537,8 @@ const ManagerFarmDash: React.FC = () => {
           return { currentPlotData: cached };
         }
 
-        if (signal.aborted) return null;
-
         try {
           const data = await getSinglePlotAgroStats(cleanId, {
-            signal,
             timeout: MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
           });
           if (data) {
@@ -582,7 +580,6 @@ const ManagerFarmDash: React.FC = () => {
             `${BASE_URL}/plots/${eventsPlotId}/indices`,
             1,
             MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
-            signal,
           )
             .then((data) => {
               const processed = data.map((item: any) => ({
@@ -609,7 +606,6 @@ const ManagerFarmDash: React.FC = () => {
             `${BASE_URL}/plots/${eventsPlotId}/stress?index_type=NDRE&threshold=0.15`,
             1,
             MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
-            signal,
           )
             .then((data) => {
               setCache(stressCacheKey, data);
@@ -632,7 +628,6 @@ const ManagerFarmDash: React.FC = () => {
             `${BASE_URL}/plots/${eventsPlotId}/irrigation?threshold_ndmi=0.05&threshold_ndwi=0.05&min_days_between_events=10`,
             1,
             MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
-            signal,
           )
             .then((data) => {
               setCache(irrigationCacheKey, data);
@@ -657,7 +652,7 @@ const ManagerFarmDash: React.FC = () => {
         chartsPromise,
       ]);
 
-      if (signal.aborted) return;
+      if (isStale()) return;
 
       const harvestData = harvestOutcome?.harvestData;
       const harvestStatus: string | null = harvestData
@@ -741,7 +736,7 @@ const ManagerFarmDash: React.FC = () => {
         }
       });
 
-      if (signal.aborted) return;
+      if (isStale()) return;
 
       setLineChartData(rawIndices);
       setStressEvents(stressData?.events ?? []);
@@ -761,10 +756,7 @@ const ManagerFarmDash: React.FC = () => {
         return;
       }
     } finally {
-      if (
-        !signal.aborted &&
-        (fetchGen == null || fetchGen === plotFetchGenRef.current)
-      ) {
+      if (!isStale()) {
         dashboardLoadedForPlotRef.current = plotId;
         setHasLoadedOnce(true);
         setLoadingData(false);
@@ -788,7 +780,11 @@ const ManagerFarmDash: React.FC = () => {
 
       // Auto-select first field officer if available
       if (officersData.length > 0) {
-        setSelectedFieldOfficerId(String(officersData[0].id));
+        setSelectedFieldOfficerId((prev) =>
+          prev && officersData.some((o: any) => String(o.id) === prev)
+            ? prev
+            : String(officersData[0].id),
+        );
       }
     } catch (error: any) {
       // Show user-friendly error message
