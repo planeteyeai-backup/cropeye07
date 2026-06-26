@@ -1,87 +1,31 @@
 export type PlotRef = {
   fastapi_plot_id?: string;
-  events_plot_id?: string;
-  plot_name?: string;
-  plot_id?: string;
   gat_number?: string;
   plot_number?: string;
-  Group_Gat_No?: string;
-  Gat_No_Id?: string;
-  boundary?: { coordinates?: unknown };
+  plot_name?: string;
+  id?: string | number;
 };
 
-/** Compare plot ids: `143/3`, `143_3`, and spacing variants match. */
-export const normalizePlotKey = (value: unknown): string =>
-  String(value ?? '')
+/** Normalize plot identifiers for comparison (slashes/spaces → underscore, lowercase). */
+export function normalizePlotKey(name: string): string {
+  return String(name ?? "")
     .trim()
-    .replace(/\+/g, ' ')
-    .replace(/\//g, '_')
-    .replace(/\s+/g, ' ')
+    .replace(/^"|"$/g, "")
+    .replace(/\//g, "_")
+    .replace(/ /g, "_")
     .toLowerCase();
-
-export function plotKeysMatch(a: unknown, b: unknown): boolean {
-  if (a == null || b == null) return false;
-  return normalizePlotKey(a) === normalizePlotKey(b);
 }
 
-/** Events/SEF API: spaces → `+` (e.g. `188_1 2A` → `188_1+2A`). */
-export function formatPlotNameForApi(plotId: string | number): string {
-  return String(plotId).trim().replace(/ /g, '+');
+/** Format plot name for SEF/field-score API query (spaces → `+`). */
+export function formatPlotNameForApi(plotName: string): string {
+  return String(plotName ?? "").trim().replace(/ /g, "+");
 }
 
 export function fieldScoreCacheKey(plotId: string): string {
   return `fieldScore_${normalizePlotKey(plotId)}`;
 }
 
-function gatPlotPair(plot: PlotRef): { gat: string; num: string } {
-  const gat = String(
-    plot.gat_number ?? plot.Group_Gat_No ?? '',
-  ).trim();
-  const num = String(plot.plot_number ?? plot.Gat_No_Id ?? '').trim();
-  return { gat, num };
-}
-
-export function plotIdentityCandidates(plot: PlotRef | null | undefined): string[] {
-  if (!plot) return [];
-  const { gat, num } = gatPlotPair(plot);
-  const underscored =
-    gat && num ? `${gat}_${num}`.replace(/\//g, '_') : '';
-  const slashed = gat && num ? `${gat}/${num}` : '';
-
-  const raw = [
-    plot.fastapi_plot_id,
-    plot.events_plot_id,
-    plot.plot_name,
-    plot.plot_id,
-    underscored,
-    slashed,
-  ];
-
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const value of raw) {
-    if (value == null) continue;
-    const trimmed = String(value).trim();
-    if (!trimmed || seen.has(trimmed)) continue;
-    seen.add(trimmed);
-    out.push(trimmed);
-  }
-  return out;
-}
-
-export function findPlotRef(
-  plots: PlotRef[] | null | undefined,
-  plotKey: string,
-): PlotRef | undefined {
-  if (!plots?.length || !plotKey?.trim()) return undefined;
-  return plots.find((plot) =>
-    plotIdentityCandidates(plot).some((candidate) =>
-      plotKeysMatch(candidate, plotKey),
-    ),
-  );
-}
-
-/** Plot id sent to analyze / field-score APIs (underscore form when possible). */
+/** Plot id sent to analyze_Growth / layer APIs — use backend `fastapi_plot_id` as-is. */
 export const resolveApiPlotName = (
   plotKey: string,
   plots?: PlotRef[] | null,
@@ -89,74 +33,82 @@ export const resolveApiPlotName = (
   const key = plotKey?.trim();
   if (!key) return key;
 
-  const plot = findPlotRef(plots, key);
-  const { gat, num } = gatPlotPair(plot ?? {});
-  const fromGatPlot =
-    gat && num
-      ? `${gat}_${num}`.replace(/\//g, '_')
-      : '';
+  const matched = findPlotRef(plots, plotKey);
+  const fastapi = matched?.fastapi_plot_id
+    ? String(matched.fastapi_plot_id).trim()
+    : "";
 
-  const fastapi = plot?.fastapi_plot_id
-    ? String(plot.fastapi_plot_id).trim()
-    : '';
+  if (fastapi) return fastapi;
 
-  if (fastapi && !fastapi.includes('/')) {
-    return formatPlotNameForApi(fastapi);
+  const gat =
+    matched?.gat_number != null ? String(matched.gat_number).trim() : "";
+  const num =
+    matched?.plot_number != null ? String(matched.plot_number).trim() : "";
+  if (gat && num) {
+    return `${gat}/${num}`;
   }
-  if (fromGatPlot) return formatPlotNameForApi(fromGatPlot);
-  if (fastapi) return formatPlotNameForApi(fastapi.replace(/\//g, '_'));
-  return formatPlotNameForApi(key.replace(/\//g, '_'));
+
+  return key;
 };
 
-/** Names to try against field-score API when format varies (`1143_23` vs `143/3`). */
+export function findPlotRef(
+  plots: PlotRef[] | null | undefined,
+  plotId: string,
+): PlotRef | null {
+  if (!plots?.length || !plotId?.trim()) return null;
+
+  const key = normalizePlotKey(plotId);
+
+  return (
+    plots.find((p) => {
+      if (!p) return false;
+      const fastapi = p.fastapi_plot_id
+        ? normalizePlotKey(p.fastapi_plot_id)
+        : "";
+      const gat = String(p.gat_number ?? "").trim();
+      const num = String(p.plot_number ?? "").trim();
+      const underscored =
+        gat && num ? normalizePlotKey(`${gat}_${num}`) : "";
+      const slashed = gat && num ? normalizePlotKey(`${gat}/${num}`) : "";
+      const plotName = p.plot_name ? normalizePlotKey(p.plot_name) : "";
+
+      return (
+        fastapi === key ||
+        underscored === key ||
+        slashed === key ||
+        plotName === key
+      );
+    }) ?? null
+  );
+}
+
+/** Ordered plot-name variants to try against field-score / analyze APIs. */
 export function getPlotNameCandidates(
-  plotKey: string,
+  plotId: string,
   plots?: PlotRef[] | null,
 ): string[] {
-  const key = plotKey?.trim();
-  if (!key) return [];
-
-  const seen = new Set<string>();
   const out: string[] = [];
-  const add = (value?: string | null) => {
-    if (!value?.trim()) return;
-    const trimmed = value.trim();
-    const variants = [
-      trimmed,
-      trimmed.replace(/\//g, '_'),
-      formatPlotNameForApi(trimmed),
-      formatPlotNameForApi(trimmed.replace(/\//g, '_')),
-    ];
-    for (const variant of variants) {
-      const norm = normalizePlotKey(variant);
-      if (!norm || seen.has(norm)) continue;
-      seen.add(norm);
-      out.push(variant);
-    }
+  const seen = new Set<string>();
+
+  const add = (value: string | undefined | null) => {
+    const s = String(value ?? "").trim();
+    if (!s) return;
+    const k = normalizePlotKey(s);
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(s);
   };
 
-  add(key);
-  add(resolveApiPlotName(key, plots));
+  const matched = findPlotRef(plots, plotId);
 
-  const plot = findPlotRef(plots, key);
-  if (plot) {
-    for (const candidate of plotIdentityCandidates(plot)) {
-      add(candidate);
-    }
+  if (matched?.fastapi_plot_id) add(matched.fastapi_plot_id);
+  add(plotId);
+  add(resolveApiPlotName(plotId, plots));
+  if (matched?.gat_number != null && matched?.plot_number != null) {
+    add(`${matched.gat_number}_${matched.plot_number}`);
+    add(`${matched.gat_number}/${matched.plot_number}`);
   }
+  if (matched?.plot_name) add(matched.plot_name);
 
-  return out;
-};
-
-/** Exact fastapi_plot_id + URL-encoded form for Events/admin API paths and query params. */
-export function resolvePlotForEventsApi(
-  plotKey: string,
-  plots?: Array<{
-    fastapi_plot_id?: string;
-    gat_number?: string;
-    plot_number?: string;
-  }> | null,
-): { plotId: string; encoded: string } {
-  const plotId = resolveApiPlotName(plotKey, plots);
-  return { plotId, encoded: encodePlotIdForEventsUrl(plotId) };
+  return out.length > 0 ? out : [plotId];
 }

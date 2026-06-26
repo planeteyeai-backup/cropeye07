@@ -50,7 +50,8 @@ import {
 import "leaflet/dist/leaflet.css";
 import axios from "axios";
 import { getCache, setCache } from "../utils/cache";
-import { getRecentFarmers, getFieldOfficerAgroStats, fetchPlotBoundaryCoordinates } from "../api";
+import { getRecentFarmers, getFieldOfficerAgroStats } from "../api";
+import { fetchPlotBoundaryCoordinates } from "../utils/plotBoundary";
 import { getUserData } from "../utils/auth";
 import { useAppContext } from "../context/AppContext";
 import { fetchFieldScoreForPlot, fieldScoreCacheKey } from "../utils/fieldScore";

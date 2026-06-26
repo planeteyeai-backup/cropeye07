@@ -6,10 +6,9 @@ import {
   getFieldOfficerAgroStats,
   getManagerFieldOfficersAgroStats,
 } from '../api';
-import { getFastApiToken, isPlanetEyeDemoUser } from '../utils/auth';
+import { getFastApiToken } from '../utils/auth';
 import { getCache } from '../components/utils/cache';
 import { getOrFetchJson } from "../utils/requestCache";
-import { resolvePlotForEventsApi } from "../utils/plotName";
 
 // Base URLs for external APIs
 const BASE_URL = 'https://admin-cropeye.up.railway.app';
@@ -31,7 +30,6 @@ type UserRole = 'farmer' | 'manager' | 'admin' | 'fieldofficer' | 'owner';
 export const prefetchFarmerProfile = async (
   setCached: (key: string, data: any) => void
 ): Promise<boolean> => {
-  if (isPlanetEyeDemoUser()) return true;
   try {
     const response: any = await getFarmerMyProfile();
     setCached('farmerProfile', response?.data);
@@ -73,10 +71,6 @@ export const prefetchAllData = async (
   selectedPlotName?: string | null,
   role?: UserRole | null
 ): Promise<PrefetchResult> => {
-  if (isPlanetEyeDemoUser()) {
-    return { success: true, fetchedEndpoints: [], errors: [] };
-  }
-
   const errors: string[] = [];
   const fetchedEndpoints: string[] = [];
   const today = new Date().toISOString().split('T')[0];
@@ -331,12 +325,8 @@ export const prefetchAllData = async (
       profile?.plots?.[0]?.id;
     let indicesPromise: Promise<any> | null = null;
     if (plotId) {
-      const { plotId: resolvedPlotId, encoded: plotApiId } = resolvePlotForEventsApi(
-        String(plotId),
-        profile?.plots,
-      );
       const fastToken = getFastApiToken();
-      indicesPromise = fetch(`${EVENTS_BASE_URL}/plots/${plotApiId}/indices`, {
+      indicesPromise = fetch(`${EVENTS_BASE_URL}/plots/${plotId}/indices`, {
         headers: fastToken ? { Authorization: `Bearer ${fastToken}` } : undefined,
       })
         .then(async (res) => {
@@ -349,7 +339,7 @@ export const prefetchAllData = async (
               water: item.NDWI,
               moisture: item.NDRE,
             }));
-            setCached(`indices_${resolvedPlotId}`, formattedData);
+            setCached(`indices_${plotId}`, formattedData);
             fetchedEndpoints.push('indices');
             return formattedData;
           }

@@ -53,9 +53,9 @@ import { getCache, setCache } from "../utils/cache";
 import { fetchFieldScoreForPlot, fieldScoreCacheKey } from "../utils/fieldScore";
 import { findPlotRef } from "../utils/plotName";
 import MapCropStatusOverlay from "./MapCropStatusOverlay";
+import { fetchPlotBoundaryCoordinates } from "../utils/plotBoundary";
 import api, {
   encodePlotIdForEventsUrl,
-  fetchPlotBoundaryCoordinates,
   getCurrentUser,
   getFarmersByFieldOfficer,
   getTeamConnect,
