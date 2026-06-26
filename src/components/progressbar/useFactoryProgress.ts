@@ -25,7 +25,11 @@ import {
 } from './parseFactoryApiResponse';
 import type { FarmerProgressConfig } from './progressData';
 
-const DEFAULT_OWNER_ID = Number(import.meta.env.VITE_PROGRESS_OWNER_ID) || 5;
+/** Owner with ICPL / public-factory-farmers data (used when .env is not set on deploy). */
+const FALLBACK_PROGRESS_OWNER_ID = 2476;
+
+const DEFAULT_OWNER_ID =
+  parseOwnerId(import.meta.env.VITE_PROGRESS_OWNER_ID) ?? FALLBACK_PROGRESS_OWNER_ID;
 
 function parseOwnerId(value: unknown): number | null {
   const parsed = Number(value);
@@ -35,6 +39,10 @@ function parseOwnerId(value: unknown): number | null {
 export function resolveProgressOwnerId(): number {
   const envOwner = parseOwnerId(import.meta.env.VITE_PROGRESS_OWNER_ID);
   if (envOwner) return envOwner;
+
+  if (isPlanetEyeDemoUser() || getUserRole()?.toLowerCase() === 'planeteye') {
+    return FALLBACK_PROGRESS_OWNER_ID;
+  }
 
   const user = getUserData();
   const role = getUserRole()?.toLowerCase().replace(/\s+/g, '');
