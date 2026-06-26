@@ -1,4 +1,5 @@
 import {
+  MONTH_SECTIONS,
   getLocalWeekNumber,
   getMonthRangeForWeek,
   type MonthSectionLabel,
@@ -64,6 +65,33 @@ function readingToNode(
     isFromApi: true,
     isLatest,
   };
+}
+
+function isPastTimelineDate(dateLabel: string): boolean {
+  const parsed = new Date(dateLabel);
+  if (Number.isNaN(parsed.getTime())) return false;
+  const today = new Date();
+  today.setHours(23, 59, 59, 999);
+  parsed.setHours(0, 0, 0, 0);
+  return parsed <= today;
+}
+
+function buildAllWeeklyTimelineNodes(
+  farmerId: string,
+  options: {
+    plantationDate?: string | null;
+    yieldReadings?: YieldReading[];
+    baseYield?: number;
+  },
+): SectionTimelineNode[] {
+  return MONTH_SECTIONS.flatMap((section) =>
+    buildSectionTimelineNodes(
+      farmerId,
+      section.start,
+      section.count,
+      options,
+    ),
+  );
 }
 
 /**
@@ -135,26 +163,72 @@ export function sectionUsesApiReadings(nodes: SectionTimelineNode[]): boolean {
 }
 
 /**
- * Live view: one dot per farmer — newest API yield only.
+ * Live view: one dot per farmer — the newest yield (API reading or latest past week).
  */
 export function buildLiveTimelineNode(
   farmerId: string,
   options: {
     plantationDate?: string | null;
     yieldReadings?: YieldReading[];
+    baseYield?: number;
+    tons?: number;
+    yieldDate?: string | null;
+    hasYieldData?: boolean;
   } = {},
 ): SectionTimelineNode[] {
-  const { plantationDate, yieldReadings = [] } = options;
+  const {
+    plantationDate,
+    yieldReadings = [],
+    baseYield = 2,
+    tons,
+    yieldDate,
+    hasYieldData,
+  } = options;
+
   const sortedAll = [...yieldReadings]
     .filter((reading) => reading?.date && Number.isFinite(Number(reading.yield)))
     .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
-  if (sortedAll.length === 0) return [];
-
-  const latestReading = sortedAll[sortedAll.length - 1];
   const plantation = parsePlantationDate(plantationDate);
 
+  if (sortedAll.length > 0) {
+    const latestReading = sortedAll[sortedAll.length - 1];
+    return [
+      readingToNode(farmerId, 0, latestReading, 0, plantation, true),
+    ];
+  }
+
+  if (hasYieldData !== false && tons != null && Number.isFinite(tons) && tons > 0) {
+    const fallbackDate = yieldDate ?? plantationDate;
+    if (fallbackDate) {
+      return [
+        readingToNode(
+          farmerId,
+          0,
+          { yield: tons, date: fallbackDate },
+          0,
+          plantation,
+          true,
+        ),
+      ];
+    }
+  }
+
+  // Same weekly timeline as History — show the latest past week (e.g. 4.8 T/acre).
+  const weeklyNodes = buildAllWeeklyTimelineNodes(farmerId, {
+    plantationDate,
+    yieldReadings,
+    baseYield,
+  });
+  const pastNodes = weeklyNodes.filter((node) => isPastTimelineDate(node.date));
+  if (pastNodes.length === 0) return [];
+
+  const latestPast = pastNodes[pastNodes.length - 1];
   return [
-    readingToNode(farmerId, 0, latestReading, 0, plantation, true),
+    {
+      ...latestPast,
+      id: `${farmerId}-live-latest`,
+      isLatest: true,
+    },
   ];
 }

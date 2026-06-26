@@ -49,9 +49,12 @@ export function mapApiFarmerToProgressConfig(
   farmer: PublicFactoryFarmer,
 ): FarmerProgressConfig {
   const tons = normalizeYieldTons(farmer.yield);
+  const readingDate =
+    farmer.date ??
+    (farmerHasYieldData(farmer) ? farmer.plantation_date : null);
   const yieldReadings =
-    farmerHasYieldData(farmer) && farmer.date
-      ? [{ yield: Number(farmer.yield), date: farmer.date }]
+    farmerHasYieldData(farmer) && readingDate
+      ? [{ yield: Number(farmer.yield), date: readingDate }]
       : undefined;
 
   return {

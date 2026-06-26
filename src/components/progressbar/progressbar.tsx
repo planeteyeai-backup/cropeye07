@@ -943,7 +943,7 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
           <p className="text-sm font-semibold text-slate-800"></p>
           <p className="text-xs text-slate-500">
             {viewMode === 'live'
-              ? 'Showing latest yield only — updates when new data arrives'
+              ? 'Showing latest available yield per farmer — newest API reading or latest past week'
               : ' '}
           </p>
         </div>
@@ -1018,6 +1018,10 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
                   ? buildLiveTimelineNode(farmer.farmerId, {
                       plantationDate: cfg?.plantationDate,
                       yieldReadings: cfg?.yieldReadings,
+                      baseYield: cfg?.baseYield,
+                      tons: cfg?.tons,
+                      yieldDate: cfg?.yieldDate,
+                      hasYieldData: cfg?.hasYieldData,
                     })
                   : buildSectionTimelineNodes(
                       farmer.farmerId,

@@ -9,6 +9,7 @@ import {
   getUserRole,
   getFastApiToken,
   setFastApiToken,
+  isPlanetEyeDemoToken,
 } from "./utils/auth";
 import { checkAndRefreshToken, isTokenExpired } from "./utils/tokenManager";
 
@@ -62,20 +63,19 @@ eventsApi.interceptors.request.use((config) => {
 // Add auth token if available and refresh if needed
 api.interceptors.request.use(
   async (config) => {
-    // Check and refresh token if needed before making request
     const token = getAuthToken();
-    if (token) {
-      // If token is expired or expiring soon, try to refresh it
-      if (isTokenExpired(token, 300)) {
-        // Token is expired or expiring within 5 minutes, refresh it
-        await checkAndRefreshToken(300);
-      }
+    // PlanetEye demo uses public progress APIs only — never send the fake session token.
+    if (!token || isPlanetEyeDemoToken(token)) {
+      return config;
+    }
 
-      // Get the (possibly refreshed) token
-      const currentToken = getAuthToken();
-      if (currentToken) {
-        config.headers.Authorization = `Bearer ${currentToken}`;
-      }
+    if (isTokenExpired(token, 300)) {
+      await checkAndRefreshToken(300);
+    }
+
+    const currentToken = getAuthToken();
+    if (currentToken && !isPlanetEyeDemoToken(currentToken)) {
+      config.headers.Authorization = `Bearer ${currentToken}`;
     }
     return config;
   },
@@ -118,6 +118,11 @@ api.interceptors.response.use(
 
     // Handle token refresh for 401 errors
     if (error.response?.status === 401 && !originalRequest._retry) {
+      // Demo login — do not wipe session or redirect; dashboards use public endpoints.
+      if (isPlanetEyeDemoToken(getAuthToken())) {
+        return Promise.reject(error);
+      }
+
       // Check if it's a token validation error
       const errorData = error.response?.data;
       const isTokenError =
@@ -1888,12 +1893,12 @@ export async function fetchPublicFactoryFarmers(
   }
 }
 
-/** Authenticated: weekly industrial yield per factory/farmer for an owner. */
+/** Weekly industrial yield per factory/farmer for an owner (public when unauthenticated). */
 export async function fetchIndustrialYieldByOwner(
   ownerId: number,
 ): Promise<FactoryApiResult> {
   try {
-    const response = await api.get("/users/industrial-yield-by-owner/", {
+    const response = await publicApi.get("/users/industrial-yield-by-owner/", {
       params: { owner_id: ownerId },
     });
     return { ok: true, data: response.data };
