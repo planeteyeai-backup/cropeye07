@@ -28,7 +28,7 @@ import {
   Loader2,
   Calendar,
   Droplets,
-  Thermometer,
+  Sprout,
   Activity,
   Target,
   Leaf,
@@ -54,6 +54,11 @@ import { fetchFieldScoreForPlot, fieldScoreCacheKey } from "../utils/fieldScore"
 import { findPlotRef } from "../utils/plotName";
 import MapCropStatusOverlay from "./MapCropStatusOverlay";
 import { fetchPlotBoundaryCoordinates } from "../utils/plotBoundary";
+import {
+  cropConditionStyleFromCci,
+  fetchWaterStressAnalysis,
+  parseWaterStressMetrics,
+} from "../utils/waterStressApi";
 import api, {
   encodePlotIdForEventsUrl,
   getCurrentUser,
@@ -136,6 +141,9 @@ interface Metrics {
   biomassMin: number | null;
   biomassMax: number | null;
   stressCount: number | null;
+  stressTotalDays: number | null;
+  cropConditionLabel: string | null;
+  cropConditionValue: number | null;
   fieldScore: number | null;
   expectedYield: number | null;
   daysToHarvest: number | null;
@@ -679,11 +687,13 @@ const OwnerFarmDash: React.FC = () => {
     plotStats: boolean;
     indices: boolean;
     stress: boolean;
+    waterStress: boolean;
     irrigation: boolean;
   }>({
     plotStats: false,
     indices: false,
     stress: false,
+    waterStress: false,
     irrigation: false,
   });
 
@@ -691,6 +701,7 @@ const OwnerFarmDash: React.FC = () => {
     loadingSections.plotStats ||
     loadingSections.indices ||
     loadingSections.stress ||
+    loadingSections.waterStress ||
     loadingSections.irrigation;
 
   // Keep existing UI bindings (cards already check `loadingData`)
@@ -727,6 +738,9 @@ const OwnerFarmDash: React.FC = () => {
     biomassMin: null,
     biomassMax: null,
     stressCount: null,
+    stressTotalDays: null,
+    cropConditionLabel: null,
+    cropConditionValue: null,
     fieldScore: null,
     expectedYield: null,
     daysToHarvest: null,
@@ -1077,6 +1091,7 @@ const OwnerFarmDash: React.FC = () => {
       plotStats: true,
       indices: true,
       stress: true,
+      waterStress: true,
       irrigation: true,
     });
     fetchAllData();
@@ -1206,6 +1221,13 @@ const OwnerFarmDash: React.FC = () => {
   const fetchAllData = async (): Promise<void> => {
     if (!selectedPlotId) return;
     setPlotStatsError(null);
+    setMetrics((prev) => ({
+      ...prev,
+      cropConditionLabel: null,
+      cropConditionValue: null,
+      stressCount: null,
+      stressTotalDays: null,
+    }));
     try {
       const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
       const endDate = new Date(Date.now() - tzOffsetMs)
@@ -1472,7 +1494,32 @@ const OwnerFarmDash: React.FC = () => {
           });
       }
 
-      // Stress (NDRE events) - background
+      // Water stress (SAR API) — crop condition indices + stress event cards
+      const plotForWaterStress = findPlotInSelection(selectedPlotId);
+      const plantationForWaterStress =
+        plotForWaterStress?.plantation_date ??
+        plotForWaterStress?.crop_type?.plantation_date ??
+        null;
+
+      void fetchWaterStressAnalysis(selectedPlotId, {
+        plantationDate: plantationForWaterStress,
+        endDate,
+      })
+        .then((data) => {
+          const parsed = parseWaterStressMetrics(data);
+          setMetrics((prev) => ({
+            ...prev,
+            cropConditionLabel: parsed.cropConditionLabel,
+            cropConditionValue: parsed.cropConditionValue,
+            stressCount: parsed.stressCount,
+            stressTotalDays: parsed.stressTotalDays,
+          }));
+        })
+        .finally(() => {
+          setLoadingSections((prev) => ({ ...prev, waterStress: false }));
+        });
+
+      // NDRE stress events — chart overlay only (not summary cards)
       if (!cachedStress) {
         makeRequestWithRetry(
           `${BASE_URL}/plots/${selectedPlotId}/stress?index_type=NDRE&threshold=0.15`,
@@ -1486,7 +1533,6 @@ const OwnerFarmDash: React.FC = () => {
             setNdreStressEvents(events);
             setMetrics((prev) => ({
               ...prev,
-              stressCount: data?.total_events ?? 0,
               cnRatio: null,
             }));
             setLoadingSections((prev) => ({ ...prev, stress: false }));
@@ -1497,7 +1543,6 @@ const OwnerFarmDash: React.FC = () => {
             setNdreStressEvents(events);
             setMetrics((prev) => ({
               ...prev,
-              stressCount: 0,
               cnRatio: null,
             }));
             setLoadingSections((prev) => ({ ...prev, stress: false }));
@@ -1508,7 +1553,6 @@ const OwnerFarmDash: React.FC = () => {
         setNdreStressEvents(events);
         setMetrics((prev) => ({
           ...prev,
-          stressCount: cachedStress?.total_events ?? 0,
           cnRatio: null,
         }));
         setLoadingSections((prev) => ({ ...prev, stress: false }));
@@ -2724,47 +2768,71 @@ const OwnerFarmDash: React.FC = () => {
             <p className="text-xs text-gray-600 font-medium">Expected Yield</p>
           </div>
 
-          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-teal-200 hover:shadow-xl transition-all duration-300">
+          {(() => {
+            const cciStyle = cropConditionStyleFromCci(
+              metrics.cropConditionValue,
+            );
+            return (
+              <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-emerald-200 hover:shadow-xl transition-all duration-300">
+                <div className="flex items-center justify-between mb-2">
+                  <Sprout className="w-6 h-6 shrink-0 text-emerald-600" />
+                  <div className="text-right min-w-0 flex-1 ml-2">
+                    <div
+                      className="text-sm font-bold leading-snug"
+                      style={{ color: cciStyle?.textColor ?? '#1f2937' }}
+                    >
+                      {!selectedPlotId ? (
+                        "-"
+                      ) : loadingSections.waterStress ? (
+                        <Loader2 className="w-5 h-5 animate-spin inline-block text-gray-400" />
+                      ) : (
+                        cciStyle?.label ?? metrics.cropConditionLabel ?? "-"
+                      )}
+                    </div>
+                    {!loadingSections.waterStress &&
+                      metrics.cropConditionValue != null && (
+                        <div
+                          className="text-[10px] font-semibold mt-0.5"
+                          style={{
+                            color: cciStyle?.subtextColor ?? '#0d9488',
+                          }}
+                        >
+                          CCI {metrics.cropConditionValue.toFixed(1)}
+                        </div>
+                      )}
+                  </div>
+                </div>
+                <p className="text-xs text-gray-600 font-medium">
+                  Crop Condition Index
+                </p>
+              </div>
+            );
+          })()}
+
+          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-red-200 hover:shadow-xl transition-all duration-300">
             <div className="flex items-center justify-between mb-2">
-              <Thermometer className="w-6 h-6 text-teal-600" />
+              <Activity className="w-5 h-5 text-red-600 shrink-0" />
               <div className="text-right">
-                <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
+                <div className="text-lg font-bold text-gray-800">
+                  {!selectedPlotId ? (
+                    "-"
+                  ) : loadingSections.waterStress ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : (
-                    metrics.organicCarbonDensity?.toFixed(1) || "-"
+                    (metrics.stressCount ?? "-")
                   )}
                 </div>
-                <div className="text-sm font-semibold text-teal-600">g/kg</div>
-              </div>
-            </div>
-            <p className="text-xs text-gray-600 font-medium">Organic Carbon</p>
-          </div>
-
-          <button
-            onClick={fetchNDREStressEvents}
-            onDoubleClick={() => setShowNDREEvents(!showNDREEvents)}
-            className="w-full"
-          >
-            <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-red-200 hover:shadow-xl transition-all duration-300">
-              <div className="flex items-center justify-between mb-2">
-                <Activity className="w-5 h-5 text-red-600" />
-                <div className="text-right">
-                  <div className="text-lg font-bold text-gray-800">
-                    {loadingData ? (
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                    ) : (
-                      (metrics.stressCount ?? 0)
-                    )}
-                  </div>
-                  <div className="text-xs font-semibold text-red-600">
-                    Events
-                  </div>
+                <div className="text-xs font-semibold text-red-600">
+                  {!selectedPlotId || loadingSections.waterStress
+                    ? "Total days"
+                    : metrics.stressTotalDays != null
+                      ? `${metrics.stressTotalDays} days`
+                      : "-"}
                 </div>
               </div>
-              <p className="text-xs text-gray-600">Stress Events</p>
             </div>
-          </button>
+            <p className="text-xs text-gray-600">Stress Events</p>
+          </div>
 
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-pink-200 hover:shadow-xl transition-all duration-300">
             <div className="flex items-center justify-between mb-3">

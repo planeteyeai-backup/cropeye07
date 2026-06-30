@@ -121,7 +121,7 @@ interface Message {
 interface ChatbotProps {
   isOpen: boolean;
   onClose: () => void;
-  userRole?: UserRole;
+  userRole?: UserRole | "planeteye";
 }
 
 function chatLocaleToMessageLanguage(locale: ChatLocaleCode | null): Language {

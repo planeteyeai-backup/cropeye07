@@ -43,6 +43,8 @@ export interface TimelineNode {
   isFromApi?: boolean;
   /** True for the farmer's latest API yield reading. */
   isLatest?: boolean;
+  /** True when value is from analyzeSinglePlot expected yield. */
+  isExpectedYield?: boolean;
 }
 
 export interface FarmerTimeline {
@@ -90,7 +92,7 @@ const buildInitialActions = (
 
 const buildWeeklyNodes = (
   farmerId: string,
-  baseYield: number,
+  _baseYield: number,
   plantationStart = '2025-01-15',
   yieldReadings: { yield: number; date: string }[] = [],
 ): TimelineNode[] => {
@@ -129,23 +131,25 @@ const buildWeeklyNodes = (
         milestoneDate = closestReading
           ? new Date(closestReading.date)
           : new Date(weekStart);
-        yieldValue = closestReading?.yield ?? baseYield + i * 0.08;
+        yieldValue = closestReading?.yield ?? NaN;
       }
     } else {
       milestoneDate = new Date(weekStart);
-      yieldValue = baseYield + i * 0.08;
+      yieldValue = NaN;
     }
 
     const localWeek = getLocalWeekNumber(i);
+    const hasYield = Number.isFinite(yieldValue);
 
     return {
       id: `${farmerId}-w${i + 1}`,
       day: localWeek,
       date: formatDisplayDate(milestoneDate),
       monthRange: getMonthRangeForWeek(i),
-      yield: `${Number(yieldValue).toFixed(1)} T/acre`,
+      yield: hasYield ? `${Number(yieldValue).toFixed(1)} T/acre` : '',
       callStatus: 'pending',
       note: '',
+      isFromApi: hasYield,
     };
   });
 };
@@ -390,6 +394,7 @@ const ProgressDot: React.FC<{
   isPast: boolean;
   isLatest?: boolean;
   isFromApi?: boolean;
+  isExpectedYield?: boolean;
   dotIndex: number;
   totalDots: number;
   alignStart?: boolean;
@@ -406,6 +411,7 @@ const ProgressDot: React.FC<{
   isPast,
   isLatest,
   isFromApi,
+  isExpectedYield,
   dotIndex,
   totalDots,
   alignStart = false,
@@ -438,6 +444,9 @@ const ProgressDot: React.FC<{
       : isPast
         ? { backgroundColor: T.pastNotRecorded }
         : undefined;
+
+  const hasRealYield =
+    Boolean(node.yield) && (isFromApi || isLatest || isExpectedYield);
 
   return (
     <div
@@ -492,7 +501,12 @@ const ProgressDot: React.FC<{
             className={`pointer-events-none absolute top-full z-30 mt-2 whitespace-nowrap ${alignClass}`}
           >
             <div className="min-w-[140px] rounded-lg border border-slate-100 bg-white px-2.5 py-2 text-center shadow-lg ring-1 ring-black/5">
-              {isLatest && (
+              {isExpectedYield && (
+                <p className="mb-1 text-[9px] font-bold uppercase tracking-wide text-indigo-700">
+                  Expected yield
+                </p>
+              )}
+              {isLatest && !isExpectedYield && (
                 <p className="mb-1 text-[9px] font-bold uppercase tracking-wide text-emerald-700">
                   Latest yield
                 </p>
@@ -505,10 +519,16 @@ const ProgressDot: React.FC<{
               <p className="text-[9px] font-semibold uppercase tracking-wide text-slate-400">
                 {node.date}
               </p>
-              <p className="mt-0.5 text-xs font-bold" style={{ color: T.taskDone }}>
-                {node.yield}
-              </p>
-              {isPast ? (
+              {hasRealYield ? (
+                <p className="mt-0.5 text-xs font-bold" style={{ color: T.taskDone }}>
+                  {node.yield}
+                </p>
+              ) : isPast ? (
+                <p className="mt-1 text-[8px] font-medium text-slate-400">No yield data</p>
+              ) : (
+                <p className="mt-1 text-[8px] font-medium text-slate-400">Upcoming week</p>
+              )}
+              {isPast && hasRealYield ? (
                 <>
                   <p className="mt-1 border-t border-slate-100 pt-1 text-[9px] font-semibold text-slate-600">
                     Action taken?
@@ -533,9 +553,7 @@ const ProgressDot: React.FC<{
                   )}
                   <p className="mt-0.5 text-[8px] text-slate-400">Click to edit</p>
                 </>
-              ) : (
-                <p className="mt-1 text-[8px] font-medium text-slate-400">Upcoming week</p>
-              )}
+              ) : null}
             </div>
           </div>
         )}
@@ -711,6 +729,7 @@ const FarmerRow: React.FC<{
                 isPast={past}
                 isLatest={node.isLatest}
                 isFromApi={node.isFromApi}
+                isExpectedYield={node.isExpectedYield}
                 dotIndex={dotIndex}
                 totalDots={visibleNodes.length}
                 alignStart={isSingleDot}
@@ -943,7 +962,7 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
           <p className="text-sm font-semibold text-slate-800"></p>
           <p className="text-xs text-slate-500">
             {viewMode === 'live'
-              ? 'Showing latest available yield per farmer — newest API reading or latest past week'
+              ? ''
               : ' '}
           </p>
         </div>

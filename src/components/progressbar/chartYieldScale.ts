@@ -19,7 +19,10 @@ export const CHART_Y_DOMAIN: [number, number] = [0, 1];
 /** Keep range bubbles inside plot — ~28px radius on a ~400px plot. */
 export const RANGE_BUBBLE_Y_PAD = 0.08;
 
-export function clampRangeBubbleChartY(chartY: number): number {
+export function clampRangeBubbleChartY(chartY: number, avgTons?: number): number {
+  if (avgTons != null && avgTons > 0 && avgTons < 75) {
+    return Math.max(chartY, 0.01);
+  }
   return Math.max(RANGE_BUBBLE_Y_PAD, Math.min(1 - RANGE_BUBBLE_Y_PAD, chartY));
 }
 
@@ -115,7 +118,7 @@ export function groupFarmersByYieldRange(
       farmers: inRange,
       count: inRange.length,
       avgTons,
-      chartY: clampRangeBubbleChartY(tonsToChartY(avgTons)),
+      chartY: clampRangeBubbleChartY(tonsToChartY(avgTons), avgTons),
       xPos: rangeIndex,
     };
   });
@@ -139,12 +142,13 @@ function formatRangeLabel(min: number, max: number): string {
 export function buildDynamicYieldRangeGroups(
   farmers: ChartBubbleLayoutInput[],
 ): YieldRangeGroup[] {
-  if (farmers.length === 0) return [];
+  const withYield = farmers.filter((farmer) => farmer.tons > 0);
+  if (withYield.length === 0) return [];
 
-  const binSize = pickDynamicBinSize(farmers.length);
+  const binSize = pickDynamicBinSize(withYield.length);
   const maxYield = Math.min(
     100,
-    Math.max(...farmers.map((farmer) => farmer.tons), 0),
+    Math.max(...withYield.map((farmer) => farmer.tons), 0),
   );
   const lastEdge = Math.min(100, Math.max(binSize, Math.ceil(maxYield / binSize) * binSize));
 
@@ -153,9 +157,9 @@ export function buildDynamicYieldRangeGroups(
 
   for (let min = 0; min < lastEdge; min += binSize) {
     const max = Math.min(min + binSize, 100);
-    const inRange = farmers.filter((farmer) => {
+    const inRange = withYield.filter((farmer) => {
       const tons = farmer.tons;
-      if (min === 0) return tons >= 0 && tons <= max;
+      if (min === 0) return tons > 0 && tons <= max;
       return tons > min && tons <= max;
     });
 
@@ -172,7 +176,7 @@ export function buildDynamicYieldRangeGroups(
       farmers: inRange,
       count: inRange.length,
       avgTons,
-      chartY: clampRangeBubbleChartY(tonsToChartY(avgTons)),
+      chartY: clampRangeBubbleChartY(tonsToChartY(avgTons), avgTons),
       xPos: rangeIndex,
     });
     rangeIndex += 1;

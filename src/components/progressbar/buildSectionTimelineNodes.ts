@@ -4,6 +4,12 @@ import {
   getMonthRangeForWeek,
   type MonthSectionLabel,
 } from './progressConstants';
+import {
+  isValidYieldTon,
+  pickLatestYieldReading,
+  sanitizeYieldReadings,
+  YIELD_TON_MAX,
+} from './yieldReadingUtils';
 
 export interface YieldReading {
   yield: number;
@@ -20,6 +26,7 @@ export interface SectionTimelineNode {
   note: string;
   isFromApi: boolean;
   isLatest: boolean;
+  isExpectedYield?: boolean;
 }
 
 const DEFAULT_PLANTATION = '2025-01-15';
@@ -50,6 +57,7 @@ function readingToNode(
   index: number,
   plantation: Date,
   isLatest: boolean,
+  isExpectedYield = false,
 ): SectionTimelineNode {
   const readingDate = new Date(reading.date);
   const globalWeek = globalWeekIndexFromReading(plantation, readingDate);
@@ -64,6 +72,7 @@ function readingToNode(
     note: '',
     isFromApi: true,
     isLatest,
+    isExpectedYield,
   };
 }
 
@@ -109,12 +118,10 @@ export function buildSectionTimelineNodes(
     baseYield?: number;
   } = {},
 ): SectionTimelineNode[] {
-  const { plantationDate, yieldReadings = [], baseYield = 2 } = options;
+  const { plantationDate, yieldReadings = [] } = options;
   const plantation = parsePlantationDate(plantationDate);
 
-  const sortedAll = [...yieldReadings]
-    .filter((reading) => reading?.date && Number.isFinite(Number(reading.yield)))
-    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  const sortedAll = sanitizeYieldReadings(yieldReadings);
 
   return Array.from({ length: sectionWeekCount }, (_, localIndex) => {
     const globalWeek = sectionStartWeek + localIndex;
@@ -142,14 +149,13 @@ export function buildSectionTimelineNodes(
       );
     }
 
-    const fallbackYield = baseYield + globalWeek * 0.08;
-
+    // No API reading for this week — keep the slot on the timeline but do not invent yield.
     return {
       id: `${farmerId}-w${globalWeek + 1}`,
       day: getLocalWeekNumber(globalWeek),
       date: formatTimelineDate(weekStart),
       monthRange: getMonthRangeForWeek(globalWeek),
-      yield: `${Number(fallbackYield).toFixed(1)} T/acre`,
+      yield: '',
       callStatus: 'pending' as const,
       note: '',
       isFromApi: false,
@@ -185,42 +191,53 @@ export function buildLiveTimelineNode(
     hasYieldData,
   } = options;
 
-  const sortedAll = [...yieldReadings]
-    .filter((reading) => reading?.date && Number.isFinite(Number(reading.yield)))
-    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-
   const plantation = parsePlantationDate(plantationDate);
 
-  if (sortedAll.length > 0) {
-    const latestReading = sortedAll[sortedAll.length - 1];
+  const latestIndustrial = pickLatestYieldReading(yieldReadings);
+  if (latestIndustrial) {
     return [
-      readingToNode(farmerId, 0, latestReading, 0, plantation, true),
+      readingToNode(
+        farmerId,
+        0,
+        latestIndustrial,
+        0,
+        plantation,
+        true,
+        false,
+      ),
     ];
   }
 
-  if (hasYieldData !== false && tons != null && Number.isFinite(tons) && tons > 0) {
+  if (
+    hasYieldData !== false &&
+    tons != null &&
+    isValidYieldTon(tons)
+  ) {
     const fallbackDate = yieldDate ?? plantationDate;
     if (fallbackDate) {
       return [
         readingToNode(
           farmerId,
           0,
-          { yield: tons, date: fallbackDate },
+          { yield: Math.min(tons, YIELD_TON_MAX), date: fallbackDate },
           0,
           plantation,
           true,
+          false,
         ),
       ];
     }
   }
 
-  // Same weekly timeline as History — show the latest past week (e.g. 4.8 T/acre).
+  // History-style weekly slots — only use weeks that have a real API reading.
   const weeklyNodes = buildAllWeeklyTimelineNodes(farmerId, {
     plantationDate,
     yieldReadings,
     baseYield,
   });
-  const pastNodes = weeklyNodes.filter((node) => isPastTimelineDate(node.date));
+  const pastNodes = weeklyNodes.filter(
+    (node) => isPastTimelineDate(node.date) && node.isFromApi,
+  );
   if (pastNodes.length === 0) return [];
 
   const latestPast = pastNodes[pastNodes.length - 1];

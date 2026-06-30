@@ -2,7 +2,7 @@ import React from "react";
 
 
 interface DashboardGridProps {
-  userRole: "manager" | "farmer" | "admin" | "fieldofficer";
+  userRole: "manager" | "farmer" | "admin" | "fieldofficer" | "owner" | "planeteye";
   submenu: string;
   onClose: () => void;
 }

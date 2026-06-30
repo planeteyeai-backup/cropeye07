@@ -520,7 +520,7 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
           />
         );
       case "farmer":
-        return <FarmerHomeGrid onMenuClick={handleMenuSelect} />;
+        return <FarmerHomeGrid />;
       case "planeteye":
         return (
           <ProgressBarDashboard key={progressNavKey} navKey={progressNavKey} />
@@ -572,11 +572,9 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
               </div>
             )}
 
-            {cachedViews.includes(View.userList) && (
+            {cachedViews.includes(View.userList) && currentUser && (
               <div style={{ display: currentView === View.userList ? 'block' : 'none' }}>
                 <UserList
-                  users={users}
-                  setUsers={setUsers}
                   currentUserId={currentUser.id}
                   currentUserRole={
                     currentUser.role as "owner" | "manager" | "fieldofficer" | "farmer"
@@ -659,11 +657,11 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
 
             {cachedViews.includes(View.TeamList) && (
               <div style={{ display: currentView === View.TeamList ? 'block' : 'none' }}>
-                <TeamList setUsers={setUsers} users={users} />
+                <TeamList />
               </div>
             )}
 
-            {cachedViews.includes(View.Calendar) && (
+            {cachedViews.includes(View.Calendar) && currentUser && (
               <div style={{ display: currentView === View.Calendar ? 'block' : 'none' }}>
                 <Calendar
                   currentUserId={currentUser.id}
@@ -687,7 +685,7 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
               </div>
             )}
 
-            {cachedViews.includes(View.ViewList) && (
+            {cachedViews.includes(View.ViewList) && currentUser && (
               <div style={{ display: currentView === View.ViewList ? 'block' : 'none' }}>
                 <ViewList
                   currentUserId={currentUser.id}

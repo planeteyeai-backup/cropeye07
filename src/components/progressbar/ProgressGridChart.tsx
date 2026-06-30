@@ -22,7 +22,7 @@ import {
   YIELD_GRID_LINES,
   YIELD_ZONE_BANDS,
   YIELD_ZONE_BOUNDARIES,
-  buildDynamicYieldRangeGroups,
+  groupFarmersByYieldRange,
 } from './chartYieldScale';
 
 import { CHART_THEME as C, PROGRESS_THEME as T } from './progressTheme';
@@ -86,6 +86,9 @@ interface ProgressGridChartProps {
   factoryLabel?: string;
   farmerConfigs?: FarmerProgressConfig[];
   underTargetCount?: number;
+  farmersWithoutYield?: number;
+  hasIndustrialYield?: boolean;
+  industrialLoadError?: string | null;
 }
 
 const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
@@ -93,6 +96,9 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
   factoryLabel = '',
   farmerConfigs = [],
   underTargetCount = 0,
+  farmersWithoutYield = 0,
+  hasIndustrialYield = false,
+  industrialLoadError = null,
 }) => {
   const [selectedRangeIndex, setSelectedRangeIndex] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -126,18 +132,22 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
     [farmerConfigs],
   );
 
-  const rangeGroups = useMemo(
-    () =>
-      buildDynamicYieldRangeGroups(
-        farmerInputs.map(({ farmerId, farmerName, tons, hasYieldData }) => ({
-          farmerId,
-          farmerName,
-          tons,
-          hasYieldData,
-        })),
-      ),
-    [farmerInputs],
-  );
+  const rangeGroups = useMemo(() => {
+    const groups = groupFarmersByYieldRange(
+      farmerInputs.map(({ farmerId, farmerName, tons, hasYieldData }) => ({
+        farmerId,
+        farmerName,
+        tons,
+        hasYieldData,
+      })),
+    ).filter((group) => group.count > 0);
+
+    return groups.map((group, index) => ({
+      ...group,
+      rangeIndex: index,
+      xPos: index,
+    }));
+  }, [farmerInputs]);
 
   const maxRangeIndex = Math.max(0, rangeGroups.length - 1);
 
@@ -224,20 +234,38 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
           Farmer progress bubble chart
         </h2>
         <p className="mt-1 text-xs" style={{ color: C.textMuted }}>
-          {rangeGroups.length} active yield range{rangeGroups.length === 1 ? '' : 's'} from API
-          · Click a dot for the list below · Click a farmer to open Crop Growth Progress
+          {farmerConfigs.length === 0
+            ? hasIndustrialYield
+              ? farmersWithoutYield > 0
+                ? 'No farmers with industrial AI yield readings for this factory'
+                : 'No farmers to chart for this factory'
+              : industrialLoadError
+                ? 'Industrial yield API unavailable — chart needs SEF weekly readings'
+                : 'Waiting for industrial yield data…'
+            : `${rangeGroups.length} industrial yield range${rangeGroups.length === 1 ? '' : 's'} · ${farmerConfigs.length} farmers with SEF readings`}
+          {farmersWithoutYield > 0
+            ? ` · ${farmersWithoutYield} without industrial readings excluded`
+            : ''}
+          {' · Click a dot for the list below'}
         </p>
         <p className="mt-1 text-xs font-medium" style={{ color: C.zone75 }}>
           {underTargetCount} farmer{underTargetCount === 1 ? '' : 's'} under{' '}
-          {YIELD_TARGET_TON} ton
+          {YIELD_TARGET_TON} ton (industrial AI yield)
         </p>
       </div>
 
       {farmerConfigs.length === 0 ? (
         <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-16 text-center">
-          <p className="text-sm font-medium text-slate-600">No farmers found for this industry</p>
+          <p className="text-sm font-medium text-slate-600">
+            {hasIndustrialYield
+              ? 'No industrial AI yield readings for farmers in this factory'
+              : 'Industrial yield data is not loaded yet'}
+          </p>
           <p className="mt-1 text-xs text-slate-400">
-            Select another sugar factory from the dropdown above.
+            {hasIndustrialYield
+              ? `${farmersWithoutYield > 0 ? `${farmersWithoutYield} farmers have no weekly SEF readings. ` : ''}The chart uses industrial-yield-by-owner only (not public-factory-farmers single yield).`
+              : industrialLoadError ??
+                'Chart dots appear after SEF industrial yield loads for this owner.'}
           </p>
         </div>
       ) : (

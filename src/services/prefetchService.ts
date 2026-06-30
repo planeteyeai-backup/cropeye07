@@ -5,9 +5,11 @@ import {
   getTasks,
   getFieldOfficerAgroStats,
   getManagerFieldOfficersAgroStats,
+  getMyFieldOfficers,
 } from '../api';
 import { getFastApiToken } from '../utils/auth';
-import { getCache } from '../components/utils/cache';
+import { getCache, setCache } from '../utils/cache';
+import { getCache as getContextCache } from '../components/utils/cache';
 import { getOrFetchJson } from "../utils/requestCache";
 
 // Base URLs for external APIs
@@ -21,7 +23,25 @@ interface PrefetchResult {
   fetchedEndpoints: string[];
 }
 
-type UserRole = 'farmer' | 'manager' | 'admin' | 'fieldofficer' | 'owner';
+type UserRole = 'farmer' | 'manager' | 'admin' | 'fieldofficer' | 'owner' | 'planeteye';
+
+/** Roles that should not prefetch authenticated /farms/ (owner uses public progress APIs). */
+const SKIP_FARMS_PREFETCH_ROLES = new Set<UserRole>(['owner', 'planeteye']);
+
+export const MANAGER_FIELD_OFFICERS_CACHE_KEY = 'managerFieldOfficers_v1';
+const MANAGER_FIELD_OFFICERS_TTL_MS = 5 * 60 * 1000;
+
+/** Manager Farm Crop Status — field officers + nested farmers (localStorage cache). */
+export const prefetchManagerFieldOfficers = async (): Promise<boolean> => {
+  try {
+    const response = await getMyFieldOfficers();
+    const field_officers = response.data?.field_officers ?? [];
+    setCache(MANAGER_FIELD_OFFICERS_CACHE_KEY, { field_officers });
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 /**
  * Pre-fetch farmer profile only - fast, blocks navigation until done.
@@ -89,21 +109,27 @@ export const prefetchAllData = async (
         return null;
       });
 
-    // 2. For non-farmer roles: prefetch farms and tasks
+    // 2. For non-farmer roles: prefetch farms and tasks (skip /farms/ for owner/planeteye)
     if (!isFarmer) {
-      const commonPromises: Promise<any>[] = [
-        userPromise,
-        getFarmsWithFarmerDetails()
-          .then((response) => {
-            const data = response.data?.results || response.data || [];
-            setCached('farmsWithFarmerDetails', data);
-            fetchedEndpoints.push('farmsWithFarmerDetails');
-            return data;
-          })
-          .catch((err) => {
-            errors.push(`Farms: ${err.message}`);
-            return null;
-          }),
+      const commonPromises: Promise<any>[] = [userPromise];
+
+      if (!SKIP_FARMS_PREFETCH_ROLES.has(role as UserRole)) {
+        commonPromises.push(
+          getFarmsWithFarmerDetails()
+            .then((response) => {
+              const data = response.data?.results || response.data || [];
+              setCached('farmsWithFarmerDetails', data);
+              fetchedEndpoints.push('farmsWithFarmerDetails');
+              return data;
+            })
+            .catch((err) => {
+              errors.push(`Farms: ${err.message}`);
+              return null;
+            }),
+        );
+      }
+
+      commonPromises.push(
         getTasks()
           .then((response) => {
             const data = response.data?.results || response.data || response.data?.data || [];
@@ -115,7 +141,7 @@ export const prefetchAllData = async (
             errors.push(`Tasks: ${err.message}`);
             return null;
           }),
-      ];
+      );
 
       // 2b. For field officer: prefetch agroStats (all plots) so View Field Plot loads instantly
       if (role === 'fieldofficer') {
@@ -163,7 +189,7 @@ export const prefetchAllData = async (
     }
 
     // 3. Farmer-specific: use cached profile if available (avoids duplicate fetch after prefetchFarmerProfile)
-    let profile = getCache('farmerProfile', 10 * 60 * 1000);
+    let profile = getContextCache('farmerProfile', 10 * 60 * 1000);
     if (!profile) {
       const profilePromise = getFarmerMyProfile()
         .then((response: any) => {

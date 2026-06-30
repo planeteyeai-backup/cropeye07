@@ -26,34 +26,31 @@ import {
 import {
   AlertTriangle,
   Calendar,
-  Droplets,
   Thermometer,
   Activity,
   Target,
   Leaf,
   BarChart3,
-  // PieChart as PieChartIcon,
   LineChart as LineChartIcon,
   Users,
   MapPin,
   Beaker,
-  // Crop,
-  // Zap,
-  // Clock,
-  // Gauge,
-  // Filter,
-  // RefreshCw,
   Maximize2,
+  Gauge,
+  Loader2,
 } from "lucide-react";
 import "leaflet/dist/leaflet.css";
 import { getCache, setCache } from "../utils/cache";
-import api, {
+import { fetchFieldScoreForPlot, fieldScoreCacheKey } from "../utils/fieldScore";
+import {
   eventsApi,
   encodePlotIdForEventsUrl,
+  getMyFieldOfficers,
   getSinglePlotAgroStats,
   isAnalyzeSinglePlotPlantationDateError,
   PLANTATION_DATE_NOT_PROVIDED_MSG,
 } from "../api"; // Authenticated Django api + FastAPI events api
+import { MANAGER_FIELD_OFFICERS_CACHE_KEY } from "../services/prefetchService";
 import { useAppContext } from "../context/AppContext";
 
 // Constants (same as FarmerDashboard)
@@ -124,8 +121,11 @@ interface Metrics {
   area: number | null;
   biomass: number | null;
   totalBiomass: number | null;
+  biomassMin: number | null;
+  biomassMax: number | null;
   stressCount: number | null;
   irrigationEvents: number | null;
+  fieldScore: number | null;
   expectedYield: number | null;
   daysToHarvest: number | null;
   growthStage: string | null;
@@ -147,6 +147,8 @@ interface PieChartWithNeedleProps {
   unit?: string;
 }
 
+const MANAGER_OFFICERS_TTL_MS = 5 * 60 * 1000;
+
 type TimePeriod = "daily" | "weekly" | "monthly" | "yearly";
 
 const ManagerFarmDash: React.FC = () => {
@@ -166,7 +168,9 @@ const ManagerFarmDash: React.FC = () => {
     any[]
   >([]);
   const [plots, setPlots] = useState<string[]>([]);
-  const [loadingFarmers, setLoadingFarmers] = useState<boolean>(false);
+  const [loadingFarmers, setLoadingFarmers] = useState<boolean>(
+    () => !getCache(MANAGER_FIELD_OFFICERS_CACHE_KEY, MANAGER_OFFICERS_TTL_MS),
+  );
   const [loadingData, setLoadingData] = useState<boolean>(false);
   const [plotStatsError, setPlotStatsError] = useState<string | null>(null);
   const [showDebugInfo] = useState(false);
@@ -200,8 +204,11 @@ const ManagerFarmDash: React.FC = () => {
     area: null,
     biomass: null,
     totalBiomass: null,
+    biomassMin: null,
+    biomassMax: null,
     stressCount: null,
     irrigationEvents: null,
+    fieldScore: null,
     expectedYield: null,
     daysToHarvest: null,
     growthStage: null,
@@ -239,10 +246,50 @@ const ManagerFarmDash: React.FC = () => {
     return () => window.removeEventListener("resize", update);
   }, []);
 
-  // Fetch farmers list on component mount
+  // Fetch field officers on mount (cache-first; login prefetch warms the cache).
   useEffect(() => {
-    fetchManagerData();
+    void fetchManagerData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount only
   }, []);
+
+  const selectOfficerFarmersAndPlot = (
+    officers: any[],
+    preferredOfficerId?: string,
+  ): void => {
+    if (!officers.length) {
+      setSelectedFieldOfficerId("");
+      setFarmersForSelectedOfficer([]);
+      setSelectedFarmerId("");
+      setPlots([]);
+      setSelectedPlotId("");
+      return;
+    }
+
+    const officer =
+      officers.find((o) => String(o.id) === preferredOfficerId) ?? officers[0];
+    const farmersList = officer?.farmers ?? [];
+    setSelectedFieldOfficerId(String(officer.id));
+    setFarmersForSelectedOfficer(farmersList);
+
+    if (!farmersList.length) {
+      setSelectedFarmerId("");
+      setPlots([]);
+      setSelectedPlotId("");
+      return;
+    }
+
+    const farmer = farmersList[0];
+    const farmerId = String(
+      farmer.id ?? farmer.farmer_id ?? farmer.farmerId ?? "",
+    );
+    const plotIds = (farmer.plots ?? [])
+      .map((plot: any) => plot.fastapi_plot_id)
+      .filter(Boolean);
+
+    setSelectedFarmerId(farmerId);
+    setPlots(plotIds);
+    setSelectedPlotId(plotIds[0] ?? "");
+  };
 
   // NEW: Function to set plot coordinates from existing state
   const setPlotCoordinatesFromState = (plotId: string): void => {
@@ -492,9 +539,16 @@ const ManagerFarmDash: React.FC = () => {
       fetchGen != null && fetchGen !== plotFetchGenRef.current;
 
     const eventsPlotId = encodePlotIdForEventsUrl(plotId);
+    const cleanId = plotId.replace(/"/g, "");
+    const hasWarmCache = Boolean(
+      getCache(`agroSingle_v1_${cleanId}`) && getCache(`indices_${plotId}`),
+    );
 
-    setLoadingData(true);
+    if (!hasLoadedOnce || !hasWarmCache) {
+      setLoadingData(true);
+    }
     setPlotStatsError(null);
+    setMetrics((prev) => ({ ...prev, fieldScore: null }));
     try {
       const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
       const today = new Date(Date.now() - tzOffsetMs)
@@ -644,6 +698,28 @@ const ManagerFarmDash: React.FC = () => {
         );
       }
 
+      const scoreCacheKey = fieldScoreCacheKey(plotId);
+      const cachedFieldScore = getCache(scoreCacheKey);
+      if (cachedFieldScore === undefined || cachedFieldScore === null) {
+        const farmer = farmersForSelectedOfficer.find(
+          (f) =>
+            String(f.id || f.farmer_id || f.farmerId) ===
+            String(selectedFarmerId),
+        );
+        fetchPromises.push(
+          fetchFieldScoreForPlot(plotId, farmer?.plots)
+            .then((score) => {
+              if (score != null) setCache(scoreCacheKey, score);
+              return { type: "fieldScore", data: score };
+            })
+            .catch(() => ({ type: "fieldScore", data: null })),
+        );
+      } else {
+        fetchPromises.push(
+          Promise.resolve({ type: "fieldScore", data: cachedFieldScore }),
+        );
+      }
+
       const chartsPromise = Promise.allSettled(fetchPromises);
 
       const [harvestOutcome, agroOutcome, chartSettled] = await Promise.all([
@@ -669,25 +745,29 @@ const ManagerFarmDash: React.FC = () => {
         setPlotStatsError(PLANTATION_DATE_NOT_PROVIDED_MSG);
       }
 
-      const expectedYieldValue =
+      const toNumberOrNull = (v: unknown): number | null => {
+        if (v === null || v === undefined) return null;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+      };
+
+      const expectedYieldValue = toNumberOrNull(
         currentPlotData?.brix_sugar?.sugar_yield?.mean ??
-        currentPlotData?.brix_sugar?.sugar_yield?.min ??
-        null;
+          currentPlotData?.brix_sugar?.sugar_yield?.avg ??
+          currentPlotData?.brix_sugar?.sugar_yield?.average ??
+          currentPlotData?.brix_sugar?.sugar_yield_mean ??
+          currentPlotData?.sugar_yield_mean ??
+          currentPlotData?.expected_yield ??
+          currentPlotData?.brix_sugar?.sugar_yield?.min,
+      );
 
-      let calculatedBiomass = null;
-      let totalBiomassForMetric = null;
-
-      if (expectedYieldValue !== null) {
-        const totalBiomass = expectedYieldValue * 1.27;
-        const underGroundBiomassInTons = totalBiomass * 0.12;
-        calculatedBiomass = underGroundBiomassInTons;
-        totalBiomassForMetric = totalBiomass;
-      } else if (currentPlotData?.biomass?.mean) {
-        const totalBiomass = currentPlotData.biomass.mean;
-        const underGroundBiomassInTons = totalBiomass * 0.12;
-        calculatedBiomass = underGroundBiomassInTons;
-        totalBiomassForMetric = totalBiomass;
-      }
+      const biomassStats = currentPlotData?.biomass ?? null;
+      const biomassTotal = toNumberOrNull(biomassStats?.mean);
+      const biomassMin = toNumberOrNull(biomassStats?.min);
+      const biomassMax = toNumberOrNull(biomassStats?.max);
+      const calculatedBiomass =
+        biomassTotal !== null ? biomassTotal * 0.12 : null;
+      const totalBiomassForMetric = biomassTotal;
 
       if (currentPlotData) {
         const brixStats = currentPlotData?.brix_sugar?.brix ?? null;
@@ -695,35 +775,54 @@ const ManagerFarmDash: React.FC = () => {
 
         setMetrics((prev) => ({
           ...prev,
-          brix: brixStats?.mean ?? brixStats?.min ?? null,
-          brixMin: brixStats?.min ?? null,
-          brixMax: brixStats?.max ?? null,
-          recovery: recoveryStats?.mean ?? recoveryStats?.min ?? null,
-          area: currentPlotData?.area_acres ?? null,
+          brix: toNumberOrNull(brixStats?.mean ?? brixStats?.min),
+          brixMin: toNumberOrNull(brixStats?.min),
+          brixMax: toNumberOrNull(brixStats?.max),
+          recovery: toNumberOrNull(recoveryStats?.mean ?? recoveryStats?.min),
+          area:
+            currentPlotData?.area_acres ??
+            currentPlotData?.area ??
+            currentPlotData?.area_ha ??
+            null,
           biomass: calculatedBiomass,
           totalBiomass: totalBiomassForMetric,
+          biomassMin,
+          biomassMax,
           expectedYield: expectedYieldValue,
+          sugarYieldMean: expectedYieldValue,
           daysToHarvest: currentPlotData?.days_to_harvest ?? null,
           growthStage:
             harvestStatus || currentPlotData?.Sugarcane_Status || null,
-          soilPH: currentPlotData?.soil?.phh2o ?? null,
+          soilPH:
+            toNumberOrNull(currentPlotData?.soil?.phh2o) ??
+            toNumberOrNull(currentPlotData?.soil?.ph_h2o),
           organicCarbonDensity:
             currentPlotData?.soil?.organic_carbon_stock != null
-              ? parseFloat(currentPlotData.soil.organic_carbon_stock.toFixed(2))
+              ? toNumberOrNull(currentPlotData.soil.organic_carbon_stock)
+                ? parseFloat(
+                    Number(currentPlotData.soil.organic_carbon_stock).toFixed(2),
+                  )
+                : null
               : null,
-          actualYield:
+          actualYield: toNumberOrNull(
             currentPlotData?.brix_sugar?.sugar_yield?.mean ??
+              currentPlotData?.brix_sugar?.sugar_yield?.min,
+          ),
+          sugarYieldMax: toNumberOrNull(
+            currentPlotData?.brix_sugar?.sugar_yield?.max ??
+              currentPlotData?.sugar_yield_max,
+          ),
+          sugarYieldMin: toNumberOrNull(
             currentPlotData?.brix_sugar?.sugar_yield?.min ??
-            null,
-          sugarYieldMean: expectedYieldValue,
-          sugarYieldMax: currentPlotData?.brix_sugar?.sugar_yield?.max ?? null,
-          sugarYieldMin: currentPlotData?.brix_sugar?.sugar_yield?.min ?? null,
+              currentPlotData?.sugar_yield_min,
+          ),
         }));
       }
 
       let rawIndices: LineChartData[] = [];
       let stressData: any = { events: [], total_events: 0 };
       let irrigationData: any = { total_events: null };
+      let fieldScore: number | null = null;
 
       chartSettled.forEach((result) => {
         if (result.status === "fulfilled" && result.value) {
@@ -733,6 +832,7 @@ const ManagerFarmDash: React.FC = () => {
             stressData = data || { events: [], total_events: 0 };
           if (type === "irrigation")
             irrigationData = data || { total_events: null };
+          if (type === "fieldScore") fieldScore = data ?? null;
         }
       });
 
@@ -745,6 +845,7 @@ const ManagerFarmDash: React.FC = () => {
         ...prev,
         stressCount: stressData?.total_events ?? 0,
         irrigationEvents: irrigationData?.total_events ?? null,
+        fieldScore,
         cnRatio: null,
       }));
     } catch (err: any) {
@@ -766,28 +867,26 @@ const ManagerFarmDash: React.FC = () => {
 
   // Fetch farmers from API - using authenticated endpoint
   const fetchManagerData = async (): Promise<void> => {
+    const cached = getCache(
+      MANAGER_FIELD_OFFICERS_CACHE_KEY,
+      MANAGER_OFFICERS_TTL_MS,
+    );
+    if (cached?.field_officers) {
+      setFieldOfficers(cached.field_officers);
+      selectOfficerFarmersAndPlot(cached.field_officers);
+      return;
+    }
+
     setLoadingFarmers(true);
     try {
-      // Use authenticated API call from api.ts
-      const response = await api.get(
-        `${import.meta.env.VITE_API_BASE_URL || "https://cropeye-backendd.up.railway.app/api"}/users/my-field-officers/`,
-      );
-      const responseData = response.data;
-      // Extract the array of field officers from the response object
-      const officersData = responseData.field_officers || [];
-
+      const response = await getMyFieldOfficers();
+      const officersData = response.data?.field_officers ?? [];
+      setCache(MANAGER_FIELD_OFFICERS_CACHE_KEY, {
+        field_officers: officersData,
+      });
       setFieldOfficers(officersData);
-
-      // Auto-select first field officer if available
-      if (officersData.length > 0) {
-        setSelectedFieldOfficerId((prev) =>
-          prev && officersData.some((o: any) => String(o.id) === prev)
-            ? prev
-            : String(officersData[0].id),
-        );
-      }
+      selectOfficerFarmersAndPlot(officersData);
     } catch (error: any) {
-      // Show user-friendly error message
       if (error.response?.status === 401) {
       } else if (error.response?.status === 403) {
       }
@@ -1185,69 +1284,8 @@ const ManagerFarmDash: React.FC = () => {
     );
   };
 
-  const isInitialLoad = loadingData && !hasLoadedOnce && !!selectedPlotId;
-
-  const SkeletonBlock: React.FC<{ className?: string }> = ({ className }) => (
-    <div
-      className={`animate-pulse rounded-xl bg-gray-200/80 ${className || ""}`}
-      aria-hidden
-    />
-  );
-
-  if (isInitialLoad) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-4">
-          <div className="flex items-center justify-end gap-2 text-sm text-gray-600">
-            Loading dashboard…
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {Array.from({ length: 4 }).map((_, i) => (
-              <div
-                key={i}
-                className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-gray-200"
-              >
-                <div className="flex items-center justify-between mb-3">
-                  <SkeletonBlock className="h-6 w-6 rounded-lg" />
-                  <SkeletonBlock className="h-7 w-20" />
-                </div>
-                <SkeletonBlock className="h-3 w-24" />
-              </div>
-            ))}
-          </div>
-
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
-            {Array.from({ length: 6 }).map((_, i) => (
-              <div
-                key={i}
-                className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-gray-200"
-              >
-                <div className="flex items-center justify-between mb-3">
-                  <SkeletonBlock className="h-6 w-6 rounded-lg" />
-                  <SkeletonBlock className="h-7 w-16" />
-                </div>
-                <SkeletonBlock className="h-3 w-28" />
-              </div>
-            ))}
-          </div>
-
-          <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div className="lg:col-span-2 bg-white rounded-xl shadow-lg overflow-hidden">
-              <div className="relative w-full h-[400px] sm:h-[400px] md:h-[450px] lg:h-[500px] min-h-[300px]">
-                <SkeletonBlock className="absolute inset-0 rounded-none" />
-              </div>
-            </div>
-            <div className="bg-white rounded-xl shadow-lg p-4">
-              <SkeletonBlock className="h-5 w-40 mb-3" />
-              <SkeletonBlock className="h-24 w-full mb-3" />
-              <SkeletonBlock className="h-24 w-full" />
-            </div>
-          </section>
-        </div>
-      </div>
-    );
-  }
+  // IMPORTANT: Do not block the whole UI on plot loading — filters stay visible;
+  // metrics show "-" until data arrives (see loadingData banner below).
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50">
@@ -1427,9 +1465,9 @@ const ManagerFarmDash: React.FC = () => {
       </div>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-4">
-        {loadingData && hasLoadedOnce && (
+        {loadingData && (
           <div className="flex items-center justify-end gap-2 text-sm text-gray-600">
-            Refreshing…
+            {hasLoadedOnce ? "Refreshing…" : "Loading plot data…"}
           </div>
         )}
         {plotStatsError && (
@@ -1529,14 +1567,18 @@ const ManagerFarmDash: React.FC = () => {
           </div>
         </div>
 
-        {/* Additional Metrics Cards */}
+        {/* Additional Metrics Cards — aligned with Owner / Farm Crop Status */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-purple-200 hover:shadow-xl transition-all duration-300">
             <div className="flex items-center justify-between mb-2">
               <Target className="w-6 h-6 text-purple-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {metrics.recovery?.toFixed(1) || "-"}
+                  {loadingData ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    metrics.recovery?.toFixed(1) || "-"
+                  )}
                 </div>
                 <div className="text-sm font-semibold text-purple-600">%</div>
               </div>
@@ -1544,12 +1586,37 @@ const ManagerFarmDash: React.FC = () => {
             <p className="text-xs text-gray-600 font-medium">Recovery Rate</p>
           </div>
 
+          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-emerald-200 hover:shadow-xl transition-all duration-300">
+            <div className="flex items-center justify-between mb-2">
+              <Gauge className="w-6 h-6 text-emerald-600" />
+              <div className="text-right">
+                <div className="text-2xl font-bold text-gray-800">
+                  {!selectedPlotId ? (
+                    "-"
+                  ) : loadingData && metrics.fieldScore == null ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : metrics.fieldScore != null ? (
+                    metrics.fieldScore.toFixed(1)
+                  ) : (
+                    "-"
+                  )}
+                </div>
+                <div className="text-sm font-semibold text-emerald-600">%</div>
+              </div>
+            </div>
+            <p className="text-xs text-gray-600 font-medium">Field Score</p>
+          </div>
+
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-indigo-200 hover:shadow-xl transition-all duration-300">
             <div className="flex items-center justify-between mb-2">
               <BarChart3 className="w-6 h-6 text-indigo-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {metrics.expectedYield?.toFixed(0) || "-"}
+                  {loadingData ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    metrics.expectedYield?.toFixed(0) || "-"
+                  )}
                 </div>
                 <div className="text-sm font-semibold text-indigo-600">
                   T/acre
@@ -1564,7 +1631,11 @@ const ManagerFarmDash: React.FC = () => {
               <Thermometer className="w-6 h-6 text-teal-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {metrics.organicCarbonDensity?.toFixed(1) || "-"}
+                  {loadingData ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    metrics.organicCarbonDensity?.toFixed(1) || "-"
+                  )}
                 </div>
                 <div className="text-sm font-semibold text-teal-600">g/kg</div>
               </div>
@@ -1572,49 +1643,68 @@ const ManagerFarmDash: React.FC = () => {
             <p className="text-xs text-gray-600 font-medium">Organic Carbon</p>
           </div>
 
-          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-cyan-200 hover:shadow-xl transition-all duration-300">
+          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-red-200 hover:shadow-xl transition-all duration-300">
             <div className="flex items-center justify-between mb-2">
-              <Droplets className="w-6 h-6 text-cyan-600" />
+              <Activity className="w-5 h-5 text-red-600" />
               <div className="text-right">
-                <div className="text-2xl font-bold text-gray-800">
-                  {metrics.irrigationEvents ?? 0}
+                <div className="text-lg font-bold text-gray-800">
+                  {loadingData ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    (metrics.stressCount ?? 0)
+                  )}
                 </div>
-                <div className="text-sm font-semibold text-cyan-600">
-                  Events
-                </div>
+                <div className="text-xs font-semibold text-red-600">Events</div>
               </div>
             </div>
-            <p className="text-xs text-gray-600 font-medium">
-              Irrigation Events
-            </p>
-          </div>
-
-          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-yellow-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2">
-              <AlertTriangle className="w-6 h-6 text-yellow-600" />
-              <div className="text-right">
-                <div className="text-2xl font-bold text-gray-800">
-                  {metrics.stressCount ?? 0}
-                </div>
-                <div className="text-sm font-semibold text-yellow-600">
-                  Events
-                </div>
-              </div>
-            </div>
-            <p className="text-xs text-gray-600 font-medium">Stress Events</p>
+            <p className="text-xs text-gray-600">Stress Events</p>
           </div>
 
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-pink-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center justify-between mb-3">
               <Activity className="w-6 h-6 text-pink-600" />
               <div className="text-right">
-                <div className="text-2xl font-bold text-gray-800">
-                  {metrics.biomass?.toFixed(1) || "-"}
+                <div className="text-2xl font-bold text-gray-800 flex items-center gap-1 justify-end">
+                  {loadingData ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : metrics.totalBiomass !== null ? (
+                    metrics.totalBiomass.toFixed(1)
+                  ) : (
+                    "-"
+                  )}
+                  {!loadingData && (
+                    <span className="text-sm font-semibold text-pink-600">
+                      T/acre
+                    </span>
+                  )}
                 </div>
-                <div className="text-sm font-semibold text-pink-600">kg/acre</div>
               </div>
             </div>
-            <p className="text-xs text-gray-600 font-medium">Avg Biomass</p>
+            <div className="flex items-center justify-between text-xs text-gray-600">
+              <p className="text-xs font-medium">Avg Biomass</p>
+              <div className="flex gap-4">
+                <div className="text-center">
+                  <div className="font-semibold text-red-600 text-sm">
+                    {metrics.biomassMax !== null
+                      ? metrics.biomassMax.toFixed(1)
+                      : "-"}
+                  </div>
+                  <div className="text-[10px] text-gray-500 uppercase tracking-wide">
+                    Max
+                  </div>
+                </div>
+                <div className="text-center">
+                  <div className="font-semibold text-green-600 text-sm">
+                    {metrics.biomassMin !== null
+                      ? metrics.biomassMin.toFixed(1)
+                      : "-"}
+                  </div>
+                  <div className="text-[10px] text-gray-500 uppercase tracking-wide">
+                    Min
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 

@@ -10,6 +10,7 @@ import {
   getFastApiToken,
   setFastApiToken,
   isPlanetEyeDemoToken,
+  isPlanetEyeDemoUser,
 } from "./utils/auth";
 import { checkAndRefreshToken, isTokenExpired } from "./utils/tokenManager";
 
@@ -26,6 +27,15 @@ const FASTAPI_AUTH_BASE_URL =
   import.meta.env.VITE_FASTAPI_AUTH_BASE_URL ||
   import.meta.env.VITE_DEV_EVENTS_API_URL ||
   "https://events-cropeye.up.railway.app";
+
+// SEF field service — industrial yield by owner (public, no auth)
+const SEF_FIELD_API_BASE_URL = import.meta.env.DEV
+  ? '/api/sef'
+  : import.meta.env.VITE_DEV_FIELD_API_URL ||
+    'https://sef-cropeye.up.railway.app';
+
+/** Large payload — full owner industrial yield can take 30–90s. */
+const SEF_INDUSTRIAL_YIELD_TIMEOUT_MS = 120_000;
 
 // Create axios instance
 const api = axios.create({
@@ -58,6 +68,15 @@ eventsApi.interceptors.request.use((config) => {
     config.headers.Authorization = `Bearer ${t}`;
   }
   return config;
+});
+
+export const sefApi = axios.create({
+  baseURL: SEF_FIELD_API_BASE_URL,
+  timeout: SEF_INDUSTRIAL_YIELD_TIMEOUT_MS,
+  headers: {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  },
 });
 
 // Add auth token if available and refresh if needed
@@ -1893,25 +1912,47 @@ export async function fetchPublicFactoryFarmers(
   }
 }
 
-/** Weekly industrial yield per factory/farmer for an owner (public when unauthenticated). */
+/** Weekly industrial yield — SEF service (primary), Django API (fallback). */
 export async function fetchIndustrialYieldByOwner(
   ownerId: number,
 ): Promise<FactoryApiResult> {
+  const params = { owner_id: ownerId };
+
   try {
-    const response = await publicApi.get("/users/industrial-yield-by-owner/", {
-      params: { owner_id: ownerId },
+    const response = await sefApi.get("/industrial-yield-by-owner", {
+      params,
+      timeout: SEF_INDUSTRIAL_YIELD_TIMEOUT_MS,
     });
-    return { ok: true, data: response.data };
-  } catch (error: any) {
-    return {
-      ok: false,
-      data:
-        error.response?.data ??
-        ({
-          error: error.message ?? "Failed to load industrial yield",
-        } as const),
-    };
+    const payload = response.data as { factories?: unknown[] };
+    if (Array.isArray(payload?.factories) && payload.factories.length > 0) {
+      return { ok: true, data: response.data };
+    }
+  } catch (error: unknown) {
+    const axiosErr = error as { message?: string; code?: string };
+    if (import.meta.env.DEV) {
+      console.warn(
+        "[SEF] industrial-yield-by-owner failed:",
+        axiosErr.message ?? axiosErr.code,
+      );
+    }
   }
+
+  const clients = isPlanetEyeDemoUser() ? [publicApi] : [api, publicApi];
+  for (const client of clients) {
+    try {
+      const response = await client.get("/users/industrial-yield-by-owner/", {
+        params,
+      });
+      return { ok: true, data: response.data };
+    } catch {
+      // try next client
+    }
+  }
+
+  return {
+    ok: false,
+    data: { error: "Failed to load industrial yield" },
+  };
 }
 
 /** Authenticated: industries accessible to the logged-in user. */

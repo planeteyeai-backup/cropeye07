@@ -23,7 +23,12 @@ import {
 import { getCurrentUser } from "../api";
 import { initializeTokenRefresh } from "../utils/tokenManager";
 import { useAppContext } from "../context/AppContext";
-import { prefetchAllData, prefetchFarmerProfile, prefetchFieldOfficerAgroStats } from "../services/prefetchService";
+import {
+  prefetchAllData,
+  prefetchFarmerProfile,
+  prefetchFieldOfficerAgroStats,
+  prefetchManagerFieldOfficers,
+} from "../services/prefetchService";
 
 export type UserRole =
   | "manager"
@@ -237,6 +242,11 @@ const AppRoutesContent: React.FC = () => {
       if (fieldOfficerId) {
         await prefetchFieldOfficerAgroStats(setCached, fieldOfficerId);
       }
+    }
+
+    // Manager: warm field-officer tree before dashboard so dropdowns are instant (no flash)
+    if (normalizedRole === "manager") {
+      await prefetchManagerFieldOfficers();
     }
 
     // Pre-fetch rest of data in background (non-blocking)

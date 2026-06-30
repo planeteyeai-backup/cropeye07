@@ -3,6 +3,7 @@ import { BarChart3 } from 'lucide-react';
 import ProgressGridChart from './progressbar/ProgressGridChart';
 import FactoryIndustrySelect from './progressbar/FactoryIndustrySelect';
 import { YIELD_TARGET_TON } from './progressbar/progressData';
+import { pickFarmersForIndustrialChart } from './progressbar/mapFactoryFarmers';
 import { useFactoryProgress } from './progressbar/useFactoryProgress';
 
 const ProgressGridDashboard: React.FC = () => {
@@ -14,17 +15,29 @@ const ProgressGridDashboard: React.FC = () => {
     setSelectedFactoryId,
     selectedFactory,
     farmerConfigs,
+    hasIndustrialYield,
+    industrialLoadError,
+    factoriesLoading,
   } = useFactoryProgress();
 
   const chartFarmerConfigs = useMemo(
-    () => [...farmerConfigs].sort((a, b) => b.tons - a.tons),
+    () =>
+      pickFarmersForIndustrialChart(farmerConfigs).sort(
+        (a, b) => b.tons - a.tons,
+      ),
     [farmerConfigs],
   );
 
+  const farmersWithoutYield = farmerConfigs.length - chartFarmerConfigs.length;
+
   const underTargetCount = useMemo(
-    () => chartFarmerConfigs.filter((farmer) => farmer.tons < YIELD_TARGET_TON).length,
+    () =>
+      chartFarmerConfigs.filter((farmer) => farmer.tons < YIELD_TARGET_TON).length,
     [chartFarmerConfigs],
   );
+
+  const chartLoading =
+    factoriesLoading || (!hasIndustrialYield && !industrialLoadError);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 p-3 sm:p-4">
@@ -41,7 +54,8 @@ const ProgressGridDashboard: React.FC = () => {
                     Chart of Progress
                   </h1>
                   <p className="text-sm text-slate-500">
-                    All farmers by yield — colored dots below {YIELD_TARGET_TON} ton
+                    Industrial AI yield by farmer — colored dots below{' '}
+                    {YIELD_TARGET_TON} ton
                   </p>
                 </div>
               </div>
@@ -72,9 +86,9 @@ const ProgressGridDashboard: React.FC = () => {
           </div>
 
           <div className="p-4 sm:p-6">
-            {loading ? (
+            {chartLoading ? (
               <div className="rounded-xl border border-dashed border-slate-200 bg-white px-4 py-16 text-center text-sm text-slate-500">
-                Loading chart data…
+                Loading industrial yield data…
               </div>
             ) : (
               <ProgressGridChart
@@ -82,6 +96,9 @@ const ProgressGridDashboard: React.FC = () => {
                 factoryLabel={selectedFactory?.factory_name ?? ''}
                 farmerConfigs={chartFarmerConfigs}
                 underTargetCount={underTargetCount}
+                farmersWithoutYield={farmersWithoutYield}
+                hasIndustrialYield={hasIndustrialYield}
+                industrialLoadError={industrialLoadError}
               />
             )}
           </div>

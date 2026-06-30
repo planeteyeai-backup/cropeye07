@@ -2,32 +2,27 @@ import type { IndustrialYieldFarmer, IndustrialYieldFactory } from './industrial
 import type { PublicFactory, PublicFactoryFarmer } from './factoryProgressTypes';
 import type { FarmerProgressConfig } from './progressData';
 import { weeksDoneFromPlantation, weeksDoneFromYieldReadings, pickChartFarmers } from './mapFactoryFarmers';
+import {
+  pickChartYieldReading,
+  pickLatestYieldReading,
+  sanitizeYieldReadings,
+  YIELD_TON_MAX,
+} from './yieldReadingUtils';
 
-const DEFAULT_YIELD_TON = 75;
-
-function latestYield(farmer: IndustrialYieldFarmer): number {
-  const readings = farmer.yields ?? [];
-  if (readings.length === 0) return DEFAULT_YIELD_TON;
-  const sorted = [...readings].sort(
-    (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
-  );
-  return sorted[sorted.length - 1]?.yield ?? DEFAULT_YIELD_TON;
-}
+const DEFAULT_YIELD_TON = 0;
 
 export function mapIndustrialFarmerToProgressConfig(
   farmer: IndustrialYieldFarmer,
 ): FarmerProgressConfig {
-  const sortedYields = [...(farmer.yields ?? [])].sort(
-    (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
-  );
-  const latest = sortedYields[sortedYields.length - 1];
+  const sortedYields = sanitizeYieldReadings(farmer.yields);
+  const latest = pickChartYieldReading(farmer.yields);
   const tons = latest?.yield ?? DEFAULT_YIELD_TON;
 
   return {
     farmerId: String(farmer.id),
     farmerName: farmer.farmer_name?.trim() || `Farmer ${farmer.id}`,
-    tons,
-    baseYield: latest?.yield ?? 2,
+    tons: Math.min(tons, YIELD_TON_MAX),
+    baseYield: 2,
     plantationDate: farmer.plantation_date,
     yieldReadings: sortedYields,
     yieldDate: latest?.date ?? null,
@@ -60,23 +55,35 @@ export function mergePublicFarmerWithIndustrialYield(
   config: FarmerProgressConfig,
   industrial?: IndustrialYieldFarmer | null,
 ): FarmerProgressConfig {
-  if (!industrial?.yields?.length) return config;
-
-  const sortedYields = [...industrial.yields].sort(
-    (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
-  );
-  const latest = sortedYields[sortedYields.length - 1];
+  const sortedYields = sanitizeYieldReadings(industrial?.yields);
+  const latest = pickChartYieldReading(industrial?.yields);
+  if (!latest || sortedYields.length === 0) return config;
 
   return {
     ...config,
-    tons: latest?.yield ?? config.tons,
-    baseYield: latest?.yield ?? config.baseYield,
-    plantationDate: config.plantationDate ?? industrial.plantation_date,
+    tons: Math.min(latest.yield, YIELD_TON_MAX),
+    baseYield: config.baseYield,
+    plantationDate: config.plantationDate ?? industrial?.plantation_date,
     yieldReadings: sortedYields,
-    yieldDate: latest?.date ?? config.yieldDate,
+    yieldDate: latest.date,
     hasYieldData: true,
-    phoneNumber: config.phoneNumber ?? industrial.phone_number ?? null,
+    phoneNumber: config.phoneNumber ?? industrial?.phone_number ?? null,
     weeksDonePerSection: weeksDoneFromYieldReadings(sortedYields),
+  };
+}
+
+export function industrialFarmerToPublicFarmer(
+  farmer: IndustrialYieldFarmer,
+): PublicFactoryFarmer {
+  const latest = pickLatestYieldReading(farmer.yields);
+
+  return {
+    id: farmer.id,
+    farmer_name: farmer.farmer_name,
+    phone_number: farmer.phone_number,
+    plantation_date: farmer.plantation_date,
+    yield: latest?.yield ?? null,
+    date: latest?.date ?? null,
   };
 }
 
@@ -87,7 +94,7 @@ export function industrialFactoryToPublicFactory(
     factory_id: factory.factory_id,
     factory_name: factory.factory_name,
     farmers_count: factory.farmers_count,
-    farmers: [],
+    farmers: (factory.farmers ?? []).map(industrialFarmerToPublicFarmer),
   };
 }
 

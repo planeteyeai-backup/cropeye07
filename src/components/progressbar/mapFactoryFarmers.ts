@@ -2,16 +2,25 @@ import type { PublicFactoryFarmer } from './factoryProgressTypes';
 import type { FarmerProgressConfig } from './progressData';
 import { YIELD_TARGET_TON } from './progressData';
 import { WEEKS_PER_SECTION } from './progressConstants';
+import {
+  pickChartYieldReading,
+  YIELD_TON_MAX,
+} from './yieldReadingUtils';
+
+function parseYieldNumber(value: unknown): number | null {
+  if (value == null || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
 
 function normalizeYieldTons(value: number | null | undefined): number {
-  if (value == null || !Number.isFinite(Number(value))) {
-    return 0;
-  }
-  return Math.min(100, Math.max(0, Number(value)));
+  const parsed = parseYieldNumber(value);
+  if (parsed == null) return 0;
+  return Math.min(100, Math.max(0, parsed));
 }
 
 export function farmerHasYieldData(farmer: PublicFactoryFarmer): boolean {
-  return farmer.yield != null && Number.isFinite(Number(farmer.yield));
+  return parseYieldNumber(farmer.yield) != null;
 }
 
 export function weeksDoneFromYieldReadings(
@@ -33,9 +42,7 @@ export function weeksDoneFromPlantation(
   const start = new Date(plantationDate);
   if (Number.isNaN(start.getTime())) return [0, 0, 0, 0];
 
-  const weeksElapsed = Math.floor(
-    (Date.now() - start.getTime()) / (7 * 24 * 60 * 60 * 1000),
-  );
+  const weeksElapsed = weeksElapsedFromPlantation(plantationDate);
   const capped = Math.min(Math.max(weeksElapsed, 0), WEEKS_PER_SECTION * 4);
   return [
     Math.min(capped, WEEKS_PER_SECTION),
@@ -45,15 +52,39 @@ export function weeksDoneFromPlantation(
   ];
 }
 
+export function weeksElapsedFromPlantation(
+  plantationDate: string | null | undefined,
+): number {
+  if (!plantationDate) return 0;
+  const start = new Date(plantationDate);
+  if (Number.isNaN(start.getTime())) return 0;
+  return Math.max(
+    0,
+    Math.floor((Date.now() - start.getTime()) / (7 * 24 * 60 * 60 * 1000)),
+  );
+}
+
+/** Same growth curve as the progress timeline when API yield is missing. */
+export function estimatedTonsFromPlantation(
+  plantationDate: string | null | undefined,
+  baseYield = 2,
+): number {
+  const weeks = weeksElapsedFromPlantation(plantationDate);
+  return Math.min(100, Math.max(0, baseYield + weeks * 0.08));
+}
+
 export function mapApiFarmerToProgressConfig(
   farmer: PublicFactoryFarmer,
 ): FarmerProgressConfig {
-  const tons = normalizeYieldTons(farmer.yield);
+  const hasApi = farmerHasYieldData(farmer);
+  const apiTons = hasApi ? normalizeYieldTons(farmer.yield) : 0;
+  const baseYield = Math.max(2, apiTons > 0 ? apiTons * 0.025 : 2);
+  const tons = apiTons;
   const readingDate =
     farmer.date ??
-    (farmerHasYieldData(farmer) ? farmer.plantation_date : null);
+    (hasApi ? farmer.plantation_date : farmer.plantation_date);
   const yieldReadings =
-    farmerHasYieldData(farmer) && readingDate
+    hasApi && readingDate
       ? [{ yield: Number(farmer.yield), date: readingDate }]
       : undefined;
 
@@ -61,17 +92,63 @@ export function mapApiFarmerToProgressConfig(
     farmerId: String(farmer.id),
     farmerName: farmer.farmer_name?.trim() || `Farmer ${farmer.id}`,
     tons,
-    hasYieldData: farmerHasYieldData(farmer),
-    baseYield: Math.max(2, tons * 0.025),
+    hasYieldData: hasApi,
+    baseYield,
     weeksDonePerSection: yieldReadings
       ? weeksDoneFromYieldReadings(yieldReadings)
       : weeksDoneFromPlantation(farmer.plantation_date),
     plantationDate: farmer.plantation_date,
     yieldReadings,
-    yieldDate: farmer.date ?? null,
+    yieldDate: farmer.date ?? farmer.plantation_date ?? null,
     phoneNumber: farmer.phone_number ?? null,
   };
 }
+
+/** Chart farmers — only when API (or merged industrial) returned a yield reading. */
+export function pickFarmersForChart(
+  configs: FarmerProgressConfig[],
+): FarmerProgressConfig[] {
+  return configs.filter(
+    (cfg) => cfg.hasYieldData !== false && cfg.tons > 0,
+  );
+}
+
+/**
+ * Bubble chart — only farmers with weekly industrial SEF readings.
+ * Re-resolves tons from the newest industrial value (not public single-yield).
+ */
+export function pickFarmersForIndustrialChart(
+  configs: FarmerProgressConfig[],
+): FarmerProgressConfig[] {
+  const chartFarmers: FarmerProgressConfig[] = [];
+
+  for (const cfg of configs) {
+    const readings = cfg.yieldReadings;
+    if (!readings?.length) continue;
+
+    const latest = pickChartYieldReading(readings);
+    if (!latest || latest.yield <= 0) continue;
+
+    chartFarmers.push({
+      ...cfg,
+      tons: Math.min(latest.yield, YIELD_TON_MAX),
+      yieldDate: latest.date,
+      hasYieldData: true,
+    });
+  }
+
+  return chartFarmers;
+}
+
+export function countFarmersWithApiYield(
+  configs: FarmerProgressConfig[],
+): number {
+  return configs.filter((cfg) => cfg.hasYieldData !== false && cfg.tons > 0)
+    .length;
+}
+
+/** @deprecated use pickFarmersForChart */
+export const pickFarmersWithApiYield = pickFarmersForChart;
 
 /** Bubble chart — all farmers with yield below the 75 ton target. */
 export function pickUnderTargetChartFarmers(

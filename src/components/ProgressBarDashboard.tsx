@@ -115,7 +115,10 @@ const ProgressBarDashboard: React.FC<{ navKey?: number }> = ({ navKey = 0 }) => 
           <div className="p-4 sm:p-6">
             {loading ? (
               <div className="rounded-xl border border-dashed border-slate-200 bg-white px-4 py-16 text-center text-sm text-slate-500">
-                Loading factories and farmers…
+                {/* Loading yield data from SEF API… */}
+                <span className="mt-2 block text-xs text-slate-400">
+                  {/* First load can take up to 2 minutes for large factories. */}
+                </span>
               </div>
             ) : (
               <ProgressBar

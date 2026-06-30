@@ -13,6 +13,7 @@ import type { IndustrialYieldByOwnerResponse, IndustrialYieldFactory } from './i
 import {
   industrialFactoryToPublicFactory,
   findIndustrialFarmerMatch,
+  mapIndustrialFarmerToProgressConfig,
   mergePublicFarmerWithIndustrialYield,
 } from './mapIndustrialYield';
 import {
@@ -163,12 +164,19 @@ async function fetchIndustrialYieldFactories(
 async function loadSugarFactories(ownerId: number): Promise<{
   factories: PublicFactory[];
   industrialFactories: IndustrialYieldFactory[] | null;
+  industrialLoadError: string | null;
 }> {
   const industrialFactories = await fetchIndustrialYieldFactories(ownerId);
+  const industrialLoadError =
+    industrialFactories == null
+      ? 'Could not load yield data from SEF industrial API. Live dots may be empty until this loads.'
+      : null;
+
   if (industrialFactories) {
     return {
       factories: industrialFactories.map(industrialFactoryToPublicFactory),
       industrialFactories,
+      industrialLoadError: null,
     };
   }
 
@@ -205,6 +213,7 @@ async function loadSugarFactories(ownerId: number): Promise<{
   return {
     factories: await enrichFactoriesWithFarmers(ownerId, merged),
     industrialFactories: null,
+    industrialLoadError,
   };
 }
 
@@ -213,6 +222,10 @@ async function fetchFactoryFarmers(
   factory: PublicFactory,
   publicList: PublicFactory[],
 ): Promise<PublicFactoryFarmer[]> {
+  if (factory.farmers?.length) {
+    return factory.farmers;
+  }
+
   try {
     const parsed = await fetchFactoryByName(ownerId, factory.factory_name);
     if (parsed && Array.isArray(parsed.farmers)) {
@@ -248,6 +261,9 @@ export function useFactoryProgress(initialFactoryId?: FactoryId) {
   const [industrialFactories, setIndustrialFactories] = useState<
     IndustrialYieldFactory[] | null
   >(null);
+  const [industrialLoadError, setIndustrialLoadError] = useState<string | null>(
+    null,
+  );
   const factoriesRef = useRef<PublicFactory[]>([]);
   factoriesRef.current = factories;
 
@@ -279,6 +295,7 @@ export function useFactoryProgress(initialFactoryId?: FactoryId) {
         setOwnerIdUsed(result.ownerIdUsed);
         setFactories(result.factories);
         setIndustrialFactories(result.industrialFactories);
+        setIndustrialLoadError(result.industrialLoadError);
 
         try {
           const rawPublicList = await fetchFactoryList(result.ownerIdUsed);
@@ -324,6 +341,7 @@ export function useFactoryProgress(initialFactoryId?: FactoryId) {
             setOwnerIdUsed(fallback.ownerIdUsed);
             setFactories(fallback.factories);
             setIndustrialFactories(fallback.industrialFactories);
+            setIndustrialLoadError(fallback.industrialLoadError);
             if (fallback.factories.length === 0) {
               setError('No sugar factories found for this owner.');
               setSelectedFactoryId('');
@@ -410,17 +428,65 @@ export function useFactoryProgress(initialFactoryId?: FactoryId) {
   );
 
   const farmerConfigs = useMemo<FarmerProgressConfig[]>(() => {
-    const industrialFactory = industrialFactories?.find(
+    const selectedFactory = factories.find(
       (item) => String(item.factory_id) === selectedFactoryId,
     );
-    const industrialFarmers = industrialFactory?.farmers ?? [];
+
+    const industrialFactory =
+      industrialFactories?.find(
+        (item) => String(item.factory_id) === selectedFactoryId,
+      ) ??
+      (selectedFactory?.factory_name
+        ? industrialFactories?.find(
+            (item) =>
+              item.factory_name?.trim().toLowerCase() ===
+              selectedFactory.factory_name.trim().toLowerCase(),
+          )
+        : undefined);
+
+    if (industrialFactory?.farmers?.length) {
+      return industrialFactory.farmers.map(mapIndustrialFarmerToProgressConfig);
+    }
+
+    const allIndustrialFarmers =
+      industrialFactories?.flatMap((factory) => factory.farmers ?? []) ?? [];
+    const industrialFarmers =
+      industrialFactory?.farmers?.length
+        ? industrialFactory.farmers
+        : allIndustrialFarmers;
 
     return farmers.map((farmer) => {
       const config = mapApiFarmerToProgressConfig(farmer);
       const match = findIndustrialFarmerMatch(farmer, industrialFarmers);
       return mergePublicFarmerWithIndustrialYield(config, match);
     });
-  }, [industrialFactories, selectedFactoryId, farmers]);
+  }, [industrialFactories, selectedFactoryId, farmers, factories]);
+
+  useEffect(() => {
+    if (loading || industrialFactories != null || !ownerIdUsed) return;
+
+    let cancelled = false;
+
+    const retryIndustrial = async () => {
+      const factories = await fetchIndustrialYieldFactories(ownerIdUsed);
+      if (cancelled || !factories) return;
+      setIndustrialFactories(factories);
+      setIndustrialLoadError(null);
+      setFactories((prev) => {
+        const byId = new Map(prev.map((f) => [String(f.factory_id), f]));
+        for (const industrial of factories) {
+          const mapped = industrialFactoryToPublicFactory(industrial);
+          byId.set(String(mapped.factory_id), mapped);
+        }
+        return [...byId.values()];
+      });
+    };
+
+    void retryIndustrial();
+    return () => {
+      cancelled = true;
+    };
+  }, [loading, industrialFactories, ownerIdUsed]);
 
   const chartFarmerConfigs = useMemo(
     () => pickChartFarmers(farmerConfigs, 3),
@@ -433,11 +499,13 @@ export function useFactoryProgress(initialFactoryId?: FactoryId) {
     loading: loading || farmersLoading,
     factoriesLoading: loading,
     farmersLoading,
-    error: error ?? farmersError,
+    error: error ?? farmersError ?? industrialLoadError,
     selectedFactoryId,
     setSelectedFactoryId,
     selectedFactory,
     farmerConfigs,
     chartFarmerConfigs,
+    industrialLoadError,
+    hasIndustrialYield: industrialFactories != null,
   };
 }
