@@ -52,6 +52,7 @@ import {
 } from "../api"; // Authenticated Django api + FastAPI events api
 import { MANAGER_FIELD_OFFICERS_CACHE_KEY } from "../services/prefetchService";
 import { useAppContext } from "../context/AppContext";
+import MapCropStatusOverlay from "./MapCropStatusOverlay";
 
 // Constants (same as FarmerDashboard)
 const BASE_URL = "https://events-cropeye.up.railway.app";
@@ -129,6 +130,8 @@ interface Metrics {
   expectedYield: number | null;
   daysToHarvest: number | null;
   growthStage: string | null;
+  plantationDate: string | null;
+  plantationType: string | null;
   soilPH: number | null;
   organicCarbonDensity: number | null;
   actualYield: number | null;
@@ -150,6 +153,44 @@ interface PieChartWithNeedleProps {
 const MANAGER_OFFICERS_TTL_MS = 5 * 60 * 1000;
 
 type TimePeriod = "daily" | "weekly" | "monthly" | "yearly";
+
+function formatPlantationDateLabel(raw: unknown): string | null {
+  if (raw == null || raw === "") return null;
+  const date = new Date(String(raw));
+  if (Number.isNaN(date.getTime())) return String(raw);
+  return date.toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function extractPlantationInfo(source: any): {
+  plantationDate: string | null;
+  plantationType: string | null;
+} {
+  if (!source) {
+    return { plantationDate: null, plantationType: null };
+  }
+
+  const plantationDate = formatPlantationDateLabel(
+    source.plantation_date ??
+      source.planting_date ??
+      source.crop_type?.plantation_date,
+  );
+
+  const plantationTypeRaw =
+    source.plantation_type_display ??
+    source.plantation_type ??
+    source.planting_method ??
+    source.crop_type?.plantation_type_display ??
+    source.crop_type?.plantation_type;
+
+  return {
+    plantationDate,
+    plantationType: plantationTypeRaw ? String(plantationTypeRaw) : null,
+  };
+}
 
 const ManagerFarmDash: React.FC = () => {
   // const center: [number, number] = [17.5789, 75.053]; // Unused - using mapCenter state instead
@@ -212,6 +253,8 @@ const ManagerFarmDash: React.FC = () => {
     expectedYield: null,
     daysToHarvest: null,
     growthStage: null,
+    plantationDate: null,
+    plantationType: null,
     soilPH: null,
     organicCarbonDensity: null,
     actualYield: null,
@@ -245,6 +288,29 @@ const ManagerFarmDash: React.FC = () => {
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
   }, []);
+
+  const selectedPlotRecord = React.useMemo(() => {
+    if (!selectedPlotId || !selectedFarmerId) return null;
+    const farmer = farmersForSelectedOfficer.find(
+      (f) =>
+        String(f.id || f.farmer_id || f.farmerId) === String(selectedFarmerId),
+    );
+    return (
+      farmer?.plots?.find(
+        (p: any) => String(p.fastapi_plot_id) === String(selectedPlotId),
+      ) ?? null
+    );
+  }, [selectedPlotId, selectedFarmerId, farmersForSelectedOfficer]);
+
+  const selectedPlotPlantation = React.useMemo(
+    () => extractPlantationInfo(selectedPlotRecord),
+    [selectedPlotRecord],
+  );
+
+  const displayPlantationDate =
+    metrics.plantationDate ?? selectedPlotPlantation.plantationDate;
+  const displayPlantationType =
+    metrics.plantationType ?? selectedPlotPlantation.plantationType;
 
   // Fetch field officers on mount (cache-first; login prefetch warms the cache).
   useEffect(() => {
@@ -816,6 +882,7 @@ const ManagerFarmDash: React.FC = () => {
             currentPlotData?.brix_sugar?.sugar_yield?.min ??
               currentPlotData?.sugar_yield_min,
           ),
+          ...extractPlantationInfo(currentPlotData),
         }));
       }
 
@@ -1730,19 +1797,12 @@ const ManagerFarmDash: React.FC = () => {
                 <Maximize2 className="w-4 h-4" />
               </div>
 
-              {/* Centered Growth Stage Indicator */}
-              <div className="absolute top-10 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-10 pointer-events-none">
-                <div className="bg-black/20 backdrop-blur-sm rounded-2xl px-6 py-4 border border-white/30 shadow-2xl">
-                  <div className="flex items-center gap-3">
-                    <div className="w-3 h-3 rounded-full bg-green-500 animate-pulse shadow-lg shadow-green-500/50" />
-                    <div className="text-center">
-                      <div className="text-white font-bold text-lg drop-shadow-lg">
-                        {metrics.growthStage ?? "Loading..."}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
+              <MapCropStatusOverlay
+                growthStage={metrics.growthStage}
+                plantationDate={displayPlantationDate}
+                plantationType={displayPlantationType}
+                loading={loadingData}
+              />
 
               <MapContainer
                 key={mapKey}
