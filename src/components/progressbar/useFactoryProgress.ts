@@ -169,7 +169,7 @@ async function loadSugarFactories(ownerId: number): Promise<{
   const industrialFactories = await fetchIndustrialYieldFactories(ownerId);
   const industrialLoadError =
     industrialFactories == null
-      ? 'Could not load yield data from SEF industrial API. Live dots may be empty until this loads.'
+      ? ''
       : null;
 
   if (industrialFactories) {

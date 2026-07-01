@@ -2772,34 +2772,40 @@ const OwnerFarmDash: React.FC = () => {
             const cciStyle = cropConditionStyleFromCci(
               metrics.cropConditionValue,
             );
+            const showCciValue =
+              selectedPlotId &&
+              !loadingSections.waterStress &&
+              metrics.cropConditionValue != null;
+
             return (
               <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-emerald-200 hover:shadow-xl transition-all duration-300">
                 <div className="flex items-center justify-between mb-2">
                   <Sprout className="w-6 h-6 shrink-0 text-emerald-600" />
-                  <div className="text-right min-w-0 flex-1 ml-2">
-                    <div
-                      className="text-sm font-bold leading-snug"
-                      style={{ color: cciStyle?.textColor ?? '#1f2937' }}
-                    >
+                  <div className="text-right min-w-0">
+                    <div className="text-2xl font-bold text-gray-800">
                       {!selectedPlotId ? (
                         "-"
                       ) : loadingSections.waterStress ? (
-                        <Loader2 className="w-5 h-5 animate-spin inline-block text-gray-400" />
+                        <Loader2 className="w-5 h-5 animate-spin inline-block" />
+                      ) : showCciValue ? (
+                        metrics.cropConditionValue!.toFixed(1)
                       ) : (
-                        cciStyle?.label ?? metrics.cropConditionLabel ?? "-"
+                        "-"
                       )}
                     </div>
-                    {!loadingSections.waterStress &&
-                      metrics.cropConditionValue != null && (
-                        <div
-                          className="text-[10px] font-semibold mt-0.5"
-                          style={{
-                            color: cciStyle?.subtextColor ?? '#0d9488',
-                          }}
-                        >
-                          CCI {metrics.cropConditionValue.toFixed(1)}
-                        </div>
-                      )}
+                    <div
+                      className="text-xs font-semibold leading-tight max-w-[7.5rem] ml-auto truncate"
+                      style={{ color: cciStyle?.textColor ?? "#6b7280" }}
+                      title={
+                        showCciValue
+                          ? (cciStyle?.label ?? metrics.cropConditionLabel ?? "")
+                          : undefined
+                      }
+                    >
+                      {!selectedPlotId || loadingSections.waterStress
+                        ? "CCI"
+                        : (cciStyle?.label ?? metrics.cropConditionLabel ?? "-")}
+                    </div>
                   </div>
                 </div>
                 <p className="text-xs text-gray-600 font-medium">
