@@ -1545,7 +1545,7 @@ const FarmerDashboard: React.FC = () => {
               </div>
               <p className="text-xs text-gray-600">
                 {t("farmerDashboard.card.stressEvents", {
-                  defaultValue: "pest Stress Events",
+                  defaultValue: "Stress Events",
                 })}
               </p>
             </div>
