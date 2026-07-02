@@ -15,9 +15,31 @@ import {
 import { checkAndRefreshToken, isTokenExpired } from "./utils/tokenManager";
 
 // Set base URL for backend (use .env VITE_API_BASE_URL or new Render backend)
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ||
-  "https://cropeye-backendd.up.railway.app/api";
+const DEFAULT_API_BASE_URL = "https://cropeye-backendd.up.railway.app/api";
+
+function resolveApiBaseUrl(): string {
+  const fromEnv = String(import.meta.env.VITE_API_BASE_URL ?? "").trim();
+  if (/^https?:\/\//i.test(fromEnv)) {
+    const normalized = fromEnv.replace(/\/$/, "");
+    // Vercel has no Django proxy — cropeye.ai/api would return SPA HTML.
+    if (/cropeye\.ai|vercel\.app/i.test(normalized)) {
+      return DEFAULT_API_BASE_URL;
+    }
+    if (typeof window !== "undefined") {
+      try {
+        if (new URL(normalized).origin === window.location.origin) {
+          return DEFAULT_API_BASE_URL;
+        }
+      } catch {
+        return DEFAULT_API_BASE_URL;
+      }
+    }
+    return normalized;
+  }
+  return DEFAULT_API_BASE_URL;
+}
+
+const API_BASE_URL = resolveApiBaseUrl();
 
 // KML/GeoJSON API URL
 const KML_API_URL = "http://192.168.41.51";
@@ -33,13 +55,7 @@ const SEF_PRODUCTION_URL = "https://sef-cropeye.up.railway.app";
 
 function resolveSefFieldApiBaseUrl(): string {
   if (import.meta.env.DEV) return "/api/sef";
-
-  const fromEnv = String(import.meta.env.VITE_DEV_FIELD_API_URL ?? "").trim();
-  // Production must use an absolute URL — relative paths like /api/sef only work in Vite dev.
-  if (/^https?:\/\//i.test(fromEnv)) {
-    return fromEnv.replace(/\/$/, "");
-  }
-
+  // Production: always Railway SEF. Vercel env like /api/sef or cropeye.ai would return HTML.
   return SEF_PRODUCTION_URL;
 }
 
@@ -1941,98 +1957,102 @@ export type FactoryApiResult =
   | { ok: true; data: unknown }
   | { ok: false; data: unknown };
 
+const PUBLIC_FACTORY_FARMERS_TIMEOUT_MS = 120_000;
+
+function isHtmlDocumentBody(text: string): boolean {
+  const trimmed = text.trim().toLowerCase();
+  return trimmed.startsWith("<!doctype html") || trimmed.startsWith("<html");
+}
+
+/** Direct GET with JSON parse — rejects Vercel SPA HTML mistaken for API data. */
+async function fetchJsonGet(
+  url: string,
+  timeoutMs: number,
+): Promise<FactoryApiResult> {
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const contentType = response.headers.get("content-type") ?? "";
+    const raw = await response.text();
+
+    if (!response.ok) {
+      let message = `HTTP ${response.status}`;
+      try {
+        const errBody = JSON.parse(raw) as { error?: string; detail?: string };
+        message = errBody.error ?? errBody.detail ?? message;
+      } catch {
+        // keep status message
+      }
+      return { ok: false, data: { error: message } };
+    }
+
+    if (contentType.includes("text/html") || isHtmlDocumentBody(raw)) {
+      return {
+        ok: false,
+        data: {
+          error:
+            "Received website HTML instead of API JSON. On live, APIs must call Railway directly (not cropeye.ai).",
+        },
+      };
+    }
+
+    return { ok: true, data: JSON.parse(raw) as unknown };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Request failed";
+    return { ok: false, data: { error: message } };
+  }
+}
+
+function resolveSefSnapshotUrl(ownerId: number): string {
+  const query = new URLSearchParams({ owner_id: String(ownerId) }).toString();
+  if (import.meta.env.DEV) {
+    return `/api/sef/industrial_yield_by_owner_snapshot?${query}`;
+  }
+  return `${SEF_PRODUCTION_URL}/industrial_yield_by_owner_snapshot?${query}`;
+}
+
+function resolvePublicFactoryFarmersUrl(
+  ownerId: number,
+  factoryName?: string,
+): string {
+  const params: Record<string, string> = { owner_id: String(ownerId) };
+  if (factoryName?.trim()) {
+    params.name = factoryName.trim();
+  }
+  const query = new URLSearchParams(params).toString();
+  return `${API_BASE_URL}/users/public-factory-farmers/?${query}`;
+}
+
 /** Public: farmers for sugar factories under an owner. */
 export async function fetchPublicFactoryFarmers(
   ownerId: number,
   factoryName?: string,
 ): Promise<FactoryApiResult> {
-  const params: Record<string, string | number> = { owner_id: ownerId };
-  if (factoryName?.trim()) {
-    params.name = factoryName.trim();
-  }
-
-  try {
-    const response = await publicApi.get("/users/public-factory-farmers/", {
-      params,
-    });
-    return { ok: true, data: response.data };
-  } catch (error: any) {
-    return {
-      ok: false,
-      data:
-        error.response?.data ??
-        ({ error: error.message ?? "Failed to load factory farmers" } as const),
-    };
-  }
+  return fetchJsonGet(
+    resolvePublicFactoryFarmersUrl(ownerId, factoryName),
+    PUBLIC_FACTORY_FARMERS_TIMEOUT_MS,
+  );
 }
 
 /** Industrial yield snapshot only — SEF `/industrial_yield_by_owner_snapshot`. */
 export async function fetchIndustrialYieldByOwner(
   ownerId: number,
 ): Promise<FactoryApiResult> {
-  const params = { owner_id: ownerId };
-  const query = new URLSearchParams({
-    owner_id: String(ownerId),
-  }).toString();
-  const snapshotUrl = `${SEF_PRODUCTION_URL}/industrial_yield_by_owner_snapshot?${query}`;
-
-  try {
-    const response = await sefApi.get(
-      "/industrial_yield_by_owner_snapshot",
-      {
-        params,
-        timeout: SEF_INDUSTRIAL_YIELD_SNAPSHOT_TIMEOUT_MS,
-      },
-    );
-    if (hasIndustrialYieldFactories(response.data)) {
-      return { ok: true, data: response.data };
-    }
+  const result = await fetchJsonGet(
+    resolveSefSnapshotUrl(ownerId),
+    SEF_INDUSTRIAL_YIELD_SNAPSHOT_TIMEOUT_MS,
+  );
+  if (!result.ok) return result;
+  if (!hasIndustrialYieldFactories(result.data)) {
     return {
       ok: false,
       data: { error: "Industrial yield snapshot returned no factories" },
     };
-  } catch (error: unknown) {
-    const axiosErr = error as {
-      message?: string;
-      code?: string;
-      response?: { data?: { error?: string; detail?: string } };
-    };
-
-    // Production fallback: direct fetch to SEF when axios base URL is misconfigured.
-    if (!axiosErr.response) {
-      try {
-        const res = await fetch(snapshotUrl, {
-          method: "GET",
-          headers: { Accept: "application/json" },
-          signal: AbortSignal.timeout(SEF_INDUSTRIAL_YIELD_SNAPSHOT_TIMEOUT_MS),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (hasIndustrialYieldFactories(data)) {
-            return { ok: true, data };
-          }
-        }
-      } catch {
-        // use axios error below
-      }
-    }
-
-    if (import.meta.env.DEV) {
-      console.warn(
-        "[SEF] industrial_yield_by_owner_snapshot failed:",
-        axiosErr.message ?? axiosErr.code,
-      );
-    }
-    const apiMsg =
-      axiosErr.response?.data?.error ??
-      axiosErr.response?.data?.detail ??
-      axiosErr.message ??
-      "Failed to load industrial yield snapshot";
-    return {
-      ok: false,
-      data: { error: String(apiMsg) },
-    };
   }
+  return result;
 }
 
 /** Authenticated: industries accessible to the logged-in user. */

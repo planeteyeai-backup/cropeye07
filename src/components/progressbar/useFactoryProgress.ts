@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { fetchIndustrialYieldByOwner } from '../../api';
+import { fetchIndustrialYieldByOwner, fetchPublicFactoryFarmers } from '../../api';
 import { getUserData, getUserRole, isPlanetEyeDemoUser } from '../../utils/auth';
 import type { FactoryId, PublicFactory, PublicFactoryFarmer } from './factoryProgressTypes';
 import type { IndustrialYieldByOwnerResponse, IndustrialYieldFactory, IndustrialYieldFarmer } from './industrialYieldTypes';
 import { loadPublicFactoryFarmersForFactory } from './loadPublicFactoryFarmersForFactory';
+import { parseFactoryListResponse } from './parseFactoryApiResponse';
 import { mergePublicAndIndustrialFarmerConfigs } from './mergeFactoryFarmerConfigs';
 import {
   industrialFactoryToPublicFactory,
@@ -79,16 +80,31 @@ async function fetchIndustrialYieldFactories(
   }
 }
 
+/** Factory dropdown from Django public-factory-farmers when SEF snapshot is down. */
+async function loadPublicSugarFactories(ownerId: number): Promise<PublicFactory[]> {
+  try {
+    const { ok, data } = await fetchPublicFactoryFarmers(ownerId);
+    if (!ok) return [];
+    return parseFactoryListResponse(data).map((factory) => ({
+      factory_id: factory.factory_id,
+      factory_name: factory.factory_name,
+      farmers_count: factory.farmers_count,
+      farmers: [],
+    }));
+  } catch {
+    return [];
+  }
+}
+
 async function loadSugarFactories(ownerId: number): Promise<{
   factories: PublicFactory[];
   industrialFactories: IndustrialYieldFactory[] | null;
   industrialLoadError: string | null;
 }> {
-  const industrialFactories = await fetchIndustrialYieldFactories(ownerId);
-  const industrialLoadError =
-    industrialFactories == null
-      ? 'Could not load industrial yield snapshot from SEF. Crop Growth and Chart require industrial_yield_by_owner_snapshot.'
-      : null;
+  const [industrialFactories, publicFactories] = await Promise.all([
+    fetchIndustrialYieldFactories(ownerId),
+    loadPublicSugarFactories(ownerId),
+  ]);
 
   if (industrialFactories) {
     return {
@@ -98,10 +114,20 @@ async function loadSugarFactories(ownerId: number): Promise<{
     };
   }
 
+  if (publicFactories.length > 0) {
+    return {
+      factories: publicFactories,
+      industrialFactories: null,
+      industrialLoadError:
+        'SEF yield snapshot is unavailable. Industries loaded from public API — yield dots need industrial_yield_by_owner_snapshot.',
+    };
+  }
+
   return {
     factories: [],
     industrialFactories: null,
-    industrialLoadError,
+    industrialLoadError:
+      'Could not load factories from SEF or public-factory-farmers. Check network or set VITE_PROGRESS_OWNER_ID=2476 on deploy.',
   };
 }
 
@@ -333,7 +359,7 @@ export function useFactoryProgress(initialFactoryId?: FactoryId) {
     loading,
     factoriesLoading: loading,
     farmersLoading,
-    error: error ?? industrialLoadError,
+    error,
     selectedFactoryId,
     setSelectedFactoryId,
     selectedFactory,

@@ -30,6 +30,7 @@ const ProgressBarDashboard: React.FC<{ navKey?: number }> = ({ navKey = 0 }) => 
     loading,
     farmersLoading,
     error,
+    industrialLoadError,
     selectedFactoryId,
     setSelectedFactoryId,
     selectedFactory,
@@ -97,6 +98,9 @@ const ProgressBarDashboard: React.FC<{ navKey?: number }> = ({ navKey = 0 }) => 
 
                 {error && (
                   <p className="mt-3 text-sm text-red-600">{error}</p>
+                )}
+                {!error && industrialLoadError && (
+                  <p className="mt-3 text-sm text-amber-700">{industrialLoadError}</p>
                 )}
                 {selectedFactory && !loading && !farmersLoading && (
                   <p className="mt-2 text-xs text-slate-500">

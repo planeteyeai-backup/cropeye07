@@ -37,10 +37,7 @@ const ProgressGridDashboard: React.FC = () => {
     [chartFarmerConfigs],
   );
 
-  const chartLoading =
-    factoriesLoading ||
-    farmersLoading ||
-    (!hasIndustrialYield && !industrialLoadError);
+  const chartLoading = factoriesLoading || farmersLoading;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 p-3 sm:p-4">
@@ -75,6 +72,9 @@ const ProgressGridDashboard: React.FC = () => {
                 />
                 {error && (
                   <p className="mt-3 text-sm text-red-600">{error}</p>
+                )}
+                {!error && industrialLoadError && (
+                  <p className="mt-3 text-sm text-amber-700">{industrialLoadError}</p>
                 )}
                 {selectedFactory && !loading && (
                   <p className="mt-2 text-xs text-slate-500">
