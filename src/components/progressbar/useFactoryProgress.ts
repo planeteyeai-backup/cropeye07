@@ -66,17 +66,23 @@ function extractFetchError(err: unknown): string {
 
 async function fetchIndustrialYieldFactories(
   ownerId: number,
-): Promise<IndustrialYieldFactory[] | null> {
+): Promise<{ factories: IndustrialYieldFactory[] | null; error: string | null }> {
   try {
     const { ok, data } = await fetchIndustrialYieldByOwner(ownerId);
-    if (!ok) return null;
+    if (!ok) {
+      const err = (data as { error?: string })?.error ?? "SEF snapshot failed";
+      return { factories: null, error: String(err) };
+    }
     const payload = data as IndustrialYieldByOwnerResponse;
     if (!Array.isArray(payload?.factories) || payload.factories.length === 0) {
-      return null;
+      return { factories: null, error: "Industrial yield snapshot returned no factories" };
     }
-    return payload.factories;
-  } catch {
-    return null;
+    return { factories: payload.factories, error: null };
+  } catch (err) {
+    return {
+      factories: null,
+      error: err instanceof Error ? err.message : "Failed to load industrial yield snapshot",
+    };
   }
 }
 
@@ -101,10 +107,11 @@ async function loadSugarFactories(ownerId: number): Promise<{
   industrialFactories: IndustrialYieldFactory[] | null;
   industrialLoadError: string | null;
 }> {
-  const [industrialFactories, publicFactories] = await Promise.all([
+  const [industrialResult, publicFactories] = await Promise.all([
     fetchIndustrialYieldFactories(ownerId),
     loadPublicSugarFactories(ownerId),
   ]);
+  const industrialFactories = industrialResult.factories;
 
   if (industrialFactories) {
     return {
@@ -119,6 +126,7 @@ async function loadSugarFactories(ownerId: number): Promise<{
       factories: publicFactories,
       industrialFactories: null,
       industrialLoadError:
+        industrialResult.error ??
         'SEF yield snapshot is unavailable. Industries loaded from public API — yield dots need industrial_yield_by_owner_snapshot.',
     };
   }
@@ -127,6 +135,7 @@ async function loadSugarFactories(ownerId: number): Promise<{
     factories: [],
     industrialFactories: null,
     industrialLoadError:
+      industrialResult.error ??
       'Could not load factories from SEF or public-factory-farmers. Check network or set VITE_PROGRESS_OWNER_ID=2476 on deploy.',
   };
 }
@@ -189,12 +198,14 @@ export function useFactoryProgress(initialFactoryId?: FactoryId) {
     '',
   );
   const [farmersLoading, setFarmersLoading] = useState(false);
+  const [industrialYieldLoading, setIndustrialYieldLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
 
     const loadFactories = async () => {
       setLoading(true);
+      setIndustrialYieldLoading(true);
       setError(null);
 
       const tryOwner = async (id: number) => {
@@ -258,7 +269,10 @@ export function useFactoryProgress(initialFactoryId?: FactoryId) {
           setIndustrialFactories(null);
         }
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          setIndustrialYieldLoading(false);
+        }
       }
     };
 
@@ -359,6 +373,7 @@ export function useFactoryProgress(initialFactoryId?: FactoryId) {
     loading,
     factoriesLoading: loading,
     farmersLoading,
+    industrialYieldLoading,
     error,
     selectedFactoryId,
     setSelectedFactoryId,

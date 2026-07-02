@@ -1964,6 +1964,15 @@ function isHtmlDocumentBody(text: string): boolean {
   return trimmed.startsWith("<!doctype html") || trimmed.startsWith("<html");
 }
 
+function createFetchAbortSignal(timeoutMs: number): AbortSignal {
+  if (typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(timeoutMs);
+  }
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), timeoutMs);
+  return controller.signal;
+}
+
 /** Direct GET with JSON parse — rejects Vercel SPA HTML mistaken for API data. */
 async function fetchJsonGet(
   url: string,
@@ -1973,7 +1982,7 @@ async function fetchJsonGet(
     const response = await fetch(url, {
       method: "GET",
       headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: createFetchAbortSignal(timeoutMs),
     });
     const contentType = response.headers.get("content-type") ?? "";
     const raw = await response.text();
@@ -2008,10 +2017,18 @@ async function fetchJsonGet(
 
 function resolveSefSnapshotUrl(ownerId: number): string {
   const query = new URLSearchParams({ owner_id: String(ownerId) }).toString();
-  if (import.meta.env.DEV) {
-    return `/api/sef/industrial_yield_by_owner_snapshot?${query}`;
-  }
   return `${SEF_PRODUCTION_URL}/industrial_yield_by_owner_snapshot?${query}`;
+}
+
+function resolveSefSnapshotUrls(ownerId: number): string[] {
+  const direct = resolveSefSnapshotUrl(ownerId);
+  if (import.meta.env.DEV) {
+    const query = new URLSearchParams({ owner_id: String(ownerId) }).toString();
+    const proxied = `/api/sef/industrial_yield_by_owner_snapshot?${query}`;
+    // Try Vite proxy first locally; fall back to direct Railway if proxy is down.
+    return [proxied, direct];
+  }
+  return [direct];
 }
 
 function resolvePublicFactoryFarmersUrl(
@@ -2041,18 +2058,31 @@ export async function fetchPublicFactoryFarmers(
 export async function fetchIndustrialYieldByOwner(
   ownerId: number,
 ): Promise<FactoryApiResult> {
-  const result = await fetchJsonGet(
-    resolveSefSnapshotUrl(ownerId),
-    SEF_INDUSTRIAL_YIELD_SNAPSHOT_TIMEOUT_MS,
-  );
-  if (!result.ok) return result;
-  if (!hasIndustrialYieldFactories(result.data)) {
-    return {
-      ok: false,
-      data: { error: "Industrial yield snapshot returned no factories" },
-    };
+  const urls = resolveSefSnapshotUrls(ownerId);
+  let lastError = "Failed to load industrial yield snapshot";
+
+  for (const url of urls) {
+    if (import.meta.env.DEV) {
+      console.info("[CROPEYE] SEF industrial yield fetch:", url);
+    }
+
+    const result = await fetchJsonGet(
+      url,
+      SEF_INDUSTRIAL_YIELD_SNAPSHOT_TIMEOUT_MS,
+    );
+    if (!result.ok) {
+      const err = (result.data as { error?: string })?.error;
+      if (err) lastError = err;
+      continue;
+    }
+    if (!hasIndustrialYieldFactories(result.data)) {
+      lastError = "Industrial yield snapshot returned no factories";
+      continue;
+    }
+    return result;
   }
-  return result;
+
+  return { ok: false, data: { error: lastError } };
 }
 
 /** Authenticated: industries accessible to the logged-in user. */

@@ -11,6 +11,7 @@ const ProgressGridDashboard: React.FC = () => {
     factories,
     loading,
     farmersLoading,
+    industrialYieldLoading,
     error,
     selectedFactoryId,
     setSelectedFactoryId,
@@ -37,7 +38,7 @@ const ProgressGridDashboard: React.FC = () => {
     [chartFarmerConfigs],
   );
 
-  const chartLoading = factoriesLoading || farmersLoading;
+  const chartLoading = factoriesLoading || farmersLoading || industrialYieldLoading;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 p-3 sm:p-4">
@@ -96,7 +97,16 @@ const ProgressGridDashboard: React.FC = () => {
                   aria-hidden
                 />
                 <p className="text-sm font-medium text-slate-600">
-                  Loading industrial yield data…
+                  {industrialYieldLoading
+                    ? 'Loading SEF industrial yield snapshot…'
+                    : 'Loading industrial yield data…'}
+                </p>
+                <p className="max-w-md text-xs text-slate-400">
+                  Network: search for{' '}
+                  <span className="font-mono">industrial_yield_by_owner_snapshot</span>
+                  {import.meta.env.DEV
+                    ? ' (localhost /api/sef/… on dev, sef-cropeye.up.railway.app on live)'
+                    : ' at sef-cropeye.up.railway.app'}
                 </p>
               </div>
             ) : (

@@ -29,6 +29,7 @@ const ProgressBarDashboard: React.FC<{ navKey?: number }> = ({ navKey = 0 }) => 
     factories,
     loading,
     farmersLoading,
+    industrialYieldLoading,
     error,
     industrialLoadError,
     selectedFactoryId,
@@ -121,17 +122,23 @@ const ProgressBarDashboard: React.FC<{ navKey?: number }> = ({ navKey = 0 }) => 
           </div>
 
           <div className="flex min-h-0 flex-1 flex-col p-2 sm:p-3">
-            {loading || farmersLoading ? (
+            {loading || farmersLoading || industrialYieldLoading ? (
               <div className="flex min-h-[8rem] flex-col items-center justify-center gap-2 rounded-xl border border-slate-100 bg-slate-50/80 px-4 py-6 text-center">
                 <Loader2
                   className="h-8 w-8 animate-spin text-emerald-600"
                   aria-hidden
                 />
                 <p className="text-sm font-medium text-slate-600">
-                  {loading ? 'Loading factories…' : 'Loading farmer…'}
+                  {loading
+                    ? 'Loading factories…'
+                    : industrialYieldLoading
+                      ? 'Loading SEF industrial yield snapshot…'
+                      : 'Loading farmers…'}
                 </p>
                 <p className="max-w-sm text-xs text-slate-400">
-                  Large factories can take up to a minute on first load.
+                  {industrialYieldLoading
+                    ? 'Look in Network for industrial_yield_by_owner_snapshot (can take 1–2 minutes).'
+                    : 'Large factories can take up to a minute on first load.'}
                 </p>
               </div>
             ) : (
