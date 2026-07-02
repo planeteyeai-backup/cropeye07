@@ -34,15 +34,15 @@ export function resolveProgressOwnerId(): number {
   const user = getUserData();
   const role = getUserRole()?.toLowerCase().replace(/\s+/g, '');
 
-  if (role === 'owner') {
-    const ownerFromUser = parseOwnerId(user?.id ?? user?.user_id);
-    if (ownerFromUser) return ownerFromUser;
-  }
-
+  // Sugar owner_id — never use auth user.id (Django user pk) for SEF snapshot.
   const linkedOwner = parseOwnerId(
     user?.owner_id ?? user?.owner?.id ?? user?.ownerId,
   );
   if (linkedOwner) return linkedOwner;
+
+  if (role === 'owner' || role === 'manager' || role === 'fieldofficer') {
+    return FALLBACK_PROGRESS_OWNER_ID;
+  }
 
   return DEFAULT_OWNER_ID;
 }
@@ -179,9 +179,12 @@ export function useFactoryProgress(initialFactoryId?: FactoryId) {
       try {
         let result = await tryOwner(ownerId);
 
-        if (result.factories.length === 0 && ownerId !== DEFAULT_OWNER_ID) {
+        if (
+          result.factories.length === 0 &&
+          result.ownerIdUsed !== FALLBACK_PROGRESS_OWNER_ID
+        ) {
           try {
-            result = await tryOwner(DEFAULT_OWNER_ID);
+            result = await tryOwner(FALLBACK_PROGRESS_OWNER_ID);
           } catch {
             // keep first attempt
           }

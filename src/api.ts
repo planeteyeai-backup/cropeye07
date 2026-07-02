@@ -29,13 +29,24 @@ const FASTAPI_AUTH_BASE_URL =
   "https://events-cropeye.up.railway.app";
 
 // SEF field service — industrial yield by owner (public, no auth)
-const SEF_FIELD_API_BASE_URL = import.meta.env.DEV
-  ? '/api/sef'
-  : import.meta.env.VITE_DEV_FIELD_API_URL ||
-    'https://sef-cropeye.up.railway.app';
+const SEF_PRODUCTION_URL = "https://sef-cropeye.up.railway.app";
 
-/** SEF industrial yield snapshot — used for Crop Growth + Chart of Progress. */
-const SEF_INDUSTRIAL_YIELD_SNAPSHOT_TIMEOUT_MS = 60_000;
+function resolveSefFieldApiBaseUrl(): string {
+  if (import.meta.env.DEV) return "/api/sef";
+
+  const fromEnv = String(import.meta.env.VITE_DEV_FIELD_API_URL ?? "").trim();
+  // Production must use an absolute URL — relative paths like /api/sef only work in Vite dev.
+  if (/^https?:\/\//i.test(fromEnv)) {
+    return fromEnv.replace(/\/$/, "");
+  }
+
+  return SEF_PRODUCTION_URL;
+}
+
+const SEF_FIELD_API_BASE_URL = resolveSefFieldApiBaseUrl();
+
+/** Large snapshot payload — allow up to 2 minutes on slow networks. */
+const SEF_INDUSTRIAL_YIELD_SNAPSHOT_TIMEOUT_MS = 120_000;
 
 function hasIndustrialYieldFactories(payload: unknown): boolean {
   const data = payload as { factories?: unknown[] };
@@ -1922,6 +1933,10 @@ export async function fetchIndustrialYieldByOwner(
   ownerId: number,
 ): Promise<FactoryApiResult> {
   const params = { owner_id: ownerId };
+  const query = new URLSearchParams({
+    owner_id: String(ownerId),
+  }).toString();
+  const snapshotUrl = `${SEF_PRODUCTION_URL}/industrial_yield_by_owner_snapshot?${query}`;
 
   try {
     const response = await sefApi.get(
@@ -1944,6 +1959,26 @@ export async function fetchIndustrialYieldByOwner(
       code?: string;
       response?: { data?: { error?: string; detail?: string } };
     };
+
+    // Production fallback: direct fetch to SEF when axios base URL is misconfigured.
+    if (!axiosErr.response) {
+      try {
+        const res = await fetch(snapshotUrl, {
+          method: "GET",
+          headers: { Accept: "application/json" },
+          signal: AbortSignal.timeout(SEF_INDUSTRIAL_YIELD_SNAPSHOT_TIMEOUT_MS),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (hasIndustrialYieldFactories(data)) {
+            return { ok: true, data };
+          }
+        }
+      } catch {
+        // use axios error below
+      }
+    }
+
     if (import.meta.env.DEV) {
       console.warn(
         "[SEF] industrial_yield_by_owner_snapshot failed:",
