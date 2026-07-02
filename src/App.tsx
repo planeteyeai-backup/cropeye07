@@ -42,6 +42,7 @@ import ProgressGridDashboard from "./components/ProgressGridDashboard";
 import { PROGRESS_NAV_EVENT } from "./components/progressbar/progressNavigation";
 import OfficerDashboard from "./components/FarmCropStatus";
 import AgroDashboard from "./components/AgroDash/AgroDashboard";
+import OwnerAgroDashboard from "./components/AgroDash/OwnerAgroDashboard";
 import ManagerFarmDash from "./components/ManagerFarmDash";
 import HarvestDashboard from "./components/HarvestDashboard";
 import Chatbot from "./components/Chatbot";
@@ -55,6 +56,7 @@ enum View {
   HarvestDashboard = "HarvestDashboard",
   Dashboard = "dashboard",
   AgroDashboard = "AgroDashboard",
+  OwnerAgroDashboard = "OwnerAgroDashboard",
   ManagerFarmDash = "ManagerFarmDash",
   OwnerFarmDash = "OwnerFarmDash",
   OwnerHarvestDash = "OwnerHarvestDash",
@@ -215,6 +217,8 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
       'agroclimatic': View.AgroDashboard,
       'agro-dashboard': View.AgroDashboard,
       'agrodashboard': View.AgroDashboard,
+      'owner-agro-dashboard': View.OwnerAgroDashboard,
+      'owneragrodashboard': View.OwnerAgroDashboard,
       'farm-crop-status': View.FarmCropStatus,
       'farmcropstatus': View.FarmCropStatus,
       'harvest-dashboard': View.HarvestDashboard,
@@ -287,7 +291,11 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
         nextView = View.FarmCropStatus;
         break;
       case "Agroclimatic":
-        nextView = View.AgroDashboard;
+        if (userRole === "owner") {
+          nextView = View.OwnerAgroDashboard;
+        } else {
+          nextView = View.AgroDashboard;
+        }
         break;
       case "Plot View":
         nextView = View.Dashboard;
@@ -406,6 +414,7 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
     const viewMap: Partial<Record<View, string>> = {
       [View.Home]: 'home',
       [View.AgroDashboard]: 'agrodashboard',
+      [View.OwnerAgroDashboard]: 'owneragrodashboard',
       [View.FarmCropStatus]: 'farmcropstatus',
       [View.HarvestDashboard]: 'harvestdashboard',
       [View.ManagerFarmDash]: 'managerfarmdash',
@@ -780,6 +789,11 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
             {cachedViews.includes(View.AgroDashboard) && (
               <div style={{ display: currentView === View.AgroDashboard ? 'block' : 'none' }}>
                 <AgroDashboard />
+              </div>
+            )}
+            {cachedViews.includes(View.OwnerAgroDashboard) && (
+              <div style={{ display: currentView === View.OwnerAgroDashboard ? 'block' : 'none' }}>
+                <OwnerAgroDashboard />
               </div>
             )}
 

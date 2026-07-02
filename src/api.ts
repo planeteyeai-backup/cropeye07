@@ -1717,6 +1717,44 @@ export const getManagerFieldOfficersAgroStats = async (
           err,
         );
         return null;
+      })
+    )
+  );
+
+  return mergeAgroStatsPlotData(...results);
+};
+
+/**
+ * Owner dashboard: fetch agroStats for every field officer under this owner in parallel.
+ * Fetches field officers from team-connect and then hits events-cropeye for each.
+ */
+export const getOwnerFieldOfficersAgroStats = async (
+  endDate?: string,
+): Promise<Record<string, unknown>> => {
+  const response = await getTeamConnect();
+  const data = response.data;
+  let officers: Array<{ id: number }> = [];
+
+  if (data?.users_by_role && Array.isArray(data.users_by_role.field_officers)) {
+    officers = data.users_by_role.field_officers;
+  } else if (Array.isArray(data?.field_officers)) {
+    officers = data.field_officers;
+  }
+
+  const uniqueIds = Array.from(new Set(officers.map((o) => o.id)));
+
+  if (uniqueIds.length === 0) {
+    return {};
+  }
+
+  const results = await Promise.all(
+    uniqueIds.map((id) =>
+      getFieldOfficerAgroStats(id, endDate).catch((err) => {
+        console.error(
+          `Error fetching agroStats for field officer ${id}:`,
+          err,
+        );
+        return null;
       }),
     ),
   );
