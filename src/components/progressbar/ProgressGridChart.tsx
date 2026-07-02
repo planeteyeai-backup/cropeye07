@@ -91,6 +91,54 @@ interface ProgressGridChartProps {
   industrialLoadError?: string | null;
 }
 
+function chartSubtitle(
+  farmerCount: number,
+  rangeCount: number,
+  farmersWithoutYield: number,
+  hasIndustrialYield: boolean,
+  industrialLoadError: string | null,
+): string {
+  if (farmerCount === 0) {
+    if (hasIndustrialYield) {
+      return farmersWithoutYield > 0
+        ? 'No farmers with industrial AI yield readings for this factory'
+        : 'No farmers to chart for this factory';
+    }
+    return industrialLoadError
+      ? 'Industrial yield API unavailable — chart needs SEF weekly readings'
+      : 'Waiting for industrial yield data…';
+  }
+
+  const rangeLabel = `${rangeCount} industrial yield range${rangeCount === 1 ? '' : 's'}`;
+  const excluded =
+    farmersWithoutYield > 0
+      ? ` · ${farmersWithoutYield} excluded (no SEF readings)`
+      : '';
+  return `${rangeLabel} · ${farmerCount} farmers with SEF readings${excluded} · Click a dot for the list below`;
+}
+
+function chartEmptyDetail(
+  hasIndustrialYield: boolean,
+  farmersWithoutYield: number,
+  industrialLoadError: string | null,
+): string {
+  if (!hasIndustrialYield) {
+    return (
+      industrialLoadError ??
+      'Chart dots appear after SEF industrial yield snapshot loads for this owner.'
+    );
+  }
+
+  const prefix =
+    farmersWithoutYield > 0
+      ? String(farmersWithoutYield) + ' farmers have no weekly SEF readings. '
+      : '';
+  return (
+    prefix +
+    'The chart uses SEF industrial_yield_by_owner_snapshot only (not public-factory-farmers single yield).'
+  );
+}
+
 const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
   factoryId = '',
   factoryLabel = '',
@@ -234,19 +282,13 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
           Farmer progress bubble chart
         </h2>
         <p className="mt-1 text-xs" style={{ color: C.textMuted }}>
-          {farmerConfigs.length === 0
-            ? hasIndustrialYield
-              ? farmersWithoutYield > 0
-                ? 'No farmers with industrial AI yield readings for this factory'
-                : 'No farmers to chart for this factory'
-              : industrialLoadError
-                ? 'Industrial yield API unavailable — chart needs SEF weekly readings'
-                : 'Waiting for industrial yield data…'
-            : `${rangeGroups.length} industrial yield range${rangeGroups.length === 1 ? '' : 's'} · ${farmerConfigs.length} farmers with SEF readings`}
-          {farmersWithoutYield > 0
-            ? ` · ${farmersWithoutYield} without industrial readings excluded`
-            : ''}
-          {' · Click a dot for the list below'}
+          {chartSubtitle(
+            farmerConfigs.length,
+            rangeGroups.length,
+            farmersWithoutYield,
+            hasIndustrialYield,
+            industrialLoadError,
+          )}
         </p>
         <p className="mt-1 text-xs font-medium" style={{ color: C.zone75 }}>
           {underTargetCount} farmer{underTargetCount === 1 ? '' : 's'} under{' '}
@@ -262,10 +304,11 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
               : 'Industrial yield data is not loaded yet'}
           </p>
           <p className="mt-1 text-xs text-slate-400">
-            {hasIndustrialYield
-              ? `${farmersWithoutYield > 0 ? `${farmersWithoutYield} farmers have no weekly SEF readings. ` : ''}The chart uses industrial-yield-by-owner only (not public-factory-farmers single yield).`
-              : industrialLoadError ??
-                'Chart dots appear after SEF industrial yield loads for this owner.'}
+            {chartEmptyDetail(
+              hasIndustrialYield,
+              farmersWithoutYield,
+              industrialLoadError,
+            )}
           </p>
         </div>
       ) : (

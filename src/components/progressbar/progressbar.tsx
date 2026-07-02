@@ -58,6 +58,7 @@ export interface FarmerTimeline {
 }
 
 interface ProgressBarProps {
+  className?: string;
   factoryId?: FactoryId;
   farmerConfigs?: FarmerProgressConfig[];
   farmers?: FarmerTimeline[];
@@ -193,8 +194,10 @@ const buildInitialActionsForConfigs = (
   return actions;
 };
 
-const VISIBLE_FARMER_ROWS = 3;
-const FARMER_LIST_MAX_HEIGHT = '23.5rem';
+const VISIBLE_FARMER_ROWS = 8;
+/** Fill remaining viewport below header/filters so more farmers show at 100% zoom */
+const FARMER_LIST_MAX_HEIGHT = 'calc(100vh - 15.5rem)';
+const FARMER_ROW_TIMELINE_HEIGHT_CLASS = 'h-8';
 
 /** Center of dot in equal-column grid (for panel alignment under the dot). */
 const getGridDotCenterPercent = (index: number, total: number): number => {
@@ -213,7 +216,7 @@ const SlotNavButton: React.FC<{
     onClick={onClick}
     disabled={disabled}
     aria-label={direction === 'prev' ? 'Previous slot' : 'Next slot'}
-    className="flex h-8 w-7 shrink-0 items-center justify-center rounded-md border transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-30 sm:h-9 sm:w-8"
+    className="flex h-7 w-6 shrink-0 items-center justify-center rounded-md border transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-30 sm:h-8 sm:w-7"
     style={{
       borderColor: `${T.active}55`,
       color: T.active,
@@ -423,30 +426,33 @@ const ProgressDot: React.FC<{
   const isActionNo = actionTaken === 'no';
   const alignClass = getPopupAlignClass(dotIndex, totalDots);
 
+  const hasRealYield =
+    Boolean(node.yield) && (isFromApi || isLatest || isExpectedYield);
+
   const dotRingColor = isSelected
     ? '#2563EB'
-    : isLatest
+    : isLatest && hasRealYield
       ? '#15803D'
       : isActionYes
-      ? T.taskDoneRing
-      : isActionNo
-        ? T.taskNotDoneRing
-        : isPast
-          ? T.pastNotRecordedRing
-          : '#CBD5E1';
-
-  const dotInnerClass = isActionYes || isActionNo || isPast ? '' : 'bg-slate-400';
+        ? T.taskDoneRing
+        : isActionNo
+          ? T.taskNotDoneRing
+          : hasRealYield && isPast
+            ? T.pastNotRecordedRing
+            : T.inactiveRing;
 
   const dotInnerStyle = isActionYes
     ? { backgroundColor: T.taskDone }
     : isActionNo
       ? { backgroundColor: T.taskNotDone }
-      : isPast
-        ? { backgroundColor: T.pastNotRecorded }
-        : undefined;
+      : isLatest && hasRealYield
+        ? { backgroundColor: '#15803D' }
+        : hasRealYield && isPast
+          ? { backgroundColor: T.pastNotRecorded }
+          : { backgroundColor: T.inactive };
 
-  const hasRealYield =
-    Boolean(node.yield) && (isFromApi || isLatest || isExpectedYield);
+  const dotInnerClass =
+    isActionYes || isActionNo || hasRealYield || isPast ? '' : 'bg-slate-400';
 
   return (
     <div
@@ -462,12 +468,12 @@ const ProgressDot: React.FC<{
       <button
         type="button"
         className={[
-          'relative z-10 flex h-10 items-center focus:outline-none',
+          'relative z-10 flex h-8 items-center focus:outline-none sm:h-9',
           alignStart ? 'w-auto justify-start' : 'w-full justify-center',
         ].join(' ')}
         onClick={(e) => {
           e.stopPropagation();
-          if (isPast) {
+          if (isPast && hasRealYield) {
             onSelect();
             e.currentTarget.blur();
           }
@@ -635,6 +641,12 @@ const FarmerRow: React.FC<{
   const hasOpenPanel = openNodeKey != null;
   const isSingleDot = visibleNodes.length === 1;
   const latestSavedNote = savedNotes[0]?.content ?? '';
+  const hasAnyYieldOnTimeline = visibleNodes.some(
+    (node) =>
+      Boolean(node.yield) &&
+      (node.isFromApi || node.isLatest || node.isExpectedYield),
+  );
+  const trackColor = hasAnyYieldOnTimeline ? T.trackBg : T.trackInactive;
 
   const panelStyle: React.CSSProperties = isSingleDot
     ? { left: 0, transform: 'none' }
@@ -657,21 +669,21 @@ const FarmerRow: React.FC<{
   return (
     <div
       className={[
-        'overflow-visible rounded-2xl border bg-white p-3 shadow-sm sm:p-4',
+        'overflow-visible rounded-xl border bg-white p-2 shadow-sm sm:rounded-2xl sm:p-2.5',
         hasOpenPanel ? 'relative z-30 pb-40' : '',
         highlightFarmerId === farmer.farmerId
           ? 'border-[#22C55E] ring-2 ring-[#22C55E]/30'
           : 'border-slate-200/80',
       ].join(' ')}
     >
-      <div className="mb-3 flex items-center gap-2 sm:mb-4">
+      <div className="mb-1.5 flex items-center gap-1.5">
         <div
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold text-white"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white"
           style={{ backgroundColor: T.active }}
         >
           {rowIndex + 1}
         </div>
-        <p className="min-w-0 truncate text-sm font-semibold" style={{ color: T.text }}>
+        <p className="min-w-0 truncate text-xs font-semibold sm:text-sm" style={{ color: T.text }}>
           {farmer.farmerName}
         </p>
       </div>
@@ -685,11 +697,29 @@ const FarmerRow: React.FC<{
 
         <div className="relative min-w-0 flex-1 overflow-visible">
         {visibleNodes.length === 0 ? (
-          <div className="h-10" aria-hidden />
+          <div className={`relative flex ${FARMER_ROW_TIMELINE_HEIGHT_CLASS} items-center`}>
+            <div
+              className="pointer-events-none absolute inset-x-0 top-1/2 z-0 h-1.5 -translate-y-1/2 rounded-full"
+              style={{ backgroundColor: T.trackInactive }}
+            />
+            <span
+              className="relative z-10 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-white shadow-md sm:h-4 sm:w-4"
+              style={{ boxShadow: `0 0 0 3px ${T.inactiveRing}, 0 1px 3px rgba(0,0,0,0.12)` }}
+            >
+              <span
+                className="block h-1.5 w-1.5 rounded-full sm:h-2 sm:w-2"
+                style={{ backgroundColor: T.inactive }}
+              />
+            </span>
+            {/* <span className="relative z-10 ml-2 text-[10px] font-medium text-slate-400 sm:text-xs"> */}
+              {/* No yield data */}
+            {/* </span> */}
+          </div>
         ) : (
         <div
           className={[
-            'relative h-10 items-center overflow-visible',
+            'relative items-center overflow-visible',
+            FARMER_ROW_TIMELINE_HEIGHT_CLASS,
             isSingleDot ? 'flex' : 'grid',
           ].join(' ')}
           style={
@@ -700,7 +730,7 @@ const FarmerRow: React.FC<{
         >
           <div
             className="pointer-events-none absolute inset-x-0 top-1/2 z-0 h-1.5 -translate-y-1/2 rounded-full"
-            style={{ backgroundColor: T.trackBg }}
+            style={{ backgroundColor: trackColor }}
           />
           <div
             className="pointer-events-none absolute left-0 top-1/2 z-0 h-1.5 -translate-y-1/2 rounded-full transition-all duration-700"
@@ -780,6 +810,7 @@ const FarmerRow: React.FC<{
 };
 
 const ProgressBar: React.FC<ProgressBarProps> = ({
+  className = '',
   farmerConfigs = [],
   farmers,
   searchQuery = '',
@@ -956,26 +987,19 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
   };
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-100 bg-white px-4 py-3">
-        <div>
-          <p className="text-sm font-semibold text-slate-800"></p>
-          <p className="text-xs text-slate-500">
-            {viewMode === 'live'
-              ? ''
-              : ' '}
-          </p>
-        </div>
-        <div
-          className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5"
-          role="group"
-          aria-label="Timeline view mode"
-        >
+    <div className={['flex min-h-0 flex-col gap-1.5 sm:gap-2', className].filter(Boolean).join(' ')}>
+      <div className="flex min-h-0 flex-1 flex-col overflow-visible rounded-xl border border-slate-100 bg-slate-50/60">
+        <div className="flex shrink-0 items-center justify-end border-b border-slate-100 bg-white px-2 py-1 sm:px-3">
+          <div
+            className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5"
+            role="group"
+            aria-label="Timeline view mode"
+          >
           <button
             type="button"
             onClick={() => handleViewModeChange('live')}
             className={[
-              'rounded-md px-4 py-1.5 text-sm font-semibold transition',
+              'rounded-md px-3 py-1 text-xs font-semibold transition sm:px-4 sm:py-1.5 sm:text-sm',
               viewMode === 'live'
                 ? 'bg-emerald-600 text-white shadow-sm'
                 : 'text-slate-600 hover:bg-white hover:text-slate-800',
@@ -988,7 +1012,7 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
             type="button"
             onClick={() => handleViewModeChange('history')}
             className={[
-              'rounded-md px-4 py-1.5 text-sm font-semibold transition',
+              'rounded-md px-3 py-1 text-xs font-semibold transition sm:px-4 sm:py-1.5 sm:text-sm',
               viewMode === 'history'
                 ? 'bg-emerald-600 text-white shadow-sm'
                 : 'text-slate-600 hover:bg-white hover:text-slate-800',
@@ -997,23 +1021,23 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
           >
             History
           </button>
+          </div>
         </div>
-      </div>
 
-      <div className="overflow-visible rounded-xl border border-slate-100 bg-slate-50/60 p-3 sm:p-4">
+        <div className="p-1.5 sm:p-2">
         {displayFarmers.length > VISIBLE_FARMER_ROWS && (
-          <p className="mb-2 text-center text-xs font-medium text-slate-500">
-            {/* Showing {VISIBLE_FARMER_ROWS} of {displayFarmers.length} farmers — scroll down for */}
-            {/* more */}
+          <p className="mb-1 text-center text-[10px] font-medium text-slate-500 sm:text-xs">
+            Scroll for more farmers ({displayFarmers.length} total)
           </p>
         )}
 
         <div
-          className="space-y-3 overflow-x-hidden overflow-y-auto pr-1"
+          className="space-y-1.5 overflow-x-hidden overflow-y-auto pr-0.5 sm:space-y-2"
           style={{
             maxHeight: noteOpenKey
-              ? `calc(${FARMER_LIST_MAX_HEIGHT} + 11rem)`
+              ? `calc(${FARMER_LIST_MAX_HEIGHT} + 9rem)`
               : FARMER_LIST_MAX_HEIGHT,
+            minHeight: '12rem',
           }}
         >
           {displayFarmers.length === 0 ? (
@@ -1109,9 +1133,10 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
             })
           )}
         </div>
+        </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-4 rounded-xl border border-slate-100 bg-white px-4 py-3 text-xs text-slate-500">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 rounded-xl border border-slate-100 bg-white px-2.5 py-1.5 text-[10px] text-slate-500 sm:gap-3 sm:px-3 sm:py-2 sm:text-xs">
         <span className="flex items-center gap-2">
           <span
             className="relative flex h-3 w-3 items-center justify-center rounded-full bg-white"
@@ -1149,7 +1174,19 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
               style={{ backgroundColor: T.pastNotRecorded }}
             />
           </span>
-          Past week — not recorded
+          Past week with yield — not recorded
+        </span>
+        <span className="flex items-center gap-2">
+          <span
+            className="relative flex h-3 w-3 items-center justify-center rounded-full bg-white"
+            style={{ boxShadow: `0 0 0 2px ${T.inactiveRing}` }}
+          >
+            <span
+              className="block h-1.5 w-1.5 rounded-full"
+              style={{ backgroundColor: T.inactive }}
+            />
+          </span>
+          No yield data
         </span>
         <span className="text-slate-400">
           {/* Select a month → 10 weekly dots · click dot for Yes/No action */}

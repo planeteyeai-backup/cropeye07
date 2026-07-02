@@ -73,6 +73,24 @@ export function estimatedTonsFromPlantation(
   return Math.min(100, Math.max(0, baseYield + weeks * 0.08));
 }
 
+/** Roster row from public-factory-farmers — yield comes from industrial snapshot only. */
+export function mapPublicFarmerBaseConfig(
+  farmer: PublicFactoryFarmer,
+): FarmerProgressConfig {
+  return {
+    farmerId: String(farmer.id),
+    farmerName: farmer.farmer_name?.trim() || `Farmer ${farmer.id}`,
+    tons: 0,
+    hasYieldData: false,
+    baseYield: 2,
+    weeksDonePerSection: weeksDoneFromPlantation(farmer.plantation_date),
+    plantationDate: farmer.plantation_date,
+    yieldReadings: undefined,
+    yieldDate: null,
+    phoneNumber: farmer.phone_number ?? null,
+  };
+}
+
 export function mapApiFarmerToProgressConfig(
   farmer: PublicFactoryFarmer,
 ): FarmerProgressConfig {

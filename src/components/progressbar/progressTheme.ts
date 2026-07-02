@@ -7,9 +7,13 @@ export const PROGRESS_THEME = {
   taskDoneRing: '#22C55E',
   taskNotDone: '#D97706',
   taskNotDoneRing: '#D97706',
-  /** Past week — action not recorded yet (light professional blue) */
+  /** Past week with API yield — action not recorded yet */
   pastNotRecorded: '#38BDF8',
   pastNotRecordedRing: '#7DD3FC',
+  /** Week slot with no yield reading */
+  inactive: '#94A3B8',
+  inactiveRing: '#CBD5E1',
+  trackInactive: '#E2E8F0',
   text: '#1E293B',
   textMuted: '#64748B',
   trackBg: '#E0F2FE',

@@ -1,32 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { fetchIndustrialYieldByOwner, fetchPublicFactoryFarmers, getCurrentUser, getIndustries } from '../../api';
-import { getUserData, getUserRole, isAuthenticated, isPlanetEyeDemoUser } from '../../utils/auth';
+import { useEffect, useMemo, useState } from 'react';
+import { fetchIndustrialYieldByOwner } from '../../api';
+import { getUserData, getUserRole, isPlanetEyeDemoUser } from '../../utils/auth';
 import type { FactoryId, PublicFactory, PublicFactoryFarmer } from './factoryProgressTypes';
-import {
-  buildConfiguredFactoryOptions,
-  mergeFactoryLists,
-  parseEnvFactoryNames,
-  parseIndustriesResponse,
-  parseUserIndustries,
-} from './factoryListLoader';
-import type { IndustrialYieldByOwnerResponse, IndustrialYieldFactory } from './industrialYieldTypes';
+import type { IndustrialYieldByOwnerResponse, IndustrialYieldFactory, IndustrialYieldFarmer } from './industrialYieldTypes';
+import { loadPublicFactoryFarmersForFactory } from './loadPublicFactoryFarmersForFactory';
+import { mergePublicAndIndustrialFarmerConfigs } from './mergeFactoryFarmerConfigs';
 import {
   industrialFactoryToPublicFactory,
-  findIndustrialFarmerMatch,
   mapIndustrialFarmerToProgressConfig,
-  mergePublicFarmerWithIndustrialYield,
 } from './mapIndustrialYield';
-import {
-  mapApiFarmerToProgressConfig,
-  pickChartFarmers,
-} from './mapFactoryFarmers';
-import {
-  parseFactoryByNameResponse,
-  parseFactoryListResponse,
-} from './parseFactoryApiResponse';
+import { mapPublicFarmerBaseConfig, pickFarmersForIndustrialChart } from './mapFactoryFarmers';
 import type { FarmerProgressConfig } from './progressData';
 
-/** Owner with ICPL / public-factory-farmers data (used when .env is not set on deploy). */
+/** Owner used when .env is not set on deploy. */
 const FALLBACK_PROGRESS_OWNER_ID = 2476;
 
 const DEFAULT_OWNER_ID =
@@ -74,75 +60,7 @@ function extractFetchError(err: unknown): string {
   if (axiosErr.response?.status === 404) {
     return 'Owner not found for this account. Set VITE_PROGRESS_OWNER_ID=2476 in .env';
   }
-  return axiosErr.message ?? 'Failed to load sugar factories from server';
-}
-
-async function fetchFactoryList(ownerId: number): Promise<PublicFactory[]> {
-  const { data } = await fetchPublicFactoryFarmers(ownerId);
-  return parseFactoryListResponse(data);
-}
-
-async function fetchFactoryByName(
-  ownerId: number,
-  factoryName: string,
-): Promise<PublicFactory | null> {
-  const { ok, data } = await fetchPublicFactoryFarmers(ownerId, factoryName.trim());
-  const payload = data as { error?: string };
-  if (!ok || payload?.error) return null;
-  return parseFactoryByNameResponse(data);
-}
-
-async function enrichFactoriesWithFarmers(
-  ownerId: number,
-  factories: PublicFactory[],
-): Promise<PublicFactory[]> {
-  const enriched = await Promise.all(
-    factories.map(async (factory) => {
-      try {
-        const parsed = await fetchFactoryByName(ownerId, factory.factory_name);
-        if (!parsed) return factory;
-
-        return {
-          ...factory,
-          factory_id: parsed.factory_id,
-          factory_name: parsed.factory_name,
-          farmers_count: parsed.farmers_count,
-          farmers: parsed.farmers,
-        };
-      } catch {
-        return factory;
-      }
-    }),
-  );
-
-  return mergeFactoryLists(enriched);
-}
-
-async function probeFactoriesByName(
-  ownerId: number,
-  names: string[],
-): Promise<PublicFactory[]> {
-  const probes = await Promise.all(
-    names.map(async (name) => {
-      try {
-        return await fetchFactoryByName(ownerId, name);
-      } catch {
-        return null;
-      }
-    }),
-  );
-
-  return probes.filter((factory): factory is PublicFactory => factory != null);
-}
-
-async function fetchIndustriesAsFactories(): Promise<PublicFactory[]> {
-  const response = await getIndustries();
-  return parseIndustriesResponse(response.data);
-}
-
-async function fetchUserProfileIndustries(): Promise<PublicFactory[]> {
-  const response = await getCurrentUser();
-  return parseUserIndustries(response.data);
+  return axiosErr.message ?? 'Failed to load industrial yield snapshot';
 }
 
 async function fetchIndustrialYieldFactories(
@@ -169,7 +87,7 @@ async function loadSugarFactories(ownerId: number): Promise<{
   const industrialFactories = await fetchIndustrialYieldFactories(ownerId);
   const industrialLoadError =
     industrialFactories == null
-      ? ''
+      ? 'Could not load industrial yield snapshot from SEF. Crop Growth and Chart require industrial_yield_by_owner_snapshot.'
       : null;
 
   if (industrialFactories) {
@@ -180,92 +98,71 @@ async function loadSugarFactories(ownerId: number): Promise<{
     };
   }
 
-  const collected: PublicFactory[][] = [];
-  const configured = buildConfiguredFactoryOptions();
-  const configuredNames =
-    configured.length > 0
-      ? configured.map((factory) => factory.factory_name)
-      : parseEnvFactoryNames();
-
-  if (isAuthenticated() && !isPlanetEyeDemoUser()) {
-    try {
-      collected.push(await fetchIndustriesAsFactories());
-    } catch {
-      // farmers may not have industries permission
-    }
-
-    try {
-      collected.push(await fetchUserProfileIndustries());
-    } catch {
-      // optional profile industry
-    }
-  }
-
-  const publicList = await fetchFactoryList(ownerId);
-  collected.push(publicList);
-
-  if (configuredNames.length > 0) {
-    collected.push(await probeFactoriesByName(ownerId, configuredNames));
-    collected.push(configured);
-  }
-
-  const merged = mergeFactoryLists(...collected);
   return {
-    factories: await enrichFactoriesWithFarmers(ownerId, merged),
+    factories: [],
     industrialFactories: null,
     industrialLoadError,
   };
 }
 
-async function fetchFactoryFarmers(
-  ownerId: number,
-  factory: PublicFactory,
-  publicList: PublicFactory[],
-): Promise<PublicFactoryFarmer[]> {
-  if (factory.farmers?.length) {
-    return factory.farmers;
-  }
-
-  try {
-    const parsed = await fetchFactoryByName(ownerId, factory.factory_name);
-    if (parsed && Array.isArray(parsed.farmers)) {
-      return parsed.farmers;
-    }
-  } catch {
-    // fall back below
-  }
-
-  const fromPublicList = publicList.find(
-    (item) => item.factory_id === factory.factory_id,
+function findIndustrialFactory(
+  industrialFactories: IndustrialYieldFactory[],
+  selectedFactoryId: string,
+  selectedFactory: PublicFactory | null,
+): IndustrialYieldFactory | undefined {
+  const byId = industrialFactories.find(
+    (item) => String(item.factory_id) === selectedFactoryId,
   );
-  if (fromPublicList?.farmers?.length) return fromPublicList.farmers;
+  if (byId) return byId;
 
-  return [];
+  if (!selectedFactory?.factory_name) return undefined;
+
+  const name = selectedFactory.factory_name.trim().toLowerCase();
+  return industrialFactories.find(
+    (item) => item.factory_name?.trim().toLowerCase() === name,
+  );
+}
+
+function resolveIndustrialFarmersForFactory(
+  industrialFactories: IndustrialYieldFactory[] | null,
+  selectedFactoryId: string,
+  selectedFactory: PublicFactory | null,
+): IndustrialYieldFarmer[] {
+  if (!industrialFactories?.length || !selectedFactoryId) return [];
+
+  const byId = industrialFactories.find(
+    (factory) => String(factory.factory_id) === selectedFactoryId,
+  );
+  if (byId?.farmers?.length) return byId.farmers;
+
+  const byName = findIndustrialFactory(
+    industrialFactories,
+    selectedFactoryId,
+    selectedFactory,
+  );
+  return byName?.farmers ?? byId?.farmers ?? [];
 }
 
 export function useFactoryProgress(initialFactoryId?: FactoryId) {
   const ownerId = resolveProgressOwnerId();
   const [factories, setFactories] = useState<PublicFactory[]>([]);
-  const [farmers, setFarmers] = useState<PublicFactoryFarmer[]>([]);
   const [loading, setLoading] = useState(true);
-  const [farmersLoading, setFarmersLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [farmersError, setFarmersError] = useState<string | null>(null);
   const [selectedFactoryId, setSelectedFactoryId] = useState<FactoryId>(
     initialFactoryId ?? '',
   );
   const [ownerIdUsed, setOwnerIdUsed] = useState<number>(ownerId);
-  const [publicFactoryList, setPublicFactoryList] = useState<PublicFactory[]>(
-    [],
-  );
   const [industrialFactories, setIndustrialFactories] = useState<
     IndustrialYieldFactory[] | null
   >(null);
   const [industrialLoadError, setIndustrialLoadError] = useState<string | null>(
     null,
   );
-  const factoriesRef = useRef<PublicFactory[]>([]);
-  factoriesRef.current = factories;
+  const [publicFarmers, setPublicFarmers] = useState<PublicFactoryFarmer[]>([]);
+  const [publicFarmersFactoryId, setPublicFarmersFactoryId] = useState<FactoryId>(
+    '',
+  );
+  const [farmersLoading, setFarmersLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -297,17 +194,12 @@ export function useFactoryProgress(initialFactoryId?: FactoryId) {
         setIndustrialFactories(result.industrialFactories);
         setIndustrialLoadError(result.industrialLoadError);
 
-        try {
-          const rawPublicList = await fetchFactoryList(result.ownerIdUsed);
-          if (!cancelled) setPublicFactoryList(rawPublicList);
-        } catch {
-          if (!cancelled) setPublicFactoryList([]);
-        }
-
         if (result.factories.length === 0) {
-          setError('No sugar factories found for this owner.');
+          setError(
+            result.industrialLoadError ??
+              'No sugar factories found in industrial yield snapshot.',
+          );
           setSelectedFactoryId('');
-          setFarmers([]);
           return;
         }
 
@@ -331,38 +223,10 @@ export function useFactoryProgress(initialFactoryId?: FactoryId) {
       } catch (err) {
         if (cancelled) return;
 
-        const status = (err as { response?: { status?: number } })?.response
-          ?.status;
-
-        if (status === 404 && ownerId !== DEFAULT_OWNER_ID) {
-          try {
-            const fallback = await tryOwner(DEFAULT_OWNER_ID);
-            if (cancelled) return;
-            setOwnerIdUsed(fallback.ownerIdUsed);
-            setFactories(fallback.factories);
-            setIndustrialFactories(fallback.industrialFactories);
-            setIndustrialLoadError(fallback.industrialLoadError);
-            if (fallback.factories.length === 0) {
-              setError('No sugar factories found for this owner.');
-              setSelectedFactoryId('');
-              setFarmers([]);
-              return;
-            }
-            setError(null);
-            setSelectedFactoryId(String(fallback.factories[0].factory_id));
-            return;
-          } catch (fallbackErr) {
-            if (!cancelled) setError(extractFetchError(fallbackErr));
-            setFactories([]);
-            setFarmers([]);
-            return;
-          }
-        }
-
         if (!cancelled) {
           setError(extractFetchError(err));
           setFactories([]);
-          setFarmers([]);
+          setIndustrialFactories(null);
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -376,50 +240,6 @@ export function useFactoryProgress(initialFactoryId?: FactoryId) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reload when owner changes
   }, [ownerId, initialFactoryId]);
 
-  useEffect(() => {
-    if (loading || !selectedFactoryId) return;
-
-    const factory = factoriesRef.current.find(
-      (item) => String(item.factory_id) === selectedFactoryId,
-    );
-    if (!factory) {
-      setFarmers([]);
-      return;
-    }
-
-    let cancelled = false;
-
-    const load = async () => {
-      setFarmersLoading(true);
-      setFarmersError(null);
-      try {
-        const list = await fetchFactoryFarmers(
-          ownerIdUsed,
-          factory,
-          publicFactoryList,
-        );
-        if (cancelled) return;
-        setFarmers(list);
-        if (list.length === 0) {
-          // setFarmersError(
-          //   `No farmers found for "${factory.factory_name}".`,
-          // );
-        }
-      } catch (err) {
-        if (cancelled) return;
-        setFarmers([]);
-        setFarmersError(extractFetchError(err));
-      } finally {
-        if (!cancelled) setFarmersLoading(false);
-      }
-    };
-
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedFactoryId, ownerIdUsed, loading, publicFactoryList]);
-
   const selectedFactory = useMemo(
     () =>
       factories.find((factory) => String(factory.factory_id) === selectedFactoryId) ??
@@ -427,79 +247,90 @@ export function useFactoryProgress(initialFactoryId?: FactoryId) {
     [factories, selectedFactoryId],
   );
 
-  const farmerConfigs = useMemo<FarmerProgressConfig[]>(() => {
-    const selectedFactory = factories.find(
-      (item) => String(item.factory_id) === selectedFactoryId,
-    );
-
-    const industrialFactory =
-      industrialFactories?.find(
-        (item) => String(item.factory_id) === selectedFactoryId,
-      ) ??
-      (selectedFactory?.factory_name
-        ? industrialFactories?.find(
-            (item) =>
-              item.factory_name?.trim().toLowerCase() ===
-              selectedFactory.factory_name.trim().toLowerCase(),
-          )
-        : undefined);
-
-    if (industrialFactory?.farmers?.length) {
-      return industrialFactory.farmers.map(mapIndustrialFarmerToProgressConfig);
+  useEffect(() => {
+    if (!selectedFactoryId || !selectedFactory) {
+      setPublicFarmers([]);
+      setPublicFarmersFactoryId('');
+      setFarmersLoading(false);
+      return;
     }
 
-    const allIndustrialFarmers =
-      industrialFactories?.flatMap((factory) => factory.farmers ?? []) ?? [];
-    const industrialFarmers =
-      industrialFactory?.farmers?.length
-        ? industrialFactory.farmers
-        : allIndustrialFarmers;
-
-    return farmers.map((farmer) => {
-      const config = mapApiFarmerToProgressConfig(farmer);
-      const match = findIndustrialFarmerMatch(farmer, industrialFarmers);
-      return mergePublicFarmerWithIndustrialYield(config, match);
-    });
-  }, [industrialFactories, selectedFactoryId, farmers, factories]);
-
-  useEffect(() => {
-    if (loading || industrialFactories != null || !ownerIdUsed) return;
-
     let cancelled = false;
+    const factoryIdForLoad = selectedFactoryId;
+    setPublicFarmers([]);
+    setPublicFarmersFactoryId('');
+    setFarmersLoading(true);
 
-    const retryIndustrial = async () => {
-      const factories = await fetchIndustrialYieldFactories(ownerIdUsed);
-      if (cancelled || !factories) return;
-      setIndustrialFactories(factories);
-      setIndustrialLoadError(null);
-      setFactories((prev) => {
-        const byId = new Map(prev.map((f) => [String(f.factory_id), f]));
-        for (const industrial of factories) {
-          const mapped = industrialFactoryToPublicFactory(industrial);
-          byId.set(String(mapped.factory_id), mapped);
+    void loadPublicFactoryFarmersForFactory(ownerIdUsed, selectedFactory)
+      .then((farmers) => {
+        if (!cancelled) {
+          setPublicFarmers(farmers);
+          setPublicFarmersFactoryId(factoryIdForLoad);
         }
-        return [...byId.values()];
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPublicFarmers([]);
+          setPublicFarmersFactoryId('');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setFarmersLoading(false);
       });
-    };
 
-    void retryIndustrial();
     return () => {
       cancelled = true;
     };
-  }, [loading, industrialFactories, ownerIdUsed]);
+  }, [ownerIdUsed, selectedFactoryId, selectedFactory]);
+
+  const farmerConfigs = useMemo<FarmerProgressConfig[]>(() => {
+    if (!selectedFactoryId) return [];
+
+    const industrialFarmers = resolveIndustrialFarmersForFactory(
+      industrialFactories,
+      selectedFactoryId,
+      selectedFactory,
+    );
+
+    const publicRoster =
+      publicFarmersFactoryId === selectedFactoryId ? publicFarmers : [];
+
+    if (publicRoster.length > 0 && industrialFarmers.length > 0) {
+      return mergePublicAndIndustrialFarmerConfigs(
+        publicRoster,
+        industrialFarmers,
+      );
+    }
+
+    if (industrialFarmers.length > 0) {
+      return industrialFarmers.map(mapIndustrialFarmerToProgressConfig);
+    }
+
+    if (publicRoster.length > 0) {
+      return publicRoster.map(mapPublicFarmerBaseConfig);
+    }
+
+    return [];
+  }, [
+    industrialFactories,
+    selectedFactoryId,
+    selectedFactory,
+    publicFarmers,
+    publicFarmersFactoryId,
+  ]);
 
   const chartFarmerConfigs = useMemo(
-    () => pickChartFarmers(farmerConfigs, 3),
+    () => pickFarmersForIndustrialChart(farmerConfigs),
     [farmerConfigs],
   );
 
   return {
     ownerId: ownerIdUsed,
     factories,
-    loading: loading || farmersLoading,
+    loading,
     factoriesLoading: loading,
     farmersLoading,
-    error: error ?? farmersError ?? industrialLoadError,
+    error: error ?? industrialLoadError,
     selectedFactoryId,
     setSelectedFactoryId,
     selectedFactory,

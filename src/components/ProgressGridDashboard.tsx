@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { BarChart3 } from 'lucide-react';
+import { BarChart3, Loader2 } from 'lucide-react';
 import ProgressGridChart from './progressbar/ProgressGridChart';
 import FactoryIndustrySelect from './progressbar/FactoryIndustrySelect';
 import { YIELD_TARGET_TON } from './progressbar/progressData';
@@ -10,6 +10,7 @@ const ProgressGridDashboard: React.FC = () => {
   const {
     factories,
     loading,
+    farmersLoading,
     error,
     selectedFactoryId,
     setSelectedFactoryId,
@@ -37,7 +38,9 @@ const ProgressGridDashboard: React.FC = () => {
   );
 
   const chartLoading =
-    factoriesLoading || (!hasIndustrialYield && !industrialLoadError);
+    factoriesLoading ||
+    farmersLoading ||
+    (!hasIndustrialYield && !industrialLoadError);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 p-3 sm:p-4">
@@ -85,10 +88,16 @@ const ProgressGridDashboard: React.FC = () => {
             </div>
           </div>
 
-          <div className="p-4 sm:p-6">
+          <div className="p-4 sm:p-5">
             {chartLoading ? (
-              <div className="rounded-xl border border-dashed border-slate-200 bg-white px-4 py-16 text-center text-sm text-slate-500">
-                Loading industrial yield data…
+              <div className="flex min-h-[12rem] flex-col items-center justify-center gap-3 rounded-xl border border-slate-100 bg-slate-50/80 px-4 py-8 text-center">
+                <Loader2
+                  className="h-8 w-8 animate-spin text-emerald-600"
+                  aria-hidden
+                />
+                <p className="text-sm font-medium text-slate-600">
+                  Loading industrial yield data…
+                </p>
               </div>
             ) : (
               <ProgressGridChart

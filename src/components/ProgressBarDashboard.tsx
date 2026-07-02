@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Sprout, Search, X } from 'lucide-react';
+import { Loader2, Sprout, Search, X } from 'lucide-react';
 import ProgressBar from './progressbar/progressbar';
 import FactoryIndustrySelect from './progressbar/FactoryIndustrySelect';
 import {
@@ -28,6 +28,7 @@ const ProgressBarDashboard: React.FC<{ navKey?: number }> = ({ navKey = 0 }) => 
   const {
     factories,
     loading,
+    farmersLoading,
     error,
     selectedFactoryId,
     setSelectedFactoryId,
@@ -36,27 +37,24 @@ const ProgressBarDashboard: React.FC<{ navKey?: number }> = ({ navKey = 0 }) => 
   } = useFactoryProgress(initialFactoryId);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 p-3 sm:p-4">
-      <div className="mx-auto max-w-7xl space-y-4">
-        <div className="overflow-hidden rounded-2xl border border-indigo-100/80 bg-white/90 shadow-lg backdrop-blur-sm">
-          <div className="border-b border-slate-100 bg-gradient-to-r from-white to-emerald-50/30 px-5 py-5 sm:px-6">
-            <div className="flex flex-col gap-4">
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 p-2 sm:p-3">
+      <div className="mx-auto flex max-w-7xl flex-col space-y-3">
+        <div className="flex min-h-[calc(100vh-1.5rem)] flex-col overflow-hidden rounded-2xl border border-indigo-100/80 bg-white/90 shadow-lg backdrop-blur-sm sm:min-h-[calc(100vh-2rem)]">
+          <div className="border-b border-slate-100 bg-gradient-to-r from-white to-emerald-50/30 px-4 py-3 sm:px-5">
+            <div className="flex flex-col gap-3">
               <div className="flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-500 to-green-600 shadow-lg shadow-emerald-200/50">
-                  <Sprout className="h-6 w-6 text-white" />
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-500 to-green-600 shadow-md shadow-emerald-200/50 sm:h-11 sm:w-11 sm:rounded-2xl">
+                  <Sprout className="h-5 w-5 text-white sm:h-6 sm:w-6" />
                 </div>
                 <div>
-                  <h1 className="text-xl font-bold tracking-tight text-slate-800">
+                  <h1 className="text-lg font-bold tracking-tight text-slate-800 sm:text-xl">
                     Crop Growth Progress
                   </h1>
-                  <p className="text-sm text-slate-500">
-                    {/* Weekly check-ins by sugar factory */}
-                  </p>
                 </div>
               </div>
 
-              <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                <div className="grid gap-4 sm:grid-cols-2">
+              <div className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+                <div className="grid gap-3 sm:grid-cols-2">
                   <FactoryIndustrySelect
                     id="district-filter"
                     label="Sugar factory / industry"
@@ -100,28 +98,41 @@ const ProgressBarDashboard: React.FC<{ navKey?: number }> = ({ navKey = 0 }) => 
                 {error && (
                   <p className="mt-3 text-sm text-red-600">{error}</p>
                 )}
-                {selectedFactory && !loading && (
+                {selectedFactory && !loading && !farmersLoading && (
                   <p className="mt-2 text-xs text-slate-500">
                     Selected industry:{' '}
                     <span className="font-medium text-slate-700">
                       {selectedFactory.factory_name}
                     </span>
+                    {farmerConfigs.length > 0 && (
+                      <>
+                        {' '}
+                        · {farmerConfigs.length} farmers
+                      </>
+                    )}
                   </p>
                 )}
               </div>
             </div>
           </div>
 
-          <div className="p-4 sm:p-6">
-            {loading ? (
-              <div className="rounded-xl border border-dashed border-slate-200 bg-white px-4 py-16 text-center text-sm text-slate-500">
-                {/* Loading yield data from SEF API… */}
-                <span className="mt-2 block text-xs text-slate-400">
-                  {/* First load can take up to 2 minutes for large factories. */}
-                </span>
+          <div className="flex min-h-0 flex-1 flex-col p-2 sm:p-3">
+            {loading || farmersLoading ? (
+              <div className="flex min-h-[8rem] flex-col items-center justify-center gap-2 rounded-xl border border-slate-100 bg-slate-50/80 px-4 py-6 text-center">
+                <Loader2
+                  className="h-8 w-8 animate-spin text-emerald-600"
+                  aria-hidden
+                />
+                <p className="text-sm font-medium text-slate-600">
+                  {loading ? 'Loading factories…' : 'Loading farmer…'}
+                </p>
+                <p className="max-w-sm text-xs text-slate-400">
+                  Large factories can take up to a minute on first load.
+                </p>
               </div>
             ) : (
               <ProgressBar
+                className="flex min-h-0 flex-1 flex-col"
                 factoryId={selectedFactoryId}
                 farmerConfigs={farmerConfigs}
                 searchQuery={searchQuery}

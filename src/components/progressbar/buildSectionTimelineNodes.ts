@@ -6,6 +6,7 @@ import {
 } from './progressConstants';
 import {
   isValidYieldTon,
+  pickChartYieldReading,
   pickLatestYieldReading,
   sanitizeYieldReadings,
   YIELD_TON_MAX,
@@ -193,7 +194,9 @@ export function buildLiveTimelineNode(
 
   const plantation = parsePlantationDate(plantationDate);
 
-  const latestIndustrial = pickLatestYieldReading(yieldReadings);
+  const latestIndustrial =
+    pickLatestYieldReading(yieldReadings) ??
+    pickChartYieldReading(yieldReadings);
   if (latestIndustrial) {
     return [
       readingToNode(

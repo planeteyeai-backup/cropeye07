@@ -40,14 +40,15 @@ export function findIndustrialFarmerMatch(
   industrialFarmers: IndustrialYieldFarmer[],
 ): IndustrialYieldFarmer | undefined {
   const pubId = String(publicFarmer.id);
+  const byId = industrialFarmers.find((farmer) => String(farmer.id) === pubId);
+  if (byId) return byId;
+
   const pubName = publicFarmer.farmer_name?.trim().toLowerCase() ?? '';
-  return industrialFarmers.find((farmer) => {
-    const sameId = String(farmer.id) === pubId;
-    const sameName =
-      pubName.length > 0 &&
-      farmer.farmer_name?.trim().toLowerCase() === pubName;
-    return sameId || sameName;
-  });
+  if (!pubName) return undefined;
+
+  return industrialFarmers.find(
+    (farmer) => farmer.farmer_name?.trim().toLowerCase() === pubName,
+  );
 }
 
 /** Keep farmer list from main DB; attach weekly yields from industrial API when matched. */
@@ -56,8 +57,12 @@ export function mergePublicFarmerWithIndustrialYield(
   industrial?: IndustrialYieldFarmer | null,
 ): FarmerProgressConfig {
   const sortedYields = sanitizeYieldReadings(industrial?.yields);
-  const latest = pickChartYieldReading(industrial?.yields);
-  if (!latest || sortedYields.length === 0) return config;
+  if (sortedYields.length === 0) return config;
+
+  const latest =
+    pickChartYieldReading(sortedYields) ??
+    pickChartYieldReading(industrial?.yields) ??
+    sortedYields[sortedYields.length - 1];
 
   return {
     ...config,
