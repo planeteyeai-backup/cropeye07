@@ -1682,7 +1682,7 @@ const ManagerFarmDash: React.FC = () => {
                   {loadingData ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : (
-                    metrics.expectedYield?.toFixed(0) || "-"
+                    metrics.expectedYield?.toFixed(1) || "-"
                   )}
                 </div>
                 <div className="text-sm font-semibold text-indigo-600">

@@ -1424,7 +1424,7 @@ const OfficerDashboard: React.FC = () => {
               <BarChart3 className="w-6 h-6 text-indigo-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {metrics.sugarYieldMean?.toFixed(0) || "-"}
+                  {metrics.sugarYieldMean?.toFixed(1) || "-"}
                 </div>
                 <div className="text-sm font-semibold text-indigo-600">
                   T/acre
