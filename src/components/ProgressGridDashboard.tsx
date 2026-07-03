@@ -97,16 +97,16 @@ const ProgressGridDashboard: React.FC = () => {
                   aria-hidden
                 />
                 <p className="text-sm font-medium text-slate-600">
-                  {industrialYieldLoading
-                    ? 'Loading SEF industrial yield snapshot…'
-                    : 'Loading industrial yield data…'}
+                  {loading
+                    ? 'Loading factories…'
+                    : industrialYieldLoading
+                      ? 'Loading yield data…'
+                      : farmersLoading
+                        ? 'Loading farmers…'
+                        : 'Loading chart…'}
                 </p>
                 <p className="max-w-md text-xs text-slate-400">
-                  Network: search for{' '}
-                  <span className="font-mono">industrial_yield_by_owner_snapshot</span>
-                  {import.meta.env.DEV
-                    ? ' (localhost /api/sef/… on dev, sef-cropeye.up.railway.app on live)'
-                    : ' at sef-cropeye.up.railway.app'}
+                  This may take up to a minute on first load.
                 </p>
               </div>
             ) : (

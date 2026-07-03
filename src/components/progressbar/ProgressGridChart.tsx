@@ -105,16 +105,16 @@ function chartSubtitle(
         : 'No farmers to chart for this factory';
     }
     return industrialLoadError
-      ? 'Industrial yield API unavailable — chart needs SEF weekly readings'
-      : 'Waiting for industrial yield data…';
+      ? 'Yield data unavailable — chart will update when data is available'
+      : 'Waiting for yield data…';
   }
 
-  const rangeLabel = `${rangeCount} industrial yield range${rangeCount === 1 ? '' : 's'}`;
+  const rangeLabel = `${rangeCount} yield range${rangeCount === 1 ? '' : 's'}`;
   const excluded =
     farmersWithoutYield > 0
-      ? ` · ${farmersWithoutYield} excluded (no SEF readings)`
+      ? ` · ${farmersWithoutYield} excluded (no yield data)`
       : '';
-  return `${rangeLabel} · ${farmerCount} farmers with SEF readings${excluded} · Click a dot for the list below`;
+  return `${rangeLabel} · ${farmerCount} farmers with yield data${excluded} · Click a dot for the list below`;
 }
 
 function chartEmptyDetail(
@@ -125,17 +125,17 @@ function chartEmptyDetail(
   if (!hasIndustrialYield) {
     return (
       industrialLoadError ??
-      'Chart dots appear after SEF industrial yield snapshot loads for this owner.'
+      'Chart will appear when yield data is available.'
     );
   }
 
   const prefix =
     farmersWithoutYield > 0
-      ? String(farmersWithoutYield) + ' farmers have no weekly SEF readings. '
+      ? String(farmersWithoutYield) + ' farmers have no weekly yield data. '
       : '';
   return (
     prefix +
-    'The chart uses SEF industrial_yield_by_owner_snapshot only (not public-factory-farmers single yield).'
+    'Select a factory with yield data to see the chart.'
   );
 }
 

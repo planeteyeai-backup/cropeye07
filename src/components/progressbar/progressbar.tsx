@@ -1027,7 +1027,7 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
         <div className="p-1.5 sm:p-2">
         {displayFarmers.length > VISIBLE_FARMER_ROWS && (
           <p className="mb-1 text-center text-[10px] font-medium text-slate-500 sm:text-xs">
-            Scroll for more farmers ({displayFarmers.length} total)
+            {/* Scroll for more farmers ({displayFarmers.length} total) */}
           </p>
         )}
 

@@ -2002,8 +2002,7 @@ async function fetchJsonGet(
       return {
         ok: false,
         data: {
-          error:
-            "Received website HTML instead of API JSON. On live, APIs must call Railway directly (not cropeye.ai).",
+          error: "Yield data could not be loaded. Please try again later.",
         },
       };
     }
@@ -2062,10 +2061,6 @@ export async function fetchIndustrialYieldByOwner(
   let lastError = "Failed to load industrial yield snapshot";
 
   for (const url of urls) {
-    if (import.meta.env.DEV) {
-      console.info("[CROPEYE] SEF industrial yield fetch:", url);
-    }
-
     const result = await fetchJsonGet(
       url,
       SEF_INDUSTRIAL_YIELD_SNAPSHOT_TIMEOUT_MS,

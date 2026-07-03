@@ -185,7 +185,7 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
         <Droplets className="card-icon" size={24} />
         <h3 className="font-semibold">Soil Moisture</h3>
       </div>
-      <div className="card-content soil-moisture flex flex-row justify-evenly ">
+      <div className="card-content soil-moisture">
         <div className="moisture-container">
           <div
             className="moisture-level"
@@ -211,19 +211,7 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
         </div>
         
         <div className="moisture-info-container">
-          <div
-            className="moisture-info"
-            style={{ textAlign: "center", marginTop: "15px" }}
-          >
-            <div
-              className="moisture-percentage-display"
-              style={{ fontSize: "24px", fontWeight: "bold", color: "#333" }}
-            >
-            {/* {loading ? "..." : `${displayMoisture.toFixed(2)}%`} */}
-            
-            </div>
-            <small className="text-gray-600">Soil Moisture Level</small>
-          </div>
+          <small className="moisture-level-label">Soil Moisture Level</small>
 
           <div className="moisture-status">
             {error ? (
@@ -234,7 +222,10 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
           </div>
 
           <div className="moisture-range">
-            Range: {optimalRange[0]}–{optimalRange[1]}%
+            <span className="moisture-range-label">Optimal Range</span>
+            <span className="moisture-range-value">
+              {optimalRange[0]}–{optimalRange[1]}%
+            </span>
           </div>
         </div>
       </div>

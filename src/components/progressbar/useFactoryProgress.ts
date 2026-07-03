@@ -59,9 +59,9 @@ function extractFetchError(err: unknown): string {
     null;
   if (apiMsg) return String(apiMsg);
   if (axiosErr.response?.status === 404) {
-    return 'Owner not found for this account. Set VITE_PROGRESS_OWNER_ID=2476 in .env';
+    return 'Factory data not found for this account.';
   }
-  return axiosErr.message ?? 'Failed to load industrial yield snapshot';
+  return toUserFriendlyYieldError(axiosErr.message) ?? 'Failed to load data. Please try again.';
 }
 
 async function fetchIndustrialYieldFactories(
@@ -102,6 +102,37 @@ async function loadPublicSugarFactories(ownerId: number): Promise<PublicFactory[
   }
 }
 
+function toUserFriendlyYieldError(message: string | null | undefined): string {
+  if (!message?.trim()) {
+    return 'Yield data is temporarily unavailable. Farmer list may still load.';
+  }
+  const lower = message.toLowerCase();
+  if (
+    lower.includes('html') ||
+    lower.includes('railway') ||
+    lower.includes('cropeye') ||
+    lower.includes('sef') ||
+    lower.includes('snapshot') ||
+    lower.includes('industrial_yield') ||
+    lower.includes('public-factory') ||
+    lower.includes('vite_') ||
+    lower.includes('owner_id') ||
+    lower.startsWith('http ')
+  ) {
+    return 'Yield data is temporarily unavailable. Farmer list may still load.';
+  }
+  if (
+    lower.includes('failed to fetch') ||
+    lower.includes('network') ||
+    lower.includes('cors') ||
+    lower.includes('abort') ||
+    lower.includes('timeout')
+  ) {
+    return 'Unable to load yield data. Please check your connection and try again.';
+  }
+  return message;
+}
+
 async function loadSugarFactories(ownerId: number): Promise<{
   factories: PublicFactory[];
   industrialFactories: IndustrialYieldFactory[] | null;
@@ -125,18 +156,17 @@ async function loadSugarFactories(ownerId: number): Promise<{
     return {
       factories: publicFactories,
       industrialFactories: null,
-      industrialLoadError:
-        industrialResult.error ??
-        'SEF yield snapshot is unavailable. Industries loaded from public API — yield dots need industrial_yield_by_owner_snapshot.',
+      industrialLoadError: toUserFriendlyYieldError(industrialResult.error),
     };
   }
 
   return {
     factories: [],
     industrialFactories: null,
-    industrialLoadError:
+    industrialLoadError: toUserFriendlyYieldError(
       industrialResult.error ??
-      'Could not load factories from SEF or public-factory-farmers. Check network or set VITE_PROGRESS_OWNER_ID=2476 on deploy.',
+        'Could not load factories. Please refresh or try again later.',
+    ),
   };
 }
 

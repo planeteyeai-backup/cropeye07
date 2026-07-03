@@ -132,13 +132,11 @@ const ProgressBarDashboard: React.FC<{ navKey?: number }> = ({ navKey = 0 }) => 
                   {loading
                     ? 'Loading factories…'
                     : industrialYieldLoading
-                      ? 'Loading SEF industrial yield snapshot…'
+                      ? 'Loading yield data…'
                       : 'Loading farmers…'}
                 </p>
                 <p className="max-w-sm text-xs text-slate-400">
-                  {industrialYieldLoading
-                    ? 'Look in Network for industrial_yield_by_owner_snapshot (can take 1–2 minutes).'
-                    : 'Large factories can take up to a minute on first load.'}
+                  This may take up to a minute on first load.
                 </p>
               </div>
             ) : (
