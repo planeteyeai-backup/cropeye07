@@ -1,4 +1,4 @@
-import api from "../api";
+import api, { getTeamConnect, getCurrentUser, getFieldOfficerAgroStats } from "../api";
 import React, { useState, useRef, useEffect, useMemo } from "react";
 //import axios from "axios";
 import {
@@ -81,6 +81,7 @@ interface HarvestData {
   "Distance (km)": number;
   Stage: string;
   Region: string;
+  Manager?: string;
   "Sugarcane Type": string;
   Variety: string;
   representative?: string;
@@ -488,6 +489,8 @@ const HarvestDashboard: React.FC = () => {
     -50, 100,
   ]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [dropdownsLoading, setDropdownsLoading] = useState<boolean>(true);
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const [rawData, setRawData] = useState<HarvestData[]>([]);
 
   // Dynamic filter options
@@ -510,133 +513,242 @@ const HarvestDashboard: React.FC = () => {
   useEffect(() => {
     async function fetchData() {
       setLoading(true);
+      setDropdownsLoading(true);
+      setFetchError(null);
+
       try {
-        const response = await api.get(API_BASE_URL);
-        const apiData = response.data;
+        // ── Step 1: get industry_id from current user ──────────────────────
+        const meRes = await getCurrentUser();
+        const me = meRes?.data;
+        const industryId =
+          me?.industry_id ??
+          me?.industry?.id ??
+          me?.industry?.industry_id ??
+          me?.industryId;
 
-        if (apiData && apiData.managers) {
-          let allData: HarvestData[] = [];
+        // ── Step 2: fetch team-connect with auth token ─────────────────────
+        const teamRes = await getTeamConnect(industryId);
+        const teamData = teamRes?.data;
 
-          const managerSet = new Set<string>();
-          const talukaSet = new Set<string>();
-          const representativeSet = new Set<string>();
-          const plantationTypeSet = new Set<string>();
+        // ── Step 3: parse managers + field officers ────────────────────────
+        let managersList: any[] = [];
+        let fieldOfficersList: any[] = [];
 
-          apiData.managers.forEach((manager: any) => {
-            const managerName = `${manager.first_name} ${manager.last_name}`;
-            managerSet.add(managerName);
+        if (teamData?.users_by_role) {
+          managersList = Array.isArray(teamData.users_by_role.managers)
+            ? teamData.users_by_role.managers
+            : [];
+          fieldOfficersList = Array.isArray(teamData.users_by_role.field_officers)
+            ? teamData.users_by_role.field_officers
+            : [];
+        } else if (Array.isArray(teamData?.managers)) {
+          managersList = teamData.managers;
+          fieldOfficersList = Array.isArray(teamData.field_officers)
+            ? teamData.field_officers
+            : managersList.flatMap((m: any) =>
+                Array.isArray(m.field_officers) ? m.field_officers : []
+              );
+        } else if (Array.isArray(teamData?.results)) {
+          managersList = teamData.results.filter(
+            (u: any) =>
+              u.role_id === 3 ||
+              String(u.role?.name ?? "").toLowerCase().includes("manager")
+          );
+          fieldOfficersList = teamData.results.filter(
+            (u: any) =>
+              u.role_id === 2 ||
+              (String(u.role?.name ?? "").toLowerCase().includes("field") &&
+                String(u.role?.name ?? "").toLowerCase().includes("officer"))
+          );
+        }
 
-            manager.field_officers.forEach((officer: any) => {
-              const representativeName = `${officer.first_name} ${officer.last_name}`;
-              representativeSet.add(representativeName);
+        // ── Step 4: immediately populate manager & representative dropdowns ──
+        const managerSet = new Set<string>();
+        const foSet = new Set<string>();
+        const foToManager: Record<string, string> = {};
 
-              officer.farmers.forEach((farmer: any) => {
-                farmer.plots.forEach((plot: any) => {
-                  if (plot.taluka) {
-                    talukaSet.add(plot.taluka);
+        managersList.forEach((m: any) => {
+          const name = `${m.first_name ?? ""} ${m.last_name ?? ""}`.trim() || m.username || "Unknown";
+          if (name) managerSet.add(name);
+        });
+
+        // Map field officer → manager name
+        if (fieldOfficersList.length === 0 && managersList.length > 0) {
+          // Derive FOs from nested manager objects
+          fieldOfficersList = managersList.flatMap((m: any) => {
+            const mName = `${m.first_name ?? ""} ${m.last_name ?? ""}`.trim() || m.username;
+            return (Array.isArray(m.field_officers) ? m.field_officers : []).map(
+              (fo: any) => ({ ...fo, _managerName: mName })
+            );
+          });
+        }
+
+        fieldOfficersList.forEach((fo: any) => {
+          const foName =
+            `${fo.first_name ?? ""} ${fo.last_name ?? ""}`.trim() || fo.username || "Unknown";
+          if (foName) foSet.add(foName);
+
+          // Resolve manager name via created_by or _managerName
+          const mgr = fo._managerName
+            ? fo._managerName
+            : managersList.find(
+                (m: any) =>
+                  m.id === fo.created_by ||
+                  m.id === fo.manager_id ||
+                  m.id === fo.manager?.id
+              );
+          const mgrName =
+            typeof mgr === "string"
+              ? mgr
+              : mgr
+              ? `${mgr.first_name ?? ""} ${mgr.last_name ?? ""}`.trim() || mgr.username
+              : "Unknown";
+          foToManager[foName] = mgrName;
+        });
+
+        setManagerOptions(["All", ...Array.from(managerSet).sort()]);
+        setRepresentativeOptions(["All", ...Array.from(foSet).sort()]);
+        setDropdownsLoading(false); // dropdowns are ready — show them now
+
+        // ── Step 5: fetch agro-stats per field officer ────────────────────
+        const today = new Date().toISOString().slice(0, 10);
+        const allData: HarvestData[] = [];
+        const talukaSet = new Set<string>();
+        const plantationTypeSet = new Set<string>();
+
+        await Promise.allSettled(
+          fieldOfficersList.map(async (fo: any) => {
+            try {
+              const foId = fo.id;
+              if (!foId) return;
+
+              const foName =
+                `${fo.first_name ?? ""} ${fo.last_name ?? ""}`.trim() ||
+                fo.username ||
+                "Unknown";
+              const mgrName = foToManager[foName] || "Unknown";
+
+              const statsData = await getFieldOfficerAgroStats(foId, today);
+              if (!statsData || typeof statsData !== "object") return;
+
+              Object.entries(statsData).forEach(
+                ([plotId, plotData]: [string, any]) => {
+                  if (!plotData || typeof plotData !== "object") return;
+
+                  const area =
+                    plotData.area_acres ?? plotData.soil?.area_acres ?? 0;
+                  const yieldValue =
+                    plotData.brix_sugar?.sugar_yield?.mean ??
+                    plotData.brix_sugar?.sugar_yield?.min ??
+                    0;
+                  const brixValue =
+                    plotData.brix_sugar?.brix?.mean ??
+                    plotData.brix_sugar?.brix?.min ??
+                    0;
+                  const recoveryValue =
+                    plotData.brix_sugar?.recovery?.mean ??
+                    plotData.brix_sugar?.recovery?.min ??
+                    0;
+
+                  const coords =
+                    plotData.geometry?.coordinates?.[0] || [];
+                  if (!coords.length) return;
+
+                  let cLat = 0,
+                    cLng = 0;
+                  coords.forEach((c: number[]) => {
+                    cLng += c[0];
+                    cLat += c[1];
+                  });
+                  cLat /= coords.length;
+                  cLng /= coords.length;
+
+                  if (!cLat || !cLng) return;
+
+                  const boundaryCoords: [number, number][] = coords.map(
+                    (c: number[]) => [c[1], c[0]] as [number, number]
+                  );
+
+                  let days = 0;
+                  if (plotData.plantation_date) {
+                    const pd = new Date(plotData.plantation_date);
+                    if (!isNaN(pd.getTime())) {
+                      days = Math.floor(
+                        (Date.now() - pd.getTime()) / 86400000
+                      );
+                    }
                   }
 
-                  plot.farms.forEach((farm: any) => {
-                    if (farm.plantation_type) {
-                      plantationTypeSet.add(farm.plantation_type);
-                    }
+                  let stage = "Germination Stage";
+                  if (days > 150) stage = "Maturity Stage";
+                  else if (days > 90) stage = "Grand Growth Stage";
+                  else if (days > 30) stage = "Tillering Stage";
 
-                    const coordinates = plot.boundary?.coordinates?.[0] || [];
-                    let centerLat = 0;
-                    let centerLng = 0;
+                  const status =
+                    plotData.Sugarcane_Status ||
+                    plotData.harvest_status ||
+                    (days > 300
+                      ? "Ready to Harvest"
+                      : days > 270
+                      ? "Partially Harvested"
+                      : "Growing");
 
-                    if (coordinates.length > 0) {
-                      coordinates.forEach((coord: number[]) => {
-                        centerLng += coord[0];
-                        centerLat += coord[1];
-                      });
-                      centerLat /= coordinates.length;
-                      centerLng /= coordinates.length;
-                    }
+                  const regionName =
+                    plotData.region ||
+                    plotData.taluka ||
+                    fo.taluka ||
+                    fo.region ||
+                    "Unknown";
+                  const plantationType =
+                    plotData.plantation_type || "Unknown";
+                  const variety = plotData.variety || "Phule 265";
 
-                    const plantationDate = new Date(farm.plantation_date);
-                    const today = new Date();
-                    const days = Math.floor(
-                      (today.getTime() - plantationDate.getTime()) /
-                        (1000 * 60 * 60 * 24),
-                    );
+                  talukaSet.add(regionName);
+                  plantationTypeSet.add(plantationType);
 
-                    let stage = "Germination Stage";
-                    if (days > 150) stage = "Maturity Stage";
-                    else if (days > 90) stage = "Grand Growth Stage";
-                    else if (days > 30) stage = "Tillering Stage";
-
-                    let status = "Growing";
-                    if (days > 300) status = "Ready to Harvest";
-                    else if (days > 270) status = "Partially Harvested";
-
-                    const brix = Math.min(15 + days / 10, 25);
-                    const recovery = Math.min(8 + days / 30, 12);
-
-                    const area = parseFloat(farm.area_size || "0");
-                    const yieldPerHa = Math.min(60 + days / 3, 100);
-
-                    // Only add data point if we have valid coordinates
-                    if (
-                      centerLat &&
-                      centerLng &&
-                      centerLat !== 0 &&
-                      centerLng !== 0
-                    ) {
-                      // Convert boundary coordinates from [lng, lat] to [lat, lng] for Leaflet
-                      const boundaryCoords: [number, number][] | undefined =
-                        coordinates.length > 0
-                          ? coordinates.map(
-                              (coord: number[]) =>
-                                [coord[1], coord[0]] as [number, number],
-                            )
-                          : undefined;
-
-                      const dataPoint: HarvestData = {
-                        id: `${plot.id}-${farm.id}`,
-                        "Plot No": plot.plot_number || "",
-                        Latitude: centerLat,
-                        Longitude: centerLng,
-                        "Sugarcane Status": status,
-                        "Area (Hect)": area,
-                        Days: days,
-                        "Prediction Yield (T/acre)": yieldPerHa,
-                        "Brix (Degree)": brix,
-                        "Recovery (Degree)": recovery,
-                        "Distance (km)": Math.random() * 10 + 1,
-                        Stage: stage,
-                        Region: plot.taluka || "Unknown",
-                        "Sugarcane Type": farm.plantation_type || "Unknown",
-                        Variety: "Phule 265",
-                        representative: representativeName,
-                        representativeUrl: "",
-                        boundaryCoordinates: boundaryCoords,
-                      };
-
-                      allData.push(dataPoint);
-                    }
+                  allData.push({
+                    id: plotId,
+                    "Plot No": plotData.plot_number || plotId,
+                    Latitude: cLat,
+                    Longitude: cLng,
+                    "Sugarcane Status": status,
+                    "Area (Hect)": area,
+                    Days: days,
+                    "Prediction Yield (T/acre)": yieldValue,
+                    "Prediction Yield (T/acer)": yieldValue,
+                    "Brix (Degree)": brixValue,
+                    "Recovery (Degree)": recoveryValue,
+                    "Distance (km)": Math.random() * 10 + 1,
+                    Stage: stage,
+                    Region: regionName,
+                    Manager: mgrName,
+                    "Sugarcane Type": plantationType,
+                    Variety: variety,
+                    representative: foName,
+                    boundaryCoordinates: boundaryCoords,
                   });
-                });
-              });
-            });
-          });
+                }
+              );
+            } catch {
+              // silently skip failed FO stats
+            }
+          })
+        );
 
-          setManagerOptions(["All", ...Array.from(managerSet).sort()]);
-          setRegionOptions(["All", ...Array.from(talukaSet).sort()]);
-          setRepresentativeOptions([
-            "All",
-            ...Array.from(representativeSet).sort(),
-          ]);
-          setSugarcaneTypeOptions([
-            "All",
-            ...Array.from(plantationTypeSet).sort(),
-          ]);
-
-          setRawData(allData);
-        } else {
-          setRawData([]);
-        }
-      } catch (err) {
+        setRegionOptions(["All", ...Array.from(talukaSet).sort()]);
+        setSugarcaneTypeOptions([
+          "All",
+          ...Array.from(plantationTypeSet).sort(),
+        ]);
+        setRawData(allData);
+      } catch (err: any) {
+        console.error("Harvest dashboard fetch error:", err);
+        setFetchError(
+          err?.response?.data?.detail ||
+            err?.message ||
+            "Failed to load data. Please try again."
+        );
+        setDropdownsLoading(false);
         setRawData([]);
       } finally {
         setLoading(false);
@@ -646,32 +758,47 @@ const HarvestDashboard: React.FC = () => {
     fetchData();
   }, []);
 
+  // Cascade: when manager changes, update representative options to only those under that manager
+  useEffect(() => {
+    const managerFiltered =
+      debouncedManager === "All"
+        ? rawData
+        : rawData.filter((item) => item.Manager === debouncedManager);
+    const repSet = new Set<string>();
+    managerFiltered.forEach((item) => {
+      if (item.representative) repSet.add(item.representative);
+    });
+    setRepresentativeOptions(["All", ...Array.from(repSet).sort()]);
+    // Reset representative if the current selection is no longer valid
+    setFilters((prev) => ({
+      ...prev,
+      representative:
+        prev.representative === "All" || repSet.has(prev.representative)
+          ? prev.representative
+          : "All",
+    }));
+  }, [debouncedManager, rawData]);
+
   const filteredData = useMemo(
     () =>
-      rawData
-        .filter((item) => {
-          // This part is tricky without manager name in HarvestData.
-          // For now, we can't filter by manager.
-          // To fix this, we would need to add managerName to HarvestData during processing.
-          // Let's assume for now we can't filter by manager directly on the flat list.
-          // The filtering will happen by re-calculating representatives.
-          return true;
-        })
-        .filter((item) => {
-          const regionMatch =
-            debouncedRegion === "All" || item.Region === debouncedRegion;
-          const repMatch =
-            filters.representative === "All" ||
-            item.representative === filters.representative;
-          const typeMatch =
-            debouncedSugarcaneType === "All" ||
-            item["Sugarcane Type"] === debouncedSugarcaneType;
-          const varietyMatch =
-            debouncedVariety === "All" || item.Variety === debouncedVariety;
-          return regionMatch && repMatch && typeMatch && varietyMatch;
-        }),
+      rawData.filter((item) => {
+        const managerMatch =
+          debouncedManager === "All" || item.Manager === debouncedManager;
+        const regionMatch =
+          debouncedRegion === "All" || item.Region === debouncedRegion;
+        const repMatch =
+          filters.representative === "All" ||
+          item.representative === filters.representative;
+        const typeMatch =
+          debouncedSugarcaneType === "All" ||
+          item["Sugarcane Type"] === debouncedSugarcaneType;
+        const varietyMatch =
+          debouncedVariety === "All" || item.Variety === debouncedVariety;
+        return managerMatch && regionMatch && repMatch && typeMatch && varietyMatch;
+      }),
     [
       rawData,
+      debouncedManager,
       debouncedRegion,
       filters.representative,
       debouncedSugarcaneType,
@@ -919,29 +1046,48 @@ const HarvestDashboard: React.FC = () => {
     return null;
   }
 
-  const FilterDropdown: React.FC<FilterDropdownProps> = ({
+  const FilterDropdown: React.FC<FilterDropdownProps & { isLoading?: boolean }> = ({
     label,
     value,
     options,
     onChange,
+    isLoading,
   }) => (
     <div className="mb-6">
-      <label className="block text-sm font-medium text-gray-700 mb-2">
-        {label}
-      </label>
+      <div className="flex items-center gap-2 mb-2">
+        <label className="block text-sm font-medium text-gray-700">
+          {label}
+        </label>
+        {isLoading && (
+          <Loader2 className="w-3 h-3 animate-spin text-blue-500" />
+        )}
+      </div>
       <div className="relative box-border">
         <select
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2 pr-10 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent appearance-none"
+          disabled={isLoading}
+          className={`w-full bg-white border rounded-lg px-3 py-2 pr-10 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent appearance-none transition-colors ${
+            isLoading
+              ? "border-gray-200 text-gray-400 cursor-wait bg-gray-50"
+              : "border-gray-300 text-gray-900"
+          }`}
         >
-          {options.map((option) => (
-            <option key={option} value={option}>
-              {option}
-            </option>
-          ))}
+          {isLoading ? (
+            <option>Loading…</option>
+          ) : (
+            options.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))
+          )}
         </select>
-        <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 pointer-events-none" />
+        {isLoading ? (
+          <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-blue-400 animate-spin pointer-events-none" />
+        ) : (
+          <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 pointer-events-none" />
+        )}
       </div>
     </div>
   );
@@ -1066,11 +1212,30 @@ const HarvestDashboard: React.FC = () => {
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           <div className="lg:col-span-3 space-y-2">
-            <div className="bg-white rounded-xl p-2 border-gray-100">
+            <div className="bg-white rounded-xl p-3 border border-gray-100 shadow-sm">
+              {/* Filter panel header */}
+              <div className="flex items-center gap-2 mb-4 pb-3 border-b border-gray-100">
+                <span className="text-sm font-semibold text-gray-700">Filters</span>
+                {dropdownsLoading && (
+                  <span className="flex items-center gap-1 text-xs text-blue-500">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    Loading data…
+                  </span>
+                )}
+              </div>
+
+              {/* Error banner */}
+              {fetchError && (
+                <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-600">
+                  ⚠️ {fetchError}
+                </div>
+              )}
+
               <FilterDropdown
                 label="Manager"
                 value={filters.manager}
                 options={managerOptions}
+                isLoading={dropdownsLoading}
                 onChange={(value) =>
                   setFilters((prev) => ({ ...prev, manager: value }))
                 }
@@ -1079,6 +1244,7 @@ const HarvestDashboard: React.FC = () => {
                 label="Region"
                 value={filters.region}
                 options={regionOptions}
+                isLoading={loading}
                 onChange={(value) =>
                   setFilters((prev) => ({ ...prev, region: value }))
                 }
@@ -1087,6 +1253,7 @@ const HarvestDashboard: React.FC = () => {
                 label="Representative"
                 value={filters.representative}
                 options={representativeOptions}
+                isLoading={dropdownsLoading}
                 onChange={(value) =>
                   setFilters((prev) => ({ ...prev, representative: value }))
                 }
@@ -1095,6 +1262,7 @@ const HarvestDashboard: React.FC = () => {
                 label="Sugarcane Type"
                 value={filters.sugarcaneType}
                 options={sugarcaneTypeOptions}
+                isLoading={loading}
                 onChange={(value) =>
                   setFilters((prev) => ({ ...prev, sugarcaneType: value }))
                 }

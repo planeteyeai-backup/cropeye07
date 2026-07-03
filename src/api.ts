@@ -1747,14 +1747,29 @@ export const getManagerFieldOfficersAgroStats = async (
 export const getOwnerFieldOfficersAgroStats = async (
   endDate?: string,
 ): Promise<Record<string, unknown>> => {
-  const response = await getTeamConnect();
+  const meRes = await getCurrentUser();
+  const me = meRes?.data;
+  const industryId =
+    me?.industry_id ??
+    me?.industry?.id ??
+    me?.industry?.industry_id ??
+    me?.industryId;
+
+  const response = await getTeamConnect(industryId);
   const data = response.data;
-  let officers: Array<{ id: number }> = [];
+  let officers: Array<any> = [];
+  let managers: Array<any> = [];
 
   if (data?.users_by_role && Array.isArray(data.users_by_role.field_officers)) {
     officers = data.users_by_role.field_officers;
+    if (Array.isArray(data.users_by_role.managers)) {
+      managers = data.users_by_role.managers;
+    }
   } else if (Array.isArray(data?.field_officers)) {
     officers = data.field_officers;
+  } else if (Array.isArray(data?.results)) {
+    officers = data.results.filter((u: any) => u.role_id === 2 || String(u.role?.name).toLowerCase().includes('field'));
+    managers = data.results.filter((u: any) => u.role_id === 3 || String(u.role?.name).toLowerCase().includes('manager'));
   }
 
   const uniqueIds = Array.from(new Set(officers.map((o) => o.id)));
@@ -1764,15 +1779,29 @@ export const getOwnerFieldOfficersAgroStats = async (
   }
 
   const results = await Promise.all(
-    uniqueIds.map((id) =>
-      getFieldOfficerAgroStats(id, endDate).catch((err) => {
-        console.error(
-          `Error fetching agroStats for field officer ${id}:`,
-          err,
-        );
+    officers.map(async (officer) => {
+      try {
+        const stats = await getFieldOfficerAgroStats(officer.id, endDate);
+        if (stats) {
+          const manager = managers.find((m) => m.id === officer.created_by);
+          const managerName = manager ? `${manager.first_name || ''} ${manager.last_name || ''}`.trim() : "Unknown";
+          
+          // Inject FO metadata into every plot
+          Object.values(stats).forEach((plot: any) => {
+            if (typeof plot === 'object' && plot !== null) {
+              plot.manager_name = plot.manager_name || managerName || "Unknown";
+              plot.field_officer_name = plot.field_officer_name || `${officer.first_name || ''} ${officer.last_name || ''}`.trim() || "Unknown";
+              plot.taluka = plot.taluka || officer.taluka || officer.region || "Unknown";
+              plot.region = plot.region || officer.taluka || officer.region || "Unknown";
+            }
+          });
+        }
+        return stats;
+      } catch (err) {
+        console.error(`Error fetching agroStats for field officer ${officer.id}:`, err);
         return null;
-      }),
-    ),
+      }
+    })
   );
 
   return mergeAgroStatsPlotData(...results);
