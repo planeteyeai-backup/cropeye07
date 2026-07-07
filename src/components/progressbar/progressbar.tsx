@@ -278,70 +278,70 @@ const ActionEditPanel: React.FC<{
 
   return (
     <div
-      className="w-[220px] max-w-[min(220px,calc(100vw-2rem))] rounded-lg border border-slate-200 bg-white p-2.5 shadow-xl ring-1 ring-black/5"
+      className="w-[300px] max-w-[min(300px,calc(100vw-2rem))] rounded-xl border border-slate-200 bg-white p-4 shadow-xl ring-1 ring-black/5"
       onClick={(e) => e.stopPropagation()}
       onMouseDown={(e) => e.stopPropagation()}
     >
-      <div className="mb-1.5 flex items-start justify-between gap-1">
-        <p className="text-[10px] font-semibold leading-tight" style={{ color: T.text }}>
+      <div className="mb-3 flex items-start justify-between gap-2">
+        <p className="text-sm font-semibold leading-snug" style={{ color: T.text }}>
           Wk {node.day} · {node.date}
-          <span className="mt-0.5 block font-semibold" style={{ color: T.taskDone }}>
+          <span className="mt-1 block text-base font-bold" style={{ color: T.taskDone }}>
             {node.yield}
           </span>
         </p>
         <button
           type="button"
           onClick={onClose}
-          className="shrink-0 rounded p-0.5 text-slate-400 hover:text-slate-600"
+          className="shrink-0 rounded p-1 text-slate-400 hover:bg-slate-50 hover:text-slate-600"
           aria-label="Close"
         >
-          <X className="h-3 w-3" />
+          <X className="h-4 w-4" />
         </button>
       </div>
 
-      <p className="mb-1 text-[9px] font-medium text-slate-500">Action taken?</p>
-      <div className="mb-1.5 flex gap-1">
+      <p className="mb-1.5 text-xs font-medium text-slate-500">Action taken?</p>
+      <div className="mb-3 flex gap-2">
         <button
           type="button"
           onClick={() => setDraftAction('yes')}
           className={[
-            'flex flex-1 items-center justify-center gap-0.5 rounded border py-0.5 text-[10px] font-semibold',
+            'flex flex-1 items-center justify-center gap-1 rounded-md border py-2 text-xs font-semibold',
             draftAction === 'yes'
               ? 'border-[#22C55E] bg-[#F0FDF4] text-[#166534]'
               : 'border-slate-200 text-slate-600 hover:bg-slate-50',
           ].join(' ')}
         >
-          <Check className="h-2.5 w-2.5" /> Yes
+          <Check className="h-3.5 w-3.5" /> Yes
         </button>
         <button
           type="button"
           onClick={() => setDraftAction('no')}
           className={[
-            'flex flex-1 items-center justify-center gap-0.5 rounded border py-0.5 text-[10px] font-semibold',
+            'flex flex-1 items-center justify-center gap-1 rounded-md border py-2 text-xs font-semibold',
             draftAction === 'no'
               ? 'border-[#D97706] bg-[#FFFBEB] text-[#B45309]'
               : 'border-slate-200 text-slate-600 hover:bg-slate-50',
           ].join(' ')}
         >
-          <X className="h-2.5 w-2.5" /> No
+          <X className="h-3.5 w-3.5" /> No
         </button>
       </div>
 
-      <div className="mb-1.5">
-        <p className="mb-0.5 text-[9px] font-medium text-slate-500">Previous notes</p>
+      <div className="mb-3">
+        <p className="mb-1 text-xs font-medium text-slate-500">Previous notes</p>
         {notesLoading ? (
-          <p className="text-[9px] text-slate-400">Loading notes…</p>
+          <p className="text-xs text-slate-400">Loading notes…</p>
         ) : savedNotes.length === 0 ? (
-          <p className="text-[9px] text-slate-400">No notes yet</p>
+          <p className="text-xs text-slate-400">No notes yet</p>
         ) : (
-          <ul className="max-h-20 space-y-1 overflow-y-auto pr-0.5">
+          <ul className="max-h-28 space-y-1.5 overflow-y-auto pr-1">
             {savedNotes.map((note) => (
               <li
                 key={note.id}
-                className="rounded border border-slate-100 bg-slate-50 px-1.5 py-1 text-[9px] leading-snug text-slate-700"
+                className="rounded-md border border-slate-100 bg-slate-50 px-2.5 py-2 text-xs leading-snug text-slate-700"
               >
                 <p className="font-medium text-slate-800">{note.content}</p>
-                <p className="mt-0.5 text-[8px] text-slate-400">
+                <p className="mt-1 text-[11px] text-slate-400">
                   {formatNoteTimestamp(note.created_at)}
                   {note.created_by_name ? ` · ${note.created_by_name}` : ''}
                 </p>
@@ -355,14 +355,14 @@ const ActionEditPanel: React.FC<{
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         placeholder="Add a new note..."
-        className="mb-1.5 w-full rounded border border-slate-200 px-1.5 py-0.5 text-[10px] focus:outline-none"
+        className="mb-3 w-full rounded-md border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
         style={{ color: T.text }}
         disabled={saving}
       />
       {saveError && (
-        <p className="mb-1 text-[9px] font-medium text-red-600">{saveError}</p>
+        <p className="mb-2 text-xs font-medium text-red-600">{saveError}</p>
       )}
-      <div className="flex gap-1">
+      <div className="flex gap-2">
         <button
           type="button"
           onClick={() => {
@@ -370,7 +370,7 @@ const ActionEditPanel: React.FC<{
             void onSave(draft.trim(), draftAction);
           }}
           disabled={!draftAction || saving}
-          className="flex-1 rounded py-0.5 text-[10px] font-semibold text-white disabled:bg-slate-300"
+          className="flex-1 rounded-md py-2 text-sm font-semibold text-white disabled:bg-slate-300"
           style={{ backgroundColor: T.active }}
         >
           {saving ? 'Saving…' : 'Save'}
@@ -378,7 +378,7 @@ const ActionEditPanel: React.FC<{
         <button
           type="button"
           onClick={onClose}
-          className="rounded border border-slate-200 px-1.5 py-0.5 text-[10px] text-slate-600 hover:bg-slate-50"
+          className="rounded-md border border-slate-200 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50"
         >
           Cancel
         </button>
@@ -501,69 +501,69 @@ const ProgressDot: React.FC<{
             />
           )}
         </span>
-
-        {isActive && !isSelected && (
-          <div
-            className={`pointer-events-none absolute top-full z-30 mt-2 whitespace-nowrap ${alignClass}`}
-          >
-            <div className="min-w-[140px] rounded-lg border border-slate-100 bg-white px-2.5 py-2 text-center shadow-lg ring-1 ring-black/5">
-              {isExpectedYield && (
-                <p className="mb-1 text-[9px] font-bold uppercase tracking-wide text-indigo-700">
-                  Expected yield
-                </p>
-              )}
-              {isLatest && !isExpectedYield && (
-                <p className="mb-1 text-[9px] font-bold uppercase tracking-wide text-emerald-700">
-                  Latest yield
-                </p>
-              )}
-              {isFromApi && !isLatest && (
-                <p className="mb-1 text-[9px] font-semibold uppercase tracking-wide text-sky-600">
-                  {/* API reading */}
-                </p>
-              )}
-              <p className="text-[9px] font-semibold uppercase tracking-wide text-slate-400">
-                {node.date}
-              </p>
-              {hasRealYield ? (
-                <p className="mt-0.5 text-xs font-bold" style={{ color: T.taskDone }}>
-                  {node.yield}
-                </p>
-              ) : isPast ? (
-                <p className="mt-1 text-[8px] font-medium text-slate-400">No yield data</p>
-              ) : (
-                <p className="mt-1 text-[8px] font-medium text-slate-400">Upcoming week</p>
-              )}
-              {isPast && hasRealYield ? (
-                <>
-                  <p className="mt-1 border-t border-slate-100 pt-1 text-[9px] font-semibold text-slate-600">
-                    Action taken?
-                  </p>
-                  {isActionYes ? (
-                    <p className="mt-0.5 flex items-center justify-center gap-1 text-[10px] font-bold" style={{ color: T.taskDone }}>
-                      <Check className="h-2.5 w-2.5" /> Yes
-                    </p>
-                  ) : isActionNo ? (
-                    <p className="mt-0.5 flex items-center justify-center gap-1 text-[10px] font-bold" style={{ color: T.taskNotDone }}>
-                      <X className="h-2.5 w-2.5" /> No
-                    </p>
-                  ) : (
-                    <p className="mt-0.5 text-[9px] font-medium" style={{ color: T.pastNotRecorded }}>
-                      Not recorded
-                    </p>
-                  )}
-                  {noteValue && (
-                    <p className="mt-0.5 max-w-[160px] truncate text-[9px] text-slate-600">
-                      Note: {noteValue}
-                    </p>
-                  )}
-                  <p className="mt-0.5 text-[8px] text-slate-400">Click to edit</p>
-                </>
-              ) : null}
-            </div>
-          </div>
-        )}
       </button>
+
+      {isActive && !isSelected && (
+        <div
+          className={`pointer-events-none absolute top-full z-40 mt-4 whitespace-nowrap ${alignClass}`}
+        >
+          <div className="min-w-[160px] rounded-lg border border-slate-100 bg-white px-3 py-2.5 text-center shadow-lg ring-1 ring-black/5">
+            {isExpectedYield && (
+              <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-indigo-700">
+                Expected yield
+              </p>
+            )}
+            {isLatest && !isExpectedYield && (
+              <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-emerald-700">
+                Latest yield
+              </p>
+            )}
+            {isFromApi && !isLatest && (
+              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-sky-600">
+                {/* API reading */}
+              </p>
+            )}
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+              {node.date}
+            </p>
+            {hasRealYield ? (
+              <p className="mt-0.5 text-sm font-bold" style={{ color: T.taskDone }}>
+                {node.yield}
+              </p>
+            ) : isPast ? (
+              <p className="mt-1 text-[10px] font-medium text-slate-400">No yield data</p>
+            ) : (
+              <p className="mt-1 text-[10px] font-medium text-slate-400">Upcoming week</p>
+            )}
+            {isPast && hasRealYield ? (
+              <>
+                <p className="mt-1.5 border-t border-slate-100 pt-1.5 text-[10px] font-semibold text-slate-600">
+                  Action taken?
+                </p>
+                {isActionYes ? (
+                  <p className="mt-0.5 flex items-center justify-center gap-1 text-xs font-bold" style={{ color: T.taskDone }}>
+                    <Check className="h-3 w-3" /> Yes
+                  </p>
+                ) : isActionNo ? (
+                  <p className="mt-0.5 flex items-center justify-center gap-1 text-xs font-bold" style={{ color: T.taskNotDone }}>
+                    <X className="h-3 w-3" /> No
+                  </p>
+                ) : (
+                  <p className="mt-0.5 text-[10px] font-medium" style={{ color: T.pastNotRecorded }}>
+                    Not recorded
+                  </p>
+                )}
+                {noteValue && (
+                  <p className="mt-0.5 max-w-[180px] truncate text-[10px] text-slate-600">
+                    Note: {noteValue}
+                  </p>
+                )}
+                <p className="mt-1 text-[10px] text-slate-400">Click to edit</p>
+              </>
+            ) : null}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -639,6 +639,8 @@ const FarmerRow: React.FC<{
   const openNode = openDotIndex >= 0 ? visibleNodes[openDotIndex] : null;
   const openNodeKey = openNode ? `${farmer.farmerId}-${openNode.id}` : null;
   const hasOpenPanel = openNodeKey != null;
+  const hasHoverTooltip =
+    Boolean(activeNode?.startsWith(`${farmer.farmerId}-`)) && !hasOpenPanel;
   const isSingleDot = visibleNodes.length === 1;
   const latestSavedNote = savedNotes[0]?.content ?? '';
   const hasAnyYieldOnTimeline = visibleNodes.some(
@@ -670,7 +672,7 @@ const FarmerRow: React.FC<{
     <div
       className={[
         'overflow-visible rounded-xl border bg-white p-2 shadow-sm sm:rounded-2xl sm:p-2.5',
-        hasOpenPanel ? 'relative z-30 pb-40' : '',
+        hasOpenPanel ? 'relative z-30 pb-56' : hasHoverTooltip ? 'relative z-20 pb-32' : '',
         highlightFarmerId === farmer.farmerId
           ? 'border-[#22C55E] ring-2 ring-[#22C55E]/30'
           : 'border-slate-200/80',
@@ -775,7 +777,7 @@ const FarmerRow: React.FC<{
 
           {openNode && openNodeKey && openDotIndex >= 0 && (
             <div
-              className="pointer-events-none absolute top-full z-50 mt-2"
+              className="pointer-events-none absolute top-full z-50 mt-4"
               style={panelStyle}
             >
               <div className="pointer-events-auto">
