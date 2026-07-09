@@ -53,6 +53,9 @@ import { getCache, setCache } from "../utils/cache";
 import { fetchFieldScoreForPlot, fieldScoreCacheKey } from "../utils/fieldScore";
 import { findPlotRef } from "../utils/plotName";
 import MapCropStatusOverlay from "./MapCropStatusOverlay";
+import FieldIndicesStageBadge from "./FieldIndicesStageBadge";
+import { useFieldIndicesCropStage } from "../hooks/useFieldIndicesCropStage";
+import { enrichPlotsWithFarmDetails } from "../utils/fertilizerStage";
 import { fetchPlotBoundaryCoordinates } from "../utils/plotBoundary";
 import {
   cropConditionStyleFromCci,
@@ -63,6 +66,7 @@ import api, {
   encodePlotIdForEventsUrl,
   getCurrentUser,
   getFarmersByFieldOfficer,
+  getFarmsByFarmerId,
   getTeamConnect,
   isAnalyzeSinglePlotPlantationDateError,
   parseFarmersByFieldOfficerResponse,
@@ -202,6 +206,8 @@ function extractPlantationInfo(source: any): {
     source.plantation_type_display ??
     source.plantation_type ??
     source.planting_method ??
+    source.crop_type?.planting_method ??
+    source.crop_type?.planting_method_display ??
     source.crop_type?.plantation_type_display ??
     source.crop_type?.plantation_type;
 
@@ -868,6 +874,35 @@ const OwnerFarmDash: React.FC = () => {
     return extractPlantationInfo(findPlotInSelection(selectedPlotId));
   }, [selectedPlotId, selectedFarmerId, farmersForSelectedOfficer]);
 
+  const selectedFarmerForStage = React.useMemo(
+    () =>
+      farmersForSelectedOfficer.find(
+        (item) => getFarmerId(item) === String(selectedFarmerId),
+      ) ?? null,
+    [farmersForSelectedOfficer, selectedFarmerId],
+  );
+
+  const selectedPlotRecordForStage = React.useMemo(() => {
+    if (!selectedPlotId || !selectedFarmerId) return null;
+
+    const cachedPlots = farmerPlotsCache[String(selectedFarmerId)] ?? [];
+    const fromCache = findPlotRef(cachedPlots, selectedPlotId);
+    const fromFarmer = findPlotInSelection(selectedPlotId);
+    return fromCache ?? fromFarmer;
+  }, [
+    selectedPlotId,
+    selectedFarmerId,
+    farmerPlotsCache,
+    farmersForSelectedOfficer,
+  ]);
+
+  const currentCropStage = useFieldIndicesCropStage(
+    selectedPlotRecordForStage,
+    selectedFarmerForStage,
+    selectedPlotId,
+    selectedFarmerId,
+  );
+
   const displayPlantationDate =
     metrics.plantationDate ?? selectedPlotPlantation.plantationDate;
   const displayPlantationType =
@@ -1036,23 +1071,37 @@ const OwnerFarmDash: React.FC = () => {
         );
         if (cancelled || fetchGen !== farmerFetchGenRef.current) return;
 
+        let enrichedPlots = farmPlots;
+        try {
+          const farmsRes = await getFarmsByFarmerId(farmerId);
+          const farms = parseFarmsListResponse(farmsRes?.data);
+          enrichedPlots = enrichPlotsWithFarmDetails(farmPlots, farms);
+        } catch {
+          enrichedPlots = farmPlots;
+        }
+
         lastFetchedFarmerIdRef.current = farmerId;
         setFarmerPlotsCache((prev) => ({
           ...prev,
-          [farmerId]: farmPlots,
+          [farmerId]: enrichedPlots,
         }));
 
         if (farmer) {
           setFarmersForSelectedOfficer((prev) =>
             prev.map((f) =>
               getFarmerId(f) === farmerId
-                ? { ...f, ...farmer, plots: farmPlots, plots_count: farmPlots.length }
+                ? {
+                    ...f,
+                    ...farmer,
+                    plots: enrichedPlots,
+                    plots_count: enrichedPlots.length,
+                  }
                 : f,
             ),
           );
         }
 
-        applyFarmerPlotsToUi(farmerId, farmPlots);
+        applyFarmerPlotsToUi(farmerId, enrichedPlots);
       } catch {
         if (cancelled || fetchGen !== farmerFetchGenRef.current) return;
         const cached = farmersForSelectedOfficer.find(
@@ -2184,23 +2233,27 @@ const OwnerFarmDash: React.FC = () => {
 
   // Enhanced chart legend
   const ChartLegend: React.FC = () => (
-    <div className="flex flex-wrap gap-1 text-xs font-medium mb-2">
+    <div className="flex flex-wrap items-center gap-1 text-xs font-medium mb-2">
       {Object.entries(lineStyles).map(([key, { color, label }]) => (
-        <button
-          key={key}
-          onClick={() => toggleLine(key)}
-          className={`flex items-center gap-1 px-2 py-1 rounded-full transition-all duration-200 ${
-            visibleLines[key as keyof VisibleLines]
-              ? "bg-white shadow-sm transform scale-105"
-              : "bg-gray-100 opacity-50 hover:opacity-75"
-          }`}
-        >
-          <span
-            className="w-1.5 h-1.5 rounded-full"
-            style={{ backgroundColor: color }}
-          />
-          <span className="text-gray-700 text-xs">{label}</span>
-        </button>
+        <React.Fragment key={key}>
+          <button
+            onClick={() => toggleLine(key)}
+            className={`flex items-center gap-1 px-2 py-1 rounded-full transition-all duration-200 ${
+              visibleLines[key as keyof VisibleLines]
+                ? "bg-white shadow-sm transform scale-105"
+                : "bg-gray-100 opacity-50 hover:opacity-75"
+            }`}
+          >
+            <span
+              className="w-1.5 h-1.5 rounded-full"
+              style={{ backgroundColor: color }}
+            />
+            <span className="text-gray-700 text-xs">{label}</span>
+          </button>
+          {key === "moisture" && (
+            <FieldIndicesStageBadge stage={currentCropStage} />
+          )}
+        </React.Fragment>
       ))}
       {showNDREEvents && (
         <div className="flex items-center gap-1 ml-1 px-2 py-1 bg-orange-100 rounded-md border border-orange-300">

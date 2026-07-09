@@ -387,10 +387,10 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
       case "FarmerDashboard":
         nextView = View.FarmerDashboard;
         break;
-      case "Progress Dashboard":
+      case "Crop Growth Progress":
         nextView = View.ProgressDashboard;
         break;
-      case "Progress Grid":
+      case "Chart of Progress":
         nextView = View.ProgressGrid;
         break;
       case "MyProfile":

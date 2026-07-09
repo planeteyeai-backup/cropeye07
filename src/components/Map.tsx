@@ -17,6 +17,220 @@ import {
   latestRebinDateAcrossAllLayers,
   type AnalysisTimelineResponse,
 } from "../services/analysisTimeline";
+import { getSinglePlotAgroStats } from "../api";
+import { useI18nLite } from "../i18nLite.ts";
+import {
+  calculateAreaMetricsFromGeometry,
+  type GeoJsonPolygon,
+} from "../utils/plotGeometry";
+
+const ACRES_PER_HECTARE = 2.47105381;
+
+function parsePositiveArea(value: unknown): number | null {
+  if (value == null || value === "" || value === "N/A") return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function hectaresToAcres(value: unknown): number | null {
+  const ha = parsePositiveArea(value);
+  return ha != null ? ha * ACRES_PER_HECTARE : null;
+}
+
+function normalizePlotKey(value: unknown): string {
+  return String(value ?? "")
+    .trim()
+    .replace(/^GAT/i, "")
+    .replace(/\//g, "_")
+    .replace(/ /g, "_")
+    .toLowerCase();
+}
+
+export function plotKeyFromRecord(plot: any): string {
+  const fastapi = plot?.fastapi_plot_id != null ? String(plot.fastapi_plot_id).trim() : "";
+  if (fastapi) return fastapi;
+
+  const gat = plot?.gat_number != null ? String(plot.gat_number).trim() : "";
+  const num = plot?.plot_number != null ? String(plot.plot_number).trim() : "";
+  if (gat && num) return `${gat}_${num}`;
+  if (gat) return gat;
+  if (num) return num;
+  return "";
+}
+
+function plotKeysForRecord(plot: any): string[] {
+  const keys = [
+    plot?.fastapi_plot_id,
+    plot?.plot_name,
+    plot?.plot_id,
+    plot?.gat_number && plot?.plot_number
+      ? `${plot.gat_number}_${plot.plot_number}`
+      : null,
+    plot?.gat_number && plot?.plot_number
+      ? `${plot.gat_number}/${plot.plot_number}`
+      : null,
+  ]
+    .filter((value) => value != null && `${value}`.trim() !== "")
+    .map((value) => normalizePlotKey(value));
+
+  return [...new Set(keys)];
+}
+
+function recordsMatchPlotName(record: any, plotName: string): boolean {
+  if (!record || !plotName?.trim()) return false;
+  const target = normalizePlotKey(plotName);
+  return plotKeysForRecord(record).includes(target);
+}
+
+function areaAcresFromPolygonGeometry(geometry: unknown): number | null {
+  const geom = geometry as GeoJsonPolygon | null | undefined;
+  if (!geom || geom.type !== "Polygon" || !Array.isArray(geom.coordinates)) {
+    return null;
+  }
+  const metrics = calculateAreaMetricsFromGeometry(geom);
+  return metrics?.acres != null && metrics.acres > 0 ? metrics.acres : null;
+}
+
+/** Acres from Growth GeoJSON properties or events analyzeSinglePlot row. */
+function areaAcresFromApiRecord(record: unknown): number | null {
+  const row = record as Record<string, unknown> | null | undefined;
+  if (!row) return null;
+
+  const soil = row.soil as Record<string, unknown> | undefined;
+  const cropType = row.crop_type as Record<string, unknown> | undefined;
+
+  return (
+    parsePositiveArea(row.area_acres) ??
+    parsePositiveArea(soil?.area_acres) ??
+    parsePositiveArea(row.area) ??
+    parsePositiveArea(row.area_ha) ??
+    parsePositiveArea(row.area_size) ??
+    parsePositiveArea(row.area_size_numeric) ??
+    hectaresToAcres(row.area_size) ??
+    hectaresToAcres(row.area_size_numeric) ??
+    hectaresToAcres(row.area_hectares) ??
+    hectaresToAcres(cropType?.area_size) ??
+    null
+  );
+}
+
+function areaAcresFromFeature(feature: unknown): number | null {
+  const row = feature as any;
+  if (!row) return null;
+
+  const fromProps = areaAcresFromApiRecord(row.properties ?? row);
+  if (fromProps != null) return fromProps;
+
+  const boundary =
+    row.boundary ??
+    row.properties?.boundary ??
+    row.coordinates?.boundary ??
+    row.geometry;
+
+  const fromBoundary = areaAcresFromPolygonGeometry(boundary);
+  if (fromBoundary != null) return fromBoundary;
+
+  return areaAcresFromPolygonGeometry(row.geometry);
+}
+
+function findProfilePlot(profile: unknown, plotName: string) {
+  const plots = (profile as { plots?: unknown[] } | null)?.plots;
+  if (!Array.isArray(plots) || !plotName?.trim()) return null;
+
+  const matched =
+    plots.find((plot: any) => recordsMatchPlotName(plot, plotName)) ?? null;
+  if (matched) return matched;
+
+  return plots.length === 1 ? plots[0] : null;
+}
+
+function areaAcresFromProfilePlot(profile: unknown, plotName: string): number | null {
+  const plot = findProfilePlot(profile, plotName) as any;
+  if (!plot) return null;
+
+  const fromPlot =
+    areaAcresFromFeature(plot) ??
+    areaAcresFromPolygonGeometry(plot?.coordinates?.boundary);
+  if (fromPlot != null) return fromPlot;
+
+  for (const farm of plot.farms ?? []) {
+    const fromFarm = areaAcresFromApiRecord(farm);
+    if (fromFarm != null) return fromFarm;
+  }
+
+  return null;
+}
+
+function areaAcresFromAgroStatsCache(plotName: string): number | null {
+  if (!plotName?.trim()) return null;
+
+  const today = new Date().toISOString().split("T")[0];
+  const keys = [
+    `agroStats_v3_${today}`,
+    `agroStats_${today}`,
+    "agroStats_v3",
+    "agroStats",
+  ];
+
+  for (const key of keys) {
+    const payload = getCache(key) as Record<string, unknown> | null;
+    if (!payload || typeof payload !== "object") continue;
+
+    const row =
+      payload[plotName] ??
+      payload[`"${plotName}"`] ??
+      Object.entries(payload).find(([plotKey]) =>
+        normalizePlotKey(plotKey) === normalizePlotKey(plotName),
+      )?.[1];
+
+    const acres = areaAcresFromApiRecord(row);
+    if (acres != null) return acres;
+  }
+
+  return null;
+}
+
+function resolveDisplayAreaAcres(args: {
+  plotBoundary: any;
+  plotData: any;
+  plotAreaAcres: number | null;
+  profile: unknown;
+  selectedPlotName: string;
+  apiFallbackAreaAcres: number | null;
+}): number | null {
+  const feature = args.plotBoundary ?? args.plotData?.features?.[0];
+
+  const fromFeature = areaAcresFromFeature(feature);
+  if (fromFeature != null) return fromFeature;
+
+  if (args.plotAreaAcres != null && args.plotAreaAcres > 0) {
+    return args.plotAreaAcres;
+  }
+
+  const fromProfile = areaAcresFromProfilePlot(
+    args.profile,
+    args.selectedPlotName,
+  );
+  if (fromProfile != null) return fromProfile;
+
+  const cachedProfile = getCache("farmerProfile") as unknown;
+  if (cachedProfile && cachedProfile !== args.profile) {
+    const fromCachedProfile = areaAcresFromProfilePlot(
+      cachedProfile,
+      args.selectedPlotName,
+    );
+    if (fromCachedProfile != null) return fromCachedProfile;
+  }
+
+  const fromAgroStats = areaAcresFromAgroStatsCache(args.selectedPlotName);
+  if (fromAgroStats != null) return fromAgroStats;
+
+  if (args.apiFallbackAreaAcres != null && args.apiFallbackAreaAcres > 0) {
+    return args.apiFallbackAreaAcres;
+  }
+
+  return null;
+}
 
 // Add custom styles for the enhanced tooltip
 const tooltipStyles = `
@@ -280,6 +494,7 @@ const CropEyeMap: React.FC<MapProps> = ({
   onSplitScreen,
 }) => {
   const { profile, loading: profileLoading } = useFarmerProfile();
+  const { t } = useI18nLite();
   const { getCached, setCached } = useAppContext();
   const plotNameForApi = (plotKey: string) =>
     resolveApiPlotName(plotKey, profile?.plots);
@@ -310,6 +525,9 @@ const CropEyeMap: React.FC<MapProps> = ({
   const [layerChangeKey, setLayerChangeKey] = useState(0);
   const [pixelTooltip, setPixelTooltip] = useState<{layers: Array<{layer: string, label: string, description: string, percentage: number}>, x: number, y: number} | null>(null);
   const [plotAreaAcres, setPlotAreaAcres] = useState<number | null>(null);
+  const [apiFallbackAreaAcres, setApiFallbackAreaAcres] = useState<number | null>(
+    null,
+  );
   
   // Date navigation state (similar to Streamlit logic)
   const [currentEndDate, setCurrentEndDate] = useState<string>(() => {
@@ -463,7 +681,10 @@ const CropEyeMap: React.FC<MapProps> = ({
   useEffect(() => {
     if (profileLoading || !profile) return;
 
-    const plotNames = profile.plots?.map(plot => plot.fastapi_plot_id) || [];
+    const plotNames =
+      profile.plots
+        ?.map((plot) => plotKeyFromRecord(plot))
+        .filter((name) => name.trim() !== "") || [];
     const savedPlot = typeof window !== 'undefined' ? localStorage.getItem('selectedPlot') : null;
     const savedIsValid = savedPlot && plotNames.includes(savedPlot);
     const plotToUse = savedIsValid ? savedPlot : (plotNames.length > 0 ? plotNames[0] : null);
@@ -1239,15 +1460,92 @@ const CropEyeMap: React.FC<MapProps> = ({
   // Use plotBoundary if available (persists across layer changes), otherwise fall back to plotData
   const currentPlotFeature = plotBoundary || plotData?.features?.[0];
 
+  const displayAreaAcres = useMemo(
+    () =>
+      resolveDisplayAreaAcres({
+        plotBoundary,
+        plotData,
+        plotAreaAcres,
+        profile,
+        selectedPlotName,
+        apiFallbackAreaAcres,
+      }),
+    [
+      plotBoundary,
+      plotData,
+      plotAreaAcres,
+      profile,
+      selectedPlotName,
+      apiFallbackAreaAcres,
+    ],
+  );
+
   // Persist the last known non-zero plot area so it doesn't flash to 0 during refetches
   useEffect(() => {
-    const area =
-      (plotBoundary?.properties?.area_acres ??
-        plotData?.features?.[0]?.properties?.area_acres) as number | undefined;
-    if (typeof area === "number" && Number.isFinite(area) && area > 0) {
+    const area = areaAcresFromFeature(plotBoundary ?? plotData?.features?.[0]);
+    if (area != null) {
       setPlotAreaAcres(area);
     }
   }, [plotBoundary, plotData]);
+
+  // Fallback: profile, agroStats cache, then events analyzeSinglePlot
+  useEffect(() => {
+    if (!selectedPlotName?.trim()) {
+      setApiFallbackAreaAcres(null);
+      return;
+    }
+
+    const immediate =
+      areaAcresFromProfilePlot(profile, selectedPlotName) ??
+      areaAcresFromAgroStatsCache(selectedPlotName);
+
+    if (immediate != null) {
+      setApiFallbackAreaAcres(immediate);
+      return;
+    }
+
+    const fromGrowth = areaAcresFromFeature(
+      plotBoundary ?? plotData?.features?.[0],
+    );
+    if (fromGrowth != null || (plotAreaAcres != null && plotAreaAcres > 0)) {
+      return;
+    }
+
+    const cacheKey = `mapPlotAreaAcres_${selectedPlotName}`;
+    const cached = getCached(cacheKey) as { areaAcres?: number } | null;
+    if (cached?.areaAcres != null && cached.areaAcres > 0) {
+      setApiFallbackAreaAcres(cached.areaAcres);
+      return;
+    }
+
+    let cancelled = false;
+    const apiPlot = plotNameForApi(selectedPlotName);
+
+    void getSinglePlotAgroStats(apiPlot)
+      .then((data) => {
+        if (cancelled) return;
+        const acres = areaAcresFromApiRecord(data);
+        if (acres != null) {
+          setApiFallbackAreaAcres(acres);
+          setCached(cacheKey, { areaAcres: acres });
+        }
+      })
+      .catch(() => {
+        // analyzeSinglePlot may fail when plantation date is missing
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    selectedPlotName,
+    plotBoundary,
+    plotData,
+    plotAreaAcres,
+    profile,
+    getCached,
+    setCached,
+  ]);
 
   const legendData = useMemo(() => {
     if (activeLayer === "PEST") {
@@ -1830,6 +2128,7 @@ const CropEyeMap: React.FC<MapProps> = ({
                 disabled={loading}
               >
                 {profile.plots?.map((plot) => {
+                  const plotKey = plotKeyFromRecord(plot);
                   let displayName = "";
 
                   if (
@@ -1866,10 +2165,7 @@ const CropEyeMap: React.FC<MapProps> = ({
                   }
 
                   return (
-                    <option
-                      key={plot.fastapi_plot_id}
-                      value={plot.fastapi_plot_id}
-                    >
+                    <option key={plotKey || plot.id} value={plotKey}>
                       {displayName}
                     </option>
                   );
@@ -2005,19 +2301,13 @@ const CropEyeMap: React.FC<MapProps> = ({
           </button>
         )} 
 
-        {(plotBoundary || currentPlotFeature) && (
+        {(plotBoundary || currentPlotFeature || displayAreaAcres != null) && (
           <>
             <div className="plot-info">
               <div className="plot-area">
                 <span className="plot-area-value">
-                  {(() => {
-                    const raw =
-                      (plotBoundary || currentPlotFeature)?.properties?.area_acres ??
-                      plotAreaAcres;
-                    const n = Number(raw);
-                    return Number.isFinite(n) && n > 0 ? n.toFixed(2) : "0.00";
-                  })()}{" "}
-                  acre
+                  {displayAreaAcres != null ? displayAreaAcres.toFixed(2) : "0.00"}{" "}
+                  {t("farmerDashboard.units.acre", { defaultValue: "acre" })}
                 </span>
               </div>
             </div>

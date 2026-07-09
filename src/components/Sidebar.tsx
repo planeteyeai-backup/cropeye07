@@ -97,7 +97,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       case 'planeteye':
         return [
           renderMenu('Progress Dashboard', <Route size={20} />),
-          renderMenu('Progress Grid', <LayoutGrid size={20} />),
+          renderMenu('Chart of Progress', <LayoutGrid size={20} />),
         ];
       case 'farmer':
         return [

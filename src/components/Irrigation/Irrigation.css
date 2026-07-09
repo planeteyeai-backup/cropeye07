@@ -654,9 +654,36 @@
   }
 }
 
-/* 7-Day Irrigation Schedule table – line height for same display as design */
+/* 7-Day Irrigation Schedule – compact grid cards (no horizontal scroll) */
+.irrigation-schedule-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.72fr) minmax(0, 0.78fr) minmax(0, 1fr) minmax(0, 0.82fr);
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.irrigation-schedule-grid--head > span,
+.irrigation-schedule-grid--total > span,
+.irrigation-schedule-day-card > div {
+  min-width: 0;
+}
+
+.irrigation-schedule-day-card {
+  border: 1px solid rgba(226, 232, 240, 0.9);
+}
+
+.irrigation-schedule-grid--total {
+  margin-top: 0.15rem;
+}
+
 .irrigation-schedule-table,
 .irrigation-schedule-table th,
 .irrigation-schedule-table td {
   line-height: 1.4;
+}
+
+.irrigation-calc-panel code {
+  word-break: break-word;
+  white-space: normal;
+  display: inline;
 }

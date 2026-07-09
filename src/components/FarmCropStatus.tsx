@@ -50,13 +50,20 @@ import {
 import "leaflet/dist/leaflet.css";
 import axios from "axios";
 import { getCache, setCache } from "../utils/cache";
-import { getRecentFarmers, getFieldOfficerAgroStats } from "../api";
+import {
+  getRecentFarmers,
+  getFieldOfficerAgroStats,
+  getFarmsByFarmerId,
+} from "../api";
 import { fetchPlotBoundaryCoordinates } from "../utils/plotBoundary";
 import { getUserData } from "../utils/auth";
 import { useAppContext } from "../context/AppContext";
 import { fetchFieldScoreForPlot, fieldScoreCacheKey } from "../utils/fieldScore";
-import { findPlotRef } from "../utils/plotName";
+import { findPlotRef, plotKeyFromRecord } from "../utils/plotName";
 import { getPlantationFromRecord } from "../utils/plantation";
+import { enrichPlotsWithFarmDetails } from "../utils/fertilizerStage";
+import { useFieldIndicesCropStage } from "../hooks/useFieldIndicesCropStage";
+import FieldIndicesStageBadge from "./FieldIndicesStageBadge";
 import MapCropStatusOverlay from "./MapCropStatusOverlay";
 
 // Constants (same as FarmerDashboard)
@@ -154,6 +161,19 @@ const GAUGE_CHART_HEIGHT = 168;
 const GAUGE_ARC_WIDTH = 240;
 
 type TimePeriod = "daily" | "weekly" | "monthly" | "yearly";
+
+function getFarmerId(farmer: any): string | null {
+  const id =
+    farmer?.id ?? farmer?.farmer_id ?? farmer?.farmerId ?? farmer?.user_id ?? null;
+  return id != null ? String(id) : null;
+}
+
+function parseFarmsListResponse(data: unknown): any[] {
+  const payload = data as { results?: unknown[] };
+  if (Array.isArray(payload?.results)) return payload.results;
+  if (Array.isArray(data)) return data as any[];
+  return [];
+}
 
 const OfficerDashboard: React.FC = () => {
   // const center: [number, number] = [17.5789, 75.053]; // Unused - using mapCenter state instead
@@ -255,7 +275,7 @@ const OfficerDashboard: React.FC = () => {
   // NEW: Function to set plot coordinates from existing state
   const setPlotCoordinatesFromState = (plotId: string): void => {
     // Find the selected farmer and their plot
-    const farmer = farmers.find((f) => String(f.id) === selectedFarmerId);
+    const farmer = farmers.find((f) => getFarmerId(f) === selectedFarmerId);
     const plot = findPlotRef(farmer?.plots, plotId);
 
     if (plot?.boundary?.coordinates) {
@@ -277,26 +297,64 @@ const OfficerDashboard: React.FC = () => {
     }
   };
 
+  // Enrich farmer plots with /farms/ details (plantation date + planting method for crop stage).
+  useEffect(() => {
+    const farmerId = selectedFarmerId?.trim();
+    if (!farmerId) return;
+
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const farmsRes = await getFarmsByFarmerId(farmerId);
+        if (cancelled) return;
+
+        const farms = parseFarmsListResponse(farmsRes?.data);
+        if (!farms.length) return;
+
+        setFarmers((prev) =>
+          prev.map((farmer) => {
+            if (getFarmerId(farmer) !== farmerId) return farmer;
+            const farmerPlots = farmer?.plots ?? [];
+            if (!farmerPlots.length) return farmer;
+            return {
+              ...farmer,
+              plots: enrichPlotsWithFarmDetails(farmerPlots, farms),
+            };
+          }),
+        );
+      } catch {
+        // Stage hook can still fetch farms directly when plot data is incomplete.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedFarmerId]);
+
   // Fetch plots when farmer is selected
   useEffect(() => {
     if (selectedFarmerId) {
       const selectedFarmer = farmers.find(
-        (f) =>
-          String(f.id || f.farmer_id || f.farmerId) ===
-          String(selectedFarmerId),
+        (f) => getFarmerId(f) === String(selectedFarmerId),
       );
-      
+
       if (selectedFarmer) {
-        // Extract fastapi_plot_id from plots array
         const farmerPlots = selectedFarmer.plots || [];
-        const plotIds = farmerPlots.map((plot: any) => plot.fastapi_plot_id);
+        const plotIds = farmerPlots
+          .map((plot: any) => plotKeyFromRecord(plot))
+          .filter((plotId: string) => plotId.trim() !== "");
 
         setPlots(plotIds);
 
-        // Auto-select first plot if available
         if (plotIds.length > 0) {
-          const firstPlotId = plotIds[0];
-          setSelectedPlotId(firstPlotId);
+          setSelectedPlotId((prev) => {
+            if (prev && plotIds.includes(prev)) {
+              return prev;
+            }
+            return plotIds[0];
+          });
         } else {
           setSelectedPlotId("");
         }
@@ -327,7 +385,7 @@ const OfficerDashboard: React.FC = () => {
     if (!selectedPlotId || !selectedFarmerId) {
       return { plantationDate: null, plantationType: null };
     }
-    const farmer = farmers.find((f) => String(f.id) === selectedFarmerId);
+    const farmer = farmers.find((f) => getFarmerId(f) === selectedFarmerId);
     const plot = findPlotRef(farmer?.plots, selectedPlotId);
     const info = getPlantationFromRecord(plot ?? farmer);
     return {
@@ -337,6 +395,23 @@ const OfficerDashboard: React.FC = () => {
         info.plantation_type !== "N/A" ? info.plantation_type : null,
     };
   }, [selectedPlotId, selectedFarmerId, farmers]);
+
+  const selectedFarmer = React.useMemo(
+    () => farmers.find((f) => getFarmerId(f) === selectedFarmerId) ?? null,
+    [farmers, selectedFarmerId],
+  );
+
+  const selectedPlotRecord = React.useMemo(
+    () => findPlotRef(selectedFarmer?.plots, selectedPlotId),
+    [selectedFarmer, selectedPlotId],
+  );
+
+  const currentCropStage = useFieldIndicesCropStage(
+    selectedPlotRecord,
+    selectedFarmer,
+    selectedPlotId,
+    selectedFarmerId,
+  );
 
   useEffect(() => {
     if (lineChartData.length > 0) {
@@ -619,7 +694,7 @@ const OfficerDashboard: React.FC = () => {
       }
 
       if (cachedFieldScore === undefined || cachedFieldScore === null) {
-        const farmer = farmers.find((f) => String(f.id) === selectedFarmerId);
+        const farmer = farmers.find((f) => getFarmerId(f) === selectedFarmerId);
         fetchPromises.push(
           fetchFieldScoreForPlot(selectedPlotId, farmer?.plots)
             .then((score) => {
@@ -687,8 +762,10 @@ const OfficerDashboard: React.FC = () => {
       // Auto-select first farmer if available
       if (farmersData.length > 0) {
         const firstFarmer = farmersData[0];
-        const farmerId = String(firstFarmer.id);
-        setSelectedFarmerId(farmerId);
+        const farmerId = getFarmerId(firstFarmer);
+        if (farmerId) {
+          setSelectedFarmerId(farmerId);
+        }
       }
     } catch (error: any) {
       // Show user-friendly error message
@@ -991,23 +1068,27 @@ const OfficerDashboard: React.FC = () => {
 
   // Enhanced chart legend
   const ChartLegend: React.FC = () => (
-    <div className="flex flex-wrap gap-1 text-xs font-medium mb-2">
+    <div className="flex flex-wrap items-center gap-1 text-xs font-medium mb-2">
       {Object.entries(lineStyles).map(([key, { color, label }]) => (
-        <button
-          key={key}
-          onClick={() => toggleLine(key)}
-          className={`flex items-center gap-1 px-2 py-1 rounded-full transition-all duration-200 ${
-            visibleLines[key as keyof VisibleLines]
-              ? "bg-white shadow-sm transform scale-105"
-              : "bg-gray-100 opacity-50 hover:opacity-75"
-          }`}
-        >
-          <span
-            className="w-1.5 h-1.5 rounded-full"
-            style={{ backgroundColor: color }}
-          />
-          <span className="text-gray-700 text-xs">{label}</span>
-        </button>
+        <React.Fragment key={key}>
+          <button
+            onClick={() => toggleLine(key)}
+            className={`flex items-center gap-1 px-2 py-1 rounded-full transition-all duration-200 ${
+              visibleLines[key as keyof VisibleLines]
+                ? "bg-white shadow-sm transform scale-105"
+                : "bg-gray-100 opacity-50 hover:opacity-75"
+            }`}
+          >
+            <span
+              className="w-1.5 h-1.5 rounded-full"
+              style={{ backgroundColor: color }}
+            />
+            <span className="text-gray-700 text-xs">{label}</span>
+          </button>
+          {key === "moisture" && (
+            <FieldIndicesStageBadge stage={currentCropStage} />
+          )}
+        </React.Fragment>
       ))}
     </div>
   );

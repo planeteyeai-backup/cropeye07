@@ -159,6 +159,9 @@ const clearGoogTransCookies = () => {
 const setGoogTransAndReload = (from: string, to: GtLang) => {
   clearGoogTransCookies();
 
+  localStorage.setItem("app_language", to);
+  window.dispatchEvent(new Event("app_language_changed"));
+
   // Show original English: no googtrans cookie
   if (to === "en") {
     window.location.reload();

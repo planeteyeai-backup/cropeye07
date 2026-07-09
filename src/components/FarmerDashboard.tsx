@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import {
   Line,
   XAxis,
@@ -38,6 +38,8 @@ import { useFarmerProfile } from "../hooks/useFarmerProfile";
 import { useAppContext } from "../context/AppContext";
 import CommonSpinner from "./CommanSpinner";
 import { useI18nLite } from "../i18nLite.ts";
+import FieldIndicesStageBadge from "./FieldIndicesStageBadge";
+import { useFieldIndicesCropStage } from "../hooks/useFieldIndicesCropStage";
 
 // Type definitions
 interface PieChartWithNeedleProps {
@@ -252,6 +254,34 @@ const FarmerDashboard: React.FC = () => {
   const [timePeriod, setTimePeriod] = useState<TimePeriod>("yearly");
   const [aggregatedData, setAggregatedData] = useState<LineChartData[]>([]);
   const [isChatbotOpen, setIsChatbotOpen] = useState(false);
+
+  const selectedPlotForStage = useMemo(() => {
+    if (!profile?.plots?.length) return null;
+
+    const plotToUse = currentPlotId || selectedPlotName;
+    let selectedPlot = profile.plots.find(
+      (plot: { fastapi_plot_id?: string }) => plot.fastapi_plot_id === plotToUse,
+    );
+
+    if (!selectedPlot && plotToUse) {
+      const [gatNum, plotNum] = String(plotToUse).split("_");
+      selectedPlot = profile.plots.find(
+        (plot: { gat_number?: string; plot_number?: string }) =>
+          plot.gat_number === gatNum && plot.plot_number === plotNum,
+      );
+    }
+
+    return selectedPlot ?? profile.plots[0] ?? null;
+  }, [profile, currentPlotId, selectedPlotName]);
+
+  const currentCropStage = useFieldIndicesCropStage(
+    selectedPlotForStage,
+    profile,
+    currentPlotId || selectedPlotName,
+    profile?.farmer_profile?.id != null
+      ? String(profile.farmer_profile.id)
+      : null,
+  );
 
   const lineStyles: LineStyles = {
     growth: {
@@ -822,23 +852,27 @@ const FarmerDashboard: React.FC = () => {
   );
 
   const ChartLegend: React.FC = () => (
-    <div className="flex flex-wrap gap-1 text-xs font-medium mb-2">
+    <div className="flex flex-wrap items-center gap-1 text-xs font-medium mb-2">
       {Object.entries(lineStyles).map(([key, { color, label }]) => (
-        <button
-          key={key}
-          onClick={() => toggleLine(key)}
-          className={`flex items-center gap-1 px-2 py-1 rounded-full transition-all duration-200 ${
-            visibleLines[key as keyof VisibleLines]
-              ? "bg-white shadow-sm transform scale-105"
-              : "bg-gray-100 opacity-50 hover:opacity-75"
-          }`}
-        >
-          <span
-            className="w-1.5 h-1.5 rounded-full"
-            style={{ backgroundColor: color }}
-          />
-          <span className="text-gray-700 text-xs">{label}</span>
-        </button>
+        <React.Fragment key={key}>
+          <button
+            onClick={() => toggleLine(key)}
+            className={`flex items-center gap-1 px-2 py-1 rounded-full transition-all duration-200 ${
+              visibleLines[key as keyof VisibleLines]
+                ? "bg-white shadow-sm transform scale-105"
+                : "bg-gray-100 opacity-50 hover:opacity-75"
+            }`}
+          >
+            <span
+              className="w-1.5 h-1.5 rounded-full"
+              style={{ backgroundColor: color }}
+            />
+            <span className="text-gray-700 text-xs">{label}</span>
+          </button>
+          {key === "moisture" && (
+            <FieldIndicesStageBadge stage={currentCropStage} />
+          )}
+        </React.Fragment>
       ))}
       {showNDREEvents && (
         <div className="flex items-center gap-1 ml-1 px-2 py-1 bg-orange-100 rounded-md border border-orange-300">

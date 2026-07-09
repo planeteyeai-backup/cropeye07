@@ -114,7 +114,7 @@ function FarmerHomeGrid() {
 
               {/* Bottom half (50%): Irrigation schedule */}
               <div className="flex-1 min-h-0 rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden">
-                <div className="h-full overflow-auto">
+                <div className="h-full overflow-hidden">
                   <IrrigationSchedule />
                 </div>
               </div>

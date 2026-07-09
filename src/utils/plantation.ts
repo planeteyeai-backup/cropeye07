@@ -79,83 +79,18 @@ export const getPlantationFromRecord = (record: any) => {
     : { plantation_date: 'N/A', plantation_type: 'N/A' };
 };
 
-/** All user/farmer IDs that may refer to the same person across APIs. */
-export const collectFarmerIdentityIds = (farmer: any, row?: any): number[] => {
-  const raw = [
-    farmer?.id,
-    farmer?.user_id,
-    farmer?.user?.id,
-    row?.farmer_id,
-    row?.user_id,
-    row?.farmer?.user_id,
-    row?.farmer?.user?.id,
-  ];
-  const unique = new Set<number>();
-  for (const value of raw) {
-    if (value == null || value === '') continue;
-    const numeric = Number(value);
-    if (!Number.isNaN(numeric)) unique.add(numeric);
-  }
-  return [...unique];
-};
-
-export const extractUserRoleName = (user: any): string => {
-  const candidates = [
-    user?.role,
-    user?.role_name,
-    user?.role_display,
-    user?.user_role,
-  ];
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
-    if (typeof candidate === 'object') {
-      const name = candidate.name ?? candidate.display_name;
-      if (name) return String(name).trim();
-    }
-  }
-  return '';
-};
-
-export const isFarmerUser = (user: any): boolean => {
-  const roleId = user?.role_id ?? user?.role?.id;
-  if (roleId === 1 || roleId === '1') return true;
-  return extractUserRoleName(user).toLowerCase().includes('farmer');
-};
-
-export const isPlaceholderEmail = (email: unknown): boolean => {
-  const value = String(email ?? '').trim().toLowerCase();
-  if (!value || value === 'n/a') return true;
-  if (/^\d{8,}@/.test(value)) return true;
-  if (/@.*\.local$/.test(value)) return true;
-  return false;
-};
-
 export const getFarmerUserIdFromFarmRow = (farmRow: any): number | null => {
-  const ids = collectFarmerIdentityIds(
-    farmRow?.farmer ?? farmRow?.farm_owner ?? farmRow?.user,
-    farmRow,
-  );
-  return ids[0] ?? null;
+  const id =
+    farmRow?.farmer?.id ??
+    farmRow?.farmer_id ??
+    farmRow?.farm_owner?.id ??
+    farmRow?.user?.id ??
+    farmRow?.user_id;
+
+  if (id == null || id === '') return null;
+  const numeric = Number(id);
+  return Number.isNaN(numeric) ? null : numeric;
 };
-
-export const pickDisplayEmail = (
-  user: any,
-  enrichment?: { email?: string } | null,
-): string => {
-  const raw = String(user?.email ?? '').trim();
-  const enriched = String(enrichment?.email ?? '').trim();
-
-  if (enriched && !isPlaceholderEmail(enriched)) {
-    if (!raw || isPlaceholderEmail(raw)) return enriched;
-    return raw;
-  }
-  if (raw && !isPlaceholderEmail(raw)) return raw;
-  return '';
-};
-
-const isShortAddress = (value: string): boolean =>
-  !value || (!value.includes(',') && value.length < 48);
 
 export const buildFarmerPlantationMapFromFarmRows = (
   farmRows: any[],
@@ -184,6 +119,39 @@ export const buildFarmerPlantationMapFromFarmRows = (
 
   return map;
 };
+
+export type FarmerEnrichment = {
+  email?: string;
+  address?: string;
+  plantation_date?: string;
+  plantation_type?: string;
+};
+
+export type FarmerEnrichmentLookup = {
+  byId: Map<number, FarmerEnrichment>;
+  byPhone: Map<string, FarmerEnrichment>;
+};
+
+const normalizePhone = (phone?: string | null): string => {
+  if (phone == null || phone === '') return '';
+  return String(phone).replace(/\D/g, '').slice(-10);
+};
+
+const mergeEnrichmentValues = (
+  existing: FarmerEnrichment,
+  next: FarmerEnrichment,
+): FarmerEnrichment => ({
+  email: existing.email?.trim() || next.email?.trim() || undefined,
+  address: existing.address?.trim() || next.address?.trim() || undefined,
+  plantation_date:
+    existing.plantation_date && existing.plantation_date !== 'N/A'
+      ? existing.plantation_date
+      : next.plantation_date,
+  plantation_type:
+    existing.plantation_type && existing.plantation_type !== 'N/A'
+      ? existing.plantation_type
+      : next.plantation_type,
+});
 
 const appendAddressParts = (target: string[], source: any) => {
   if (!source) return;
@@ -220,21 +188,17 @@ const appendAddressParts = (target: string[], source: any) => {
       target.push(String(source[key]).trim());
     }
   }
-
-  if (Array.isArray(source.plots)) {
-    for (const plot of source.plots) {
-      appendAddressParts(target, plot);
-      if (plot?.address) appendAddressParts(target, plot.address);
-    }
-  }
 };
 
 export const formatRecordAddress = (record: any, farm?: any): string => {
   const parts: string[] = [];
   appendAddressParts(parts, record);
-  if (farm && farm !== record) {
-    appendAddressParts(parts, farm);
-  }
+  appendAddressParts(parts, farm);
+  appendAddressParts(parts, record?.farmer);
+  appendAddressParts(parts, record?.farm_owner);
+  appendAddressParts(parts, record?.user);
+  appendAddressParts(parts, record?.address_info);
+  appendAddressParts(parts, record?.personal_info);
 
   const unique: string[] = [];
   const seen = new Set<string>();
@@ -248,276 +212,246 @@ export const formatRecordAddress = (record: any, farm?: any): string => {
   return unique.join(', ');
 };
 
-/** Prefer full address from team-connect / farm data over short village-only text from /users/. */
+export const extractUserRoleName = (user: any): string => {
+  if (typeof user?.role === 'string') return user.role;
+  if (user?.role?.name) return String(user.role.name);
+  if (user?.role_name) return String(user.role_name);
+  return '';
+};
+
+export const isFarmerUser = (user: any): boolean =>
+  extractUserRoleName(user).toLowerCase().includes('farmer');
+
+export const pickDisplayEmail = (
+  user: any,
+  enrichment?: FarmerEnrichment,
+): string => {
+  const email =
+    enrichment?.email?.trim() ||
+    user?.email?.trim() ||
+    user?.farmer?.email?.trim() ||
+    user?.user?.email?.trim() ||
+    '';
+  return email;
+};
+
 export const pickDisplayAddress = (
   user: any,
-  enrichment?: { address?: string } | null,
+  enrichment?: FarmerEnrichment,
 ): string => {
-  const enriched = enrichment?.address?.trim() || '';
-  const composite = formatRecordAddress(user).trim();
-  const raw =
-    typeof user?.address === 'string' ? user.address.trim() : '';
+  const enriched = enrichment?.address?.trim();
+  if (enriched) return enriched;
 
-  if (enriched) {
-    if (!raw && !composite) return enriched;
-    if (isShortAddress(raw) && !isShortAddress(enriched)) return enriched;
-    if (isShortAddress(composite) && !isShortAddress(enriched)) return enriched;
-    if (enriched.length > raw.length && enriched.length > composite.length) {
-      return enriched;
-    }
-    if (
-      raw &&
-      raw.split(',').length === 1 &&
-      enriched.toLowerCase().includes(raw.toLowerCase())
-    ) {
-      return enriched;
-    }
-  }
-
-  if (composite) return composite;
-  return raw;
+  const fromRecord = formatRecordAddress(user);
+  return fromRecord || '';
 };
 
-export const formatFarmerDisplayName = (record: any): string => {
-  const fullName = [record?.first_name, record?.last_name]
-    .map((part) => (part == null ? '' : String(part).trim()))
-    .filter(Boolean)
-    .join(' ');
+export const buildEnrichmentFromUserRecord = (record: any): FarmerEnrichment => {
+  const farms = collectFarmsFromRecord(record);
+  const plantation = getPlantationFromRecord(record);
+  const firstFarm = farms[0];
 
-  if (fullName) return fullName;
+  const email =
+    record?.email ??
+    record?.farmer?.email ??
+    record?.farm_owner?.email ??
+    record?.user?.email ??
+    firstFarm?.farmer?.email ??
+    '';
 
-  const username = record?.username ? String(record.username).trim() : '';
-  if (username && !/^\d{8,}$/.test(username)) return username;
+  const address = formatRecordAddress(record, firstFarm);
 
-  return record?.phone_number ? String(record.phone_number) : username || 'N/A';
-};
-
-export const extractFarmersFromTeamConnect = (data: any): any[] => {
-  const farmers: any[] = [];
-  const seen = new Set<number | string>();
-
-  const pushFarmer = (farmer: any) => {
-    if (!farmer) return;
-    const key = farmer?.id ?? farmer?.user_id ?? farmer?.username;
-    if (key != null) {
-      if (seen.has(key)) return;
-      seen.add(key);
-    }
-    farmers.push(farmer);
-  };
-
-  const pushAll = (list: any[]) => {
-    for (const item of list || []) {
-      pushFarmer(item);
-    }
-  };
-
-  pushAll(data?.users_by_role?.farmers);
-  pushAll(data?.farmers);
-
-  const fieldOfficers =
-    data?.users_by_role?.field_officers ??
-    data?.field_officers ??
-    data?.fieldOfficers ??
-    [];
-
-  for (const officer of fieldOfficers) {
-    pushAll(officer?.farmers);
-  }
-
-  return farmers;
-};
-
-export const extractFieldOfficersFromTeamConnect = (data: any): any[] => {
-  const officers: any[] = [];
-  const seen = new Set<number | string>();
-
-  const pushOfficer = (officer: any) => {
-    if (!officer?.id) return;
-    if (seen.has(officer.id)) return;
-    seen.add(officer.id);
-    officers.push(officer);
-  };
-
-  const lists = [
-    data?.users_by_role?.field_officers,
-    data?.field_officers,
-    data?.fieldOfficers,
-  ];
-  for (const list of lists) {
-    if (Array.isArray(list)) {
-      for (const officer of list) pushOfficer(officer);
-    }
-  }
-
-  return officers;
-};
-
-export type FarmerEnrichment = {
-  email: string;
-  address: string;
-  plantation_date: string | null;
-  plantation_type: string | null;
-};
-
-export type FarmerEnrichmentLookup = {
-  byId: Map<number, FarmerEnrichment>;
-  byPhone: Map<string, FarmerEnrichment>;
-};
-
-const normalizePhoneKey = (value: unknown): string =>
-  String(value ?? '').replace(/\D/g, '');
-
-export const getFarmerEnrichment = (
-  user: any,
-  lookup: FarmerEnrichmentLookup,
-): FarmerEnrichment | undefined => {
-  const userId = user?.id;
-  if (userId != null) {
-    const numericId = Number(userId);
-    const direct =
-      lookup.byId.get(numericId) ??
-      lookup.byId.get(userId as number);
-    if (direct) return direct;
-
-    for (const [id, enrichment] of lookup.byId) {
-      if (String(id) === String(userId)) return enrichment;
-    }
-  }
-
-  const phoneKey = normalizePhoneKey(
-    user?.phone_number ?? user?.phone ?? user?.username,
-  );
-  if (phoneKey) {
-    const byPhone = lookup.byPhone.get(phoneKey);
-    if (byPhone) return byPhone;
-
-    if (phoneKey.length >= 10) {
-      const last10 = phoneKey.slice(-10);
-      for (const [key, enrichment] of lookup.byPhone) {
-        if (key.slice(-10) === last10) return enrichment;
-      }
-    }
-  }
-
-  return undefined;
-};
-
-export const buildEnrichmentFromUserRecord = (user: any): FarmerEnrichment => {
-  const plantation = getPlantationFromRecord(user);
   return {
-    email: String(user?.email ?? '').trim(),
-    address: formatRecordAddress(user),
-    plantation_date:
-      plantation.plantation_date !== 'N/A' ? plantation.plantation_date : null,
-    plantation_type:
-      plantation.plantation_type !== 'N/A' ? plantation.plantation_type : null,
+    email: email ? String(email).trim() : undefined,
+    address: address || undefined,
+    plantation_date: plantation.plantation_date,
+    plantation_type: plantation.plantation_type,
   };
 };
 
-const pickBetterEmail = (a: string, b: string): string => {
-  const left = a.trim();
-  const right = b.trim();
-  const leftOk = left && !isPlaceholderEmail(left);
-  const rightOk = right && !isPlaceholderEmail(right);
-  if (leftOk && !rightOk) return left;
-  if (rightOk && !leftOk) return right;
-  if (leftOk && rightOk) return left;
-  return left || right;
+export const collectFarmerIdentityIds = (farmer: any, row?: any): number[] => {
+  const raw = [
+    farmer?.id,
+    farmer?.user_id,
+    row?.farmer_id,
+    row?.user_id,
+    row?.id,
+    row?.farmer?.id,
+    row?.farm_owner?.id,
+    row?.user?.id,
+  ];
+
+  const ids: number[] = [];
+  const seen = new Set<number>();
+  for (const value of raw) {
+    if (value == null || value === '') continue;
+    const numeric = Number(value);
+    if (Number.isNaN(numeric) || seen.has(numeric)) continue;
+    seen.add(numeric);
+    ids.push(numeric);
+  }
+  return ids;
 };
 
-const pickBetterAddress = (a: string, b: string): string => {
-  const left = a.trim();
-  const right = b.trim();
-  if (!left) return right;
-  if (!right) return left;
-  if (isShortAddress(left) && !isShortAddress(right)) return right;
-  if (isShortAddress(right) && !isShortAddress(left)) return left;
-  return left.length >= right.length ? left : right;
-};
-
-const mergeEnrichmentValues = (
-  existing: FarmerEnrichment,
-  next: FarmerEnrichment,
-): FarmerEnrichment => ({
-  email: pickBetterEmail(existing.email, next.email),
-  address: pickBetterAddress(existing.address, next.address),
-  plantation_date: existing.plantation_date || next.plantation_date,
-  plantation_type: existing.plantation_type || next.plantation_type,
-});
-
-const registerEnrichmentInLookup = (
+const registerEnrichment = (
   lookup: FarmerEnrichmentLookup,
   enrichment: FarmerEnrichment,
-  farmer: any,
-  row?: any,
+  ids: number[],
+  phone?: string,
 ) => {
-  for (const farmerId of collectFarmerIdentityIds(farmer, row)) {
-    const existing = lookup.byId.get(farmerId);
+  for (const id of ids) {
+    const existing = lookup.byId.get(id);
     lookup.byId.set(
-      farmerId,
+      id,
       existing ? mergeEnrichmentValues(existing, enrichment) : enrichment,
     );
   }
 
-  const phoneKey = normalizePhoneKey(
-    farmer?.phone_number ??
-      farmer?.phone ??
-      farmer?.username ??
-      row?.phone_number ??
-      row?.farmer_phone ??
-      row?.username,
-  );
-  if (phoneKey) {
-    const existingPhone = lookup.byPhone.get(phoneKey);
+  if (phone) {
+    const existing = lookup.byPhone.get(phone);
     lookup.byPhone.set(
-      phoneKey,
-      existingPhone ? mergeEnrichmentValues(existingPhone, enrichment) : enrichment,
+      phone,
+      existing ? mergeEnrichmentValues(existing, enrichment) : enrichment,
     );
   }
 };
 
 export const buildFarmerEnrichmentLookupFromFarmerProfiles = (
-  farmers: any[],
+  profiles: any[],
 ): FarmerEnrichmentLookup => {
-  const byId = new Map<number, FarmerEnrichment>();
-  const byPhone = new Map<string, FarmerEnrichment>();
+  const lookup: FarmerEnrichmentLookup = {
+    byId: new Map(),
+    byPhone: new Map(),
+  };
 
-  for (const farmer of farmers) {
-    if (!farmer) continue;
-    const enrichment = buildEnrichmentFromUserRecord(farmer);
-    registerEnrichmentInLookup({ byId, byPhone }, enrichment, farmer);
+  for (const profile of profiles ?? []) {
+    const enrichment = buildEnrichmentFromUserRecord(profile);
+    const ids = collectFarmerIdentityIds(profile, profile);
+    const phone = normalizePhone(
+      profile?.phone_number ?? profile?.phone ?? profile?.farmer?.phone_number,
+    );
+    registerEnrichment(lookup, enrichment, ids, phone || undefined);
   }
 
-  return { byId, byPhone };
+  return lookup;
+};
+
+export const buildFarmerEnrichmentLookupFromFarmRows = (
+  farmRows: any[],
+): FarmerEnrichmentLookup => {
+  const lookup: FarmerEnrichmentLookup = {
+    byId: new Map(),
+    byPhone: new Map(),
+  };
+
+  for (const row of farmRows ?? []) {
+    const enrichment = buildEnrichmentFromUserRecord(row);
+    const ids = collectFarmerIdentityIds(row?.farmer ?? row?.farm_owner ?? row?.user, row);
+    const phone = normalizePhone(
+      row?.farmer?.phone_number ??
+        row?.farmer?.phone ??
+        row?.phone_number ??
+        row?.phone,
+    );
+    registerEnrichment(lookup, enrichment, ids, phone || undefined);
+  }
+
+  return lookup;
+};
+
+export const extractFarmersFromTeamConnect = (teamData: any): any[] => {
+  if (!teamData) return [];
+
+  const farmers: any[] = [];
+  const pushUnique = (user: any) => {
+    if (!user) return;
+    const id = user.id ?? user.user_id;
+    if (id != null && farmers.some((item) => (item.id ?? item.user_id) === id)) return;
+    farmers.push(user);
+  };
+
+  if (Array.isArray(teamData.users_by_role?.farmers)) {
+    teamData.users_by_role.farmers.forEach(pushUnique);
+  }
+  if (Array.isArray(teamData.farmers)) {
+    teamData.farmers.forEach(pushUnique);
+  }
+
+  const managers = [
+    ...(Array.isArray(teamData.users_by_role?.managers) ? teamData.users_by_role.managers : []),
+    ...(Array.isArray(teamData.managers) ? teamData.managers : []),
+  ];
+  const fieldOfficers = [
+    ...(Array.isArray(teamData.users_by_role?.field_officers)
+      ? teamData.users_by_role.field_officers
+      : []),
+    ...(Array.isArray(teamData.field_officers) ? teamData.field_officers : []),
+    ...managers.flatMap((manager: any) =>
+      Array.isArray(manager?.field_officers) ? manager.field_officers : [],
+    ),
+  ];
+
+  for (const officer of fieldOfficers) {
+    const nestedFarmers = officer?.farmers ?? officer?.farmer_list ?? [];
+    if (Array.isArray(nestedFarmers)) {
+      nestedFarmers.forEach(pushUnique);
+    }
+  }
+
+  if (Array.isArray(teamData.results)) {
+    teamData.results.forEach((user: any) => {
+      const role = extractUserRoleName(user).toLowerCase();
+      if (role.includes('farmer')) pushUnique(user);
+    });
+  }
+
+  return farmers;
+};
+
+export const extractFieldOfficersFromTeamConnect = (teamData: any): any[] => {
+  if (!teamData) return [];
+
+  const officers: any[] = [];
+  const pushUnique = (user: any) => {
+    if (!user) return;
+    const id = user.id ?? user.user_id;
+    if (id != null && officers.some((item) => (item.id ?? item.user_id) === id)) return;
+    officers.push(user);
+  };
+
+  if (Array.isArray(teamData.users_by_role?.field_officers)) {
+    teamData.users_by_role.field_officers.forEach(pushUnique);
+  }
+  if (Array.isArray(teamData.field_officers)) {
+    teamData.field_officers.forEach(pushUnique);
+  }
+
+  const managers = [
+    ...(Array.isArray(teamData.users_by_role?.managers) ? teamData.users_by_role.managers : []),
+    ...(Array.isArray(teamData.managers) ? teamData.managers : []),
+  ];
+
+  for (const manager of managers) {
+    const nested = manager?.field_officers ?? manager?.fieldOfficers ?? [];
+    if (Array.isArray(nested)) {
+      nested.forEach(pushUnique);
+    }
+  }
+
+  if (Array.isArray(teamData.results)) {
+    teamData.results.forEach((user: any) => {
+      const role = extractUserRoleName(user).toLowerCase();
+      if (role.includes('field') && role.includes('officer')) pushUnique(user);
+    });
+  }
+
+  return officers;
 };
 
 export const buildFarmerEnrichmentLookup = (
   teamData: any,
-): FarmerEnrichmentLookup => {
-  const byId = new Map<number, FarmerEnrichment>();
-  const byPhone = new Map<string, FarmerEnrichment>();
-
-  for (const farmer of extractFarmersFromTeamConnect(teamData)) {
-    if (!farmer) continue;
-
-    const farms = collectFarmsFromRecord(farmer);
-    const firstFarm = farms[0] ?? null;
-    const plantation = getPlantationFromRecord(farmer);
-    const enrichment: FarmerEnrichment = {
-      email: farmer?.email ? String(farmer.email).trim() : '',
-      address: formatRecordAddress(farmer, firstFarm),
-      plantation_date:
-        plantation.plantation_date !== 'N/A' ? plantation.plantation_date : null,
-      plantation_type:
-        plantation.plantation_type !== 'N/A' ? plantation.plantation_type : null,
-    };
-
-    registerEnrichmentInLookup({ byId, byPhone }, enrichment, farmer);
-  }
-
-  return { byId, byPhone };
-};
+): FarmerEnrichmentLookup =>
+  buildFarmerEnrichmentLookupFromFarmerProfiles(extractFarmersFromTeamConnect(teamData));
 
 export const mergeFarmerEnrichmentLookups = (
   ...lookups: FarmerEnrichmentLookup[]
@@ -525,61 +459,46 @@ export const mergeFarmerEnrichmentLookups = (
   const byId = new Map<number, FarmerEnrichment>();
   const byPhone = new Map<string, FarmerEnrichment>();
 
-  const apply = (enrichment: FarmerEnrichment, farmerId?: number, phoneKey?: string) => {
+  const apply = (
+    enrichment: FarmerEnrichment,
+    farmerId?: number,
+    phoneKey?: string,
+  ) => {
     if (farmerId != null && !Number.isNaN(farmerId)) {
       const existing = byId.get(farmerId);
-      byId.set(farmerId, existing ? mergeEnrichmentValues(existing, enrichment) : enrichment);
+      byId.set(
+        farmerId,
+        existing ? mergeEnrichmentValues(existing, enrichment) : enrichment,
+      );
     }
     if (phoneKey) {
       const existing = byPhone.get(phoneKey);
-      byPhone.set(phoneKey, existing ? mergeEnrichmentValues(existing, enrichment) : enrichment);
+      byPhone.set(
+        phoneKey,
+        existing ? mergeEnrichmentValues(existing, enrichment) : enrichment,
+      );
     }
   };
 
   for (const lookup of lookups) {
-    for (const [id, enrichment] of lookup.byId) {
-      apply(enrichment, id);
-    }
-    for (const [phone, enrichment] of lookup.byPhone) {
-      apply(enrichment, undefined, phone);
-    }
+    lookup.byId.forEach((enrichment, id) => apply(enrichment, id));
+    lookup.byPhone.forEach((enrichment, phone) => apply(enrichment, undefined, phone));
   }
 
   return { byId, byPhone };
 };
 
-/** Build enrichment from /farms/?include_farmer=true rows (works for manager login). */
-export const buildFarmerEnrichmentLookupFromFarmRows = (
-  farmRows: any[],
-): FarmerEnrichmentLookup => {
-  const byId = new Map<number, FarmerEnrichment>();
-  const byPhone = new Map<string, FarmerEnrichment>();
+export const getFarmerEnrichment = (
+  user: any,
+  lookup: FarmerEnrichmentLookup,
+): FarmerEnrichment | undefined => {
+  const byId = lookup.byId.get(user?.id);
+  if (byId) return byId;
 
-  for (const row of farmRows) {
-    const farmer = row?.farmer ?? row?.farm_owner ?? row?.user ?? row?.farm_owner?.user ?? {};
-    const identityIds = collectFarmerIdentityIds(farmer, row);
-    if (identityIds.length === 0) continue;
-
-    const mergedFarmer = { ...farmer, ...row };
-    const plantation = getPlantationFromFarm(row);
-    const enrichment: FarmerEnrichment = {
-      email: String(
-        farmer?.email ?? row?.farmer_email ?? row?.email ?? '',
-      ).trim(),
-      address: formatRecordAddress(mergedFarmer, row),
-      plantation_date:
-        plantation.plantation_date !== 'N/A' ? plantation.plantation_date : null,
-      plantation_type:
-        plantation.plantation_type !== 'N/A' ? plantation.plantation_type : null,
-    };
-
-    registerEnrichmentInLookup({ byId, byPhone }, enrichment, mergedFarmer, row);
+  const phone = normalizePhone(user?.phone_number ?? user?.phone);
+  if (phone) {
+    return lookup.byPhone.get(phone);
   }
 
-  return { byId, byPhone };
+  return undefined;
 };
-
-/** @deprecated Use buildFarmerEnrichmentLookup */
-export const buildFarmerEnrichmentMap = (
-  teamData: any,
-): Map<number, FarmerEnrichment> => buildFarmerEnrichmentLookup(teamData).byId;

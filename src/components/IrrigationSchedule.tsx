@@ -27,7 +27,6 @@ const IrrigationSchedule: React.FC = () => {
   const [distanceMotorToPlot, setDistanceMotorToPlot] = useState<number | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
-
   // ET Range function
   const getETRange = (etValue: number): 'Low' | 'Medium' | 'High' => {
     if (etValue <= 3.0) return 'Low';
@@ -82,53 +81,48 @@ const IrrigationSchedule: React.FC = () => {
     return Math.round(liters);
   };
 
-  const formatTimeHrsMins = (hoursTotal: number) => {
-    if (!Number.isFinite(hoursTotal) || hoursTotal <= 0) return "0 hrs 0 mins";
+  const formatTimeShort = (hoursTotal: number) => {
+    if (!Number.isFinite(hoursTotal) || hoursTotal <= 0) return "0h 0m";
     const h = Math.floor(hoursTotal);
     const m = Math.round((hoursTotal - h) * 60);
-    return `${h} hrs ${m} mins`;
+    return `${h}h ${m}m`;
   };
 
-  const calcIrrigationTime = (waterRequired: number) => {
-    if (waterRequired <= 0) return "0 hrs 0 mins";
+  const calcIrrigationTimeHours = (waterRequired: number): number | null => {
+    if (waterRequired <= 0) return 0;
 
     if (irrigationTypeCode === "drip") {
       if (!flowRateLph || flowRateLph <= 0 || !emittersCount || emittersCount <= 0 || !totalPlants || totalPlants <= 0)
-        return "N/A";
+        return null;
 
-      const timeInMinutes = ((waterRequired * 60) / (43560/spacingA*spacingB) * (emittersCount * flowRateLph));
-      const hours = timeInMinutes / 60;
-      return formatTimeHrsMins(hours);
-    } else {
-      if (!motorHp || motorHp <= 0 || !pipeWidthInches || pipeWidthInches <= 0) {
-        return "N/A";
-      }
-
-      const diameterMeters = pipeWidthInches * 0.0254;
-      const pipeAreaSqM = Math.PI * Math.pow(diameterMeters / 2, 2);
-
-      // Base velocity derived from motor horsepower (m/s)
-      const baseVelocity = Math.max(0.75, Math.min(2.5, motorHp * 0.45));
-
-      // Simple friction-loss adjustment using pipe length (5% reduction per 100 m, capped)
-      let frictionFactor = 1;
-      if (distanceMotorToPlot && distanceMotorToPlot > 0) {
-        const reduction = (distanceMotorToPlot / 100) * 0.05;
-        frictionFactor = Math.max(0.5, 1 - reduction);
-      }
-
-      const effectiveVelocity = baseVelocity * frictionFactor;
-
-      const flowRateLitersPerHour =
-        pipeAreaSqM * effectiveVelocity * 3600 * 1000; // cubic meters/sec to L/h
-
-      if (!Number.isFinite(flowRateLitersPerHour) || flowRateLitersPerHour <= 0) {
-        return "N/A";
-      }
-
-      const hours = waterRequired / flowRateLitersPerHour;
-      return formatTimeHrsMins(hours);
+      const timeInMinutes =
+        ((waterRequired * 60) / (43560 / spacingA * spacingB)) *
+        (emittersCount * flowRateLph);
+      return timeInMinutes / 60;
     }
+
+    if (!motorHp || motorHp <= 0 || !pipeWidthInches || pipeWidthInches <= 0) {
+      return null;
+    }
+
+    const diameterMeters = pipeWidthInches * 0.0254;
+    const pipeAreaSqM = Math.PI * Math.pow(diameterMeters / 2, 2);
+    const baseVelocity = Math.max(0.75, Math.min(2.5, motorHp * 0.45));
+
+    let frictionFactor = 1;
+    if (distanceMotorToPlot && distanceMotorToPlot > 0) {
+      const reduction = (distanceMotorToPlot / 100) * 0.05;
+      frictionFactor = Math.max(0.5, 1 - reduction);
+    }
+
+    const effectiveVelocity = baseVelocity * frictionFactor;
+    const flowRateLitersPerHour = pipeAreaSqM * effectiveVelocity * 3600 * 1000;
+
+    if (!Number.isFinite(flowRateLitersPerHour) || flowRateLitersPerHour <= 0) {
+      return null;
+    }
+
+    return waterRequired / flowRateLitersPerHour;
   };
 
   useEffect(() => {
@@ -458,8 +452,7 @@ const IrrigationSchedule: React.FC = () => {
       // Result is in Liters per Acre
       const waterRequired = waterFromNetET(netEt, kc);
       
-      // Step 3: Calculate irrigation time based on water required
-      const time = calcIrrigationTime(waterRequired);
+      const timeHours = calcIrrigationTimeHours(waterRequired);
 
       scheduleData.push({
         date: date.toLocaleDateString("en-GB", { day: "numeric", month: "short" }),
@@ -467,8 +460,10 @@ const IrrigationSchedule: React.FC = () => {
         etDisplayed: etForDay,
         etRange: getETRange(etForDay),
         rainfall,
+        netEt,
         waterRequired,
-        time,
+        timeHours,
+        time: timeHours === null ? "N/A" : formatTimeShort(timeHours),
       });
     }
 
@@ -476,6 +471,13 @@ const IrrigationSchedule: React.FC = () => {
   };
 
   const scheduleData = generateScheduleData();
+  const totalWaterRequired = scheduleData.reduce((sum, day) => sum + day.waterRequired, 0);
+  const totalIrrigationMinutes = scheduleData.reduce((sum, day) => {
+    if (day.timeHours === null || !Number.isFinite(day.timeHours)) return sum;
+    return sum + day.timeHours * 60;
+  }, 0);
+  const totalIrrigationTime = formatTimeShort(totalIrrigationMinutes / 60);
+  const timeColumnLabel = irrigationType === "Drip" ? "Drip" : "Flood";
 
   useEffect(() => {
     const scheduleData = generateScheduleData();
@@ -489,70 +491,82 @@ const IrrigationSchedule: React.FC = () => {
   }, [etValue, rainfallMm, forecastRainfall, kc, motorHp, flowRateLph, emittersCount, totalPlants, spacingA, spacingB, irrigationTypeCode, setAppState]);
 
   return (
-    <div className="bg-white rounded-lg overflow-hidden shadow h-full">
-      <div className="bg-green-600 text-white p-2 flex items-center justify-center">
-        <h2 className="text-lg font-semibold text-center">7-Day Irrigation Schedule /acre</h2>
+    <div className="bg-white rounded-lg overflow-hidden shadow h-full flex flex-col">
+      <div className="bg-green-600 text-white p-2 flex items-center justify-center shrink-0">
+        <h2 className="text-base sm:text-lg font-semibold text-center leading-tight">
+          7-Day Irrigation Schedule /acre
+        </h2>
       </div>
 
-      <div className="overflow-x-auto">
-        <table className="irrigation-schedule-table w-full text-xs h-full border-collapse">
-          <thead className="bg-green-100">
-            <tr>
-              <th className="px-2 py-1 text-left text-xs font-medium">Date</th>
-              <th className="px-2 py-1 text-left text-xs font-medium">ETO</th>
-              <th className="px-2 py-1 text-left text-xs font-medium">Rainfall(mm)</th>
-              <th className="px-2 py-1 text-left text-xs font-medium">Water req.(L)</th>
-              <th className="px-2 py-1 text-left text-xs font-medium">{irrigationType} Time</th>
-            </tr>
-          </thead>
-          <tbody>
-            {scheduleData.map((day, idx) => (
-              <tr
-                key={idx}
-                className={`${idx % 2 ? 'bg-white' : 'bg-gray-50'} ${
-                  day.isToday ? 'ring-2 ring-blue-300' : ''
-                }`}
-              >
-                <td className="px-2 py-1 font-medium">
-                  <div className="flex gap-1 items-center flex-wrap">
-                    <span className="text-xs">{day.date}</span>
-                    {day.isToday && (
-                      <span className="bg-blue-100 text-blue-800 px-1 py-0.5 rounded text-xs">
-                        Today
-                      </span>
-                    )}
-                    <Sun className="h-3 w-3 text-orange-500" />
-                  </div>
-                </td>
-                <td className="px-2 py-1">
-                  {loading ? (
-                    <div className="loading-spinner-small" />
-                  ) : (
-                    <span
-                      className={`px-2 py-0.5 rounded-md font-semibold text-xs ${getETRangeColor(day.etRange)}`}
-                    >
-                      {day.etRange}
-                    </span>
-                  )}
-                </td>
-                <td className="px-2 py-1">
-                  <span className="font-medium text-xs text-gray-500">
-                    {Number(day.rainfall).toFixed(1)}
+      <div className="flex-1 min-h-0 flex flex-col p-2 gap-1">
+        <div className="irrigation-schedule-grid irrigation-schedule-grid--head shrink-0 rounded-md bg-green-100 px-2 py-1.5 text-[10px] sm:text-[11px] font-semibold text-gray-700">
+          <span>Date</span>
+          <span>ETO</span>
+          <span>Rain(mm)</span>
+          <span>Water(L)</span>
+          <span>{timeColumnLabel}</span>
+        </div>
+
+        <div className="flex-1 min-h-0 flex flex-col gap-1">
+          {scheduleData.map((day, idx) => (
+            <div
+              key={idx}
+              className={[
+                "irrigation-schedule-grid irrigation-schedule-day-card rounded-md px-2 py-1.5 text-[10px] sm:text-[11px]",
+                day.isToday
+                  ? "bg-blue-50 ring-1 ring-blue-300"
+                  : idx % 2
+                    ? "bg-white"
+                    : "bg-gray-50",
+              ].join(" ")}
+            >
+              <div className="min-w-0">
+                <div className="flex items-center gap-1 min-w-0">
+                  <span className="font-semibold text-gray-800 whitespace-nowrap">{day.date}</span>
+                  <Sun className="h-3 w-3 shrink-0 text-orange-500" />
+                </div>
+                {day.isToday && (
+                  <span className="mt-0.5 inline-block rounded bg-blue-100 px-1 py-0.5 text-[9px] font-semibold text-blue-800">
+                    Today
                   </span>
-                </td>
-                <td className="px-2 py-1 text-blue-600 font-semibold text-xs">
-                  {day.waterRequired.toLocaleString()}
-                </td>
-                <td className="px-2 py-1 text-gray-800 text-xs">
-                  <strong>{day.time}</strong>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                )}
+              </div>
+
+              <div className="flex items-center">
+                {loading ? (
+                  <div className="loading-spinner-small" />
+                ) : (
+                  <span
+                    className={`inline-block rounded px-1.5 py-0.5 text-[9px] sm:text-[10px] font-semibold whitespace-nowrap ${getETRangeColor(day.etRange)}`}
+                  >
+                    {day.etRange}
+                  </span>
+                )}
+              </div>
+
+              <div className="font-medium text-gray-600 whitespace-nowrap">
+                {Number(day.rainfall).toFixed(1)}
+              </div>
+
+              <div className="font-semibold text-blue-600 whitespace-nowrap">
+                {day.waterRequired.toLocaleString()}
+              </div>
+
+              <div className="font-semibold text-gray-800 whitespace-nowrap">
+                {day.time}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="irrigation-schedule-grid irrigation-schedule-grid--total shrink-0 rounded-md border border-green-200 bg-green-50 px-2 py-2 text-[10px] sm:text-[11px] font-semibold">
+          <span className="col-span-3 text-gray-800">7-Day Total</span>
+          <span className="text-blue-700 whitespace-nowrap">{totalWaterRequired.toLocaleString()} L</span>
+          <span className="text-gray-800 whitespace-nowrap">{totalIrrigationTime}</span>
+        </div>
       </div>
 
-      {error && <div className="error-message-small">{error}</div>}
+      {error && <div className="error-message-small px-2 pb-2">{error}</div>}
     </div>
   );
 };

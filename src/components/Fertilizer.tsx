@@ -5,6 +5,8 @@ import { Download } from "lucide-react";
 import "./App.css";
 import { useAppContext } from "../context/AppContext";
 import FertilizerTable from "./FertilizerTable";
+import { useFarmerProfile } from "../hooks/useFarmerProfile";
+import { useI18nLite, type AppLanguage } from "../i18nLite";
 
 interface FertilizerEntry {
   day: number;
@@ -14,7 +16,13 @@ interface FertilizerEntry {
   chemical: string;
 }
 
-const videoList = [
+interface VideoResource {
+  title: string;
+  url: string;
+  desc: string;
+}
+
+const marathiVideoList: VideoResource[] = [
   {
     title: "उस शेतीची ओळख आणि महाराष्ट्राचे हवामान",
     url: "https://www.youtube.com/embed/qzFbZvDin4U?si=y8NwUZfi7wWBWfWV",
@@ -27,16 +35,61 @@ const videoList = [
   },
   {
     title: "ऊस शेतीत योग्य जातीची निवड",
-    url: "https://www.youtube.com/embed/Si0hh9xFHvI?si=Y582InMZoil2dccv",
+    url: "https://www.youtube.com/                                                                                                                               embed/Si0hh9xFHvI?si=Y582InMZoil2dccv",
     desc: "ऊस शेतीत योग्य जातीची निवड ही यशस्वी शेतीचा पाया आहे. महाराष्ट्र, उत्तर प्रदेश आणि कर्नाटकात कोणत्या जाती सर्वाधिक लोकप्रिय आहेत, त्यांच्या वैशिष्ट्यांसह जाणून घ्या.",
   },
 ];
 
-import { useFarmerProfile } from "../hooks/useFarmerProfile";
+const kannadaVideoList: VideoResource[] = [
+  {
+    title: "Kannada Sugarcane Video 1",
+    url: "https://www.youtube.com/embed/RiXYq-0meA0",
+    desc: "ಕನ್ನಡದಲ್ಲಿ ಉಸ್ಸು ಬೆಳೆಯುವಿಕೆ, ಹವಾಮಾನ ಮತ್ತು ಶೇತಕೀಯ ನಿರ್ವಹಣೆ ಕುರಿತ ಮಾಹಿತಿ — ಭಾಗ ೧.",
+  },
+  {
+    title: "Kannada Sugarcane Video 2",
+    url: "https://www.youtube.com/embed/mX-h9qpQ3yM",
+    desc: "ಕನ್ನಡದಲ್ಲಿ ಉಸ್ಸು ಬೆಳೆಯುವಿಕೆ, ನೆಲ ಸಿದ್ಧತೆ ಮತ್ತು ಮಣ್ಣಿನ ಆರೋಗ್ಯ ಕುರಿತ ಮಾಹಿತಿ — ಭಾಗ ೨.",
+  },
+  {
+    title: "Kannada Sugarcane Video 3",
+    url: "https://www.youtube.com/embed/oBwjJarRRwk",
+    desc: "ಕನ್ನಡದಲ್ಲಿ ಉಸ್ಸು ಬೆಳೆಯುವಿಕೆ, ತಳಿ ಆಯ್ಕೆ ಮತ್ತು ಉತ್ತಮ ಉತ್ಪಾದನೆ ಕುರಿತ ಮಾಹಿತಿ — ಭಾಗ ೩.",
+  },
+];
+
+const readGoogTransLanguage = (): AppLanguage | null => {
+  if (typeof document === "undefined") return null;
+
+  for (const part of document.cookie.split(";")) {
+    const trimmed = part.trim();
+    if (!trimmed.toLowerCase().startsWith("googtrans=")) continue;
+
+    const raw = trimmed.slice("googtrans=".length).trim();
+    const decoded = (() => {
+      try {
+        return decodeURIComponent(raw);
+      } catch {
+        return raw;
+      }
+    })();
+
+    const match = decoded.match(/^\/[^/]+\/([^/]+)$/);
+    const code = match?.[1]?.trim();
+    if (code === "kn" || code === "hi" || code === "mr" || code === "en") {
+      return code;
+    }
+  }
+
+  return null;
+};
 
 const Fertilizer: React.FC = () => {
   const { profile, loading: profileLoading } = useFarmerProfile();
+  const { lang } = useI18nLite();
   const { selectedPlotName, setSelectedPlotName } = useAppContext();
+  const activeLang = readGoogTransLanguage() ?? lang;
+  const videoList = activeLang === "kn" ? kannadaVideoList : marathiVideoList;
   // Use global selectedPlotName, fallback to first plot if not available
   const PLOT_NAME = selectedPlotName || (profile?.plots && profile.plots.length > 0 ? profile.plots[0].fastapi_plot_id : "");
 
@@ -445,7 +498,7 @@ const Fertilizer: React.FC = () => {
           </h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
             {videoList.map((video, index) => (
-              <div key={index} className="bg-white shadow-lg rounded-lg">
+              <div key={`${activeLang}-${index}`} className="bg-white shadow-lg rounded-lg">
                 <div className="relative pb-60 overflow-hidden">
                   <iframe
                     src={video.url}

@@ -18,11 +18,12 @@ import { requestProgressDashboardNav } from './progressNavigation';
 import { DEFAULT_MONTH_SECTION } from './progressConstants';
 import type { FactoryId } from './factoryProgressTypes';
 import {
+  CHART_TOP_RANGES,
   CHART_Y_DOMAIN,
   YIELD_GRID_LINES,
   YIELD_ZONE_BANDS,
   YIELD_ZONE_BOUNDARIES,
-  groupFarmersByYieldRange,
+  groupFarmersByChartTopRanges,
 } from './chartYieldScale';
 
 import { CHART_THEME as C, PROGRESS_THEME as T } from './progressTheme';
@@ -114,7 +115,7 @@ function chartSubtitle(
     farmersWithoutYield > 0
       ? ` · ${farmersWithoutYield} excluded (no yield data)`
       : '';
-  return `${rangeLabel} · ${farmerCount} farmers with yield data${excluded} · Click a dot for the list below`;
+  return `${rangeLabel} · ${farmerCount} farmers with yield data${excluded} · Click a range label or dot for the list below`;
 }
 
 function chartEmptyDetail(
@@ -181,26 +182,22 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
   );
 
   const rangeGroups = useMemo(() => {
-    const groups = groupFarmersByYieldRange(
+    return groupFarmersByChartTopRanges(
       farmerInputs.map(({ farmerId, farmerName, tons, hasYieldData }) => ({
         farmerId,
         farmerName,
         tons,
         hasYieldData,
       })),
-    ).filter((group) => group.count > 0);
-
-    return groups.map((group, index) => ({
-      ...group,
-      rangeIndex: index,
-      xPos: index,
-    }));
+    );
   }, [farmerInputs]);
 
-  const maxRangeIndex = Math.max(0, rangeGroups.length - 1);
+  const maxRangeIndex = CHART_TOP_RANGES.length - 1;
 
   const rangeDots = useMemo((): RangeBubbleRow[] => {
-    return rangeGroups.map((group) => {
+    return rangeGroups
+      .filter((group) => group.count > 0)
+      .map((group) => {
         const underTarget = group.avgTons < YIELD_TARGET_TON;
         return {
           kind: 'range' as const,
@@ -275,6 +272,8 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
     }
   };
 
+  const rangesWithData = rangeGroups.filter((group) => group.count > 0).length;
+
   return (
     <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm sm:p-6">
       <div className="mb-3">
@@ -284,7 +283,7 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
         <p className="mt-1 text-xs" style={{ color: C.textMuted }}>
           {chartSubtitle(
             farmerConfigs.length,
-            rangeGroups.length,
+            rangesWithData,
             farmersWithoutYield,
             hasIndustrialYield,
             industrialLoadError,
@@ -313,8 +312,47 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
         </div>
       ) : (
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+          <div
+            className="grid border-b border-slate-200 bg-slate-50/80"
+            style={{
+              gridTemplateColumns: `repeat(${CHART_TOP_RANGES.length}, minmax(0, 1fr))`,
+            }}
+          >
+            {rangeGroups.map((group) => {
+              const isSelected = selectedRangeIndex === group.rangeIndex;
+              return (
+                <button
+                  key={group.label}
+                  type="button"
+                  onClick={() => handleRangeClick(group.rangeIndex)}
+                  className="border-r border-slate-200 px-2 py-2.5 text-center text-[11px] font-semibold transition last:border-r-0 hover:bg-white sm:text-xs"
+                  style={{
+                    color: isSelected ? T.active : C.text,
+                    backgroundColor: isSelected ? T.activeLight : undefined,
+                    boxShadow: isSelected ? `inset 0 -2px 0 ${T.active}` : undefined,
+                  }}
+                  title={
+                    group.count > 0
+                      ? `${group.count} farmers — click to list below`
+                      : 'No farmers in this range'
+                  }
+                >
+                  <span>{group.label}</span>
+                  {group.count > 0 && (
+                    <span
+                      className="mt-0.5 block text-[10px] font-medium"
+                      style={{ color: C.textMuted }}
+                    >
+                      ({group.count})
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
           <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
-            <ScatterChart margin={{ top: 20, right: 24, left: 48, bottom: 48 }}>
+            <ScatterChart margin={{ top: 20, right: 24, left: 48, bottom: 16 }}>
               {YIELD_ZONE_BANDS.map((zone) => (
                 <ReferenceArea
                   key={zone.label}
@@ -326,7 +364,7 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
                 />
               ))}
 
-              <CartesianGrid strokeDasharray="3 3" stroke={C.grid} strokeOpacity={0.9} vertical horizontal />
+              <CartesianGrid strokeDasharray="3 3" stroke={C.grid} strokeOpacity={0.9} vertical={false} horizontal />
 
               {YIELD_GRID_LINES.map((line) => {
                 const isZone = YIELD_ZONE_BOUNDARIES.has(line.tons);
@@ -354,14 +392,7 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
                 type="number"
                 dataKey="xPos"
                 domain={[-0.5, maxRangeIndex + 0.5]}
-                ticks={rangeDots.map((dot) => dot.xPos)}
-                tick={{ fontSize: 10, fill: C.axis, fontWeight: 600 }}
-                axisLine={{ stroke: C.grid, strokeWidth: 1.5 }}
-                tickLine={{ stroke: C.gridMinor, strokeWidth: 1.25 }}
-                tickFormatter={(value) => {
-                  const dot = rangeDots.find((item) => item.xPos === Number(value));
-                  return dot ? dot.label : '';
-                }}
+                hide
               />
 
               <YAxis
@@ -448,28 +479,30 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
             </ScatterChart>
           </ResponsiveContainer>
 
-          {selectedRangeIndex != null && selectedFarmers.length > 0 && (
+          {selectedRangeIndex != null && (
             <div ref={farmerTableRef} className="border-t border-slate-200 bg-white">
               <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-2">
                 <p className="text-xs font-semibold" style={{ color: C.text }}>
-                  {selectedRangeLabel} ton — {selectedFarmers.length} farmers
+                  {selectedRangeLabel} ton — {selectedFarmers.length} farmer
+                  {selectedFarmers.length === 1 ? '' : 's'}
                 </p>
                 <div className="flex items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => void handleRangeExcelDownload()}
-                    disabled={exporting}
-                    className="inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
-                    style={{
-                      borderColor: `${T.active}55`,
-                      backgroundColor: T.activeLight,
-                      color: T.active,
-                    }}
-                  >
-                    <Download className="h-3 w-3" />
-                    {exporting ? 'Preparing…' : 'Download Excel'}
-                  </button>
-                  {/* <p className="text-[10px]" style={{ color: C.textMuted }}>Scroll to see all</p> */}
+                  {selectedFarmers.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => void handleRangeExcelDownload()}
+                      disabled={exporting}
+                      className="inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
+                      style={{
+                        borderColor: `${T.active}55`,
+                        backgroundColor: T.activeLight,
+                        color: T.active,
+                      }}
+                    >
+                      <Download className="h-3 w-3" />
+                      {exporting ? 'Preparing…' : 'Download Excel'}
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => setSelectedRangeIndex(null)}
@@ -480,6 +513,12 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
                   </button>
                 </div>
               </div>
+              {selectedFarmers.length === 0 ? (
+                <p className="px-4 py-6 text-center text-xs" style={{ color: C.textMuted }}>
+                  No farmers in this yield range.
+                </p>
+              ) : (
+                <>
               {/* Fixed header — outside scroll, no overlap */}
               <table className="w-full table-fixed text-left text-xs">
                 <colgroup>
@@ -548,6 +587,8 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
                   </tbody>
                 </table>
               </div>
+                </>
+              )}
             </div>
           )}
         </div>

@@ -46,6 +46,7 @@ import {
   eventsApi,
   encodePlotIdForEventsUrl,
   getMyFieldOfficers,
+  getFarmsByFarmerId,
   getSinglePlotAgroStats,
   isAnalyzeSinglePlotPlantationDateError,
   PLANTATION_DATE_NOT_PROVIDED_MSG,
@@ -53,6 +54,9 @@ import {
 import { MANAGER_FIELD_OFFICERS_CACHE_KEY } from "../services/prefetchService";
 import { useAppContext } from "../context/AppContext";
 import MapCropStatusOverlay from "./MapCropStatusOverlay";
+import FieldIndicesStageBadge from "./FieldIndicesStageBadge";
+import { useFieldIndicesCropStage } from "../hooks/useFieldIndicesCropStage";
+import { enrichPlotsWithFarmDetails } from "../utils/fertilizerStage";
 
 // Constants (same as FarmerDashboard)
 const BASE_URL = "https://events-cropeye.up.railway.app";
@@ -183,6 +187,8 @@ function extractPlantationInfo(source: any): {
     source.plantation_type_display ??
     source.plantation_type ??
     source.planting_method ??
+    source.crop_type?.planting_method ??
+    source.crop_type?.planting_method_display ??
     source.crop_type?.plantation_type_display ??
     source.crop_type?.plantation_type;
 
@@ -190,6 +196,19 @@ function extractPlantationInfo(source: any): {
     plantationDate,
     plantationType: plantationTypeRaw ? String(plantationTypeRaw) : null,
   };
+}
+
+function getFarmerId(farmer: any): string | null {
+  const id =
+    farmer?.id ?? farmer?.farmer_id ?? farmer?.farmerId ?? farmer?.user_id ?? null;
+  return id != null ? String(id) : null;
+}
+
+function parseFarmsListResponse(data: unknown): any[] {
+  const payload = data as { results?: unknown[] };
+  if (Array.isArray(payload?.results)) return payload.results;
+  if (Array.isArray(data)) return data as any[];
+  return [];
 }
 
 const ManagerFarmDash: React.FC = () => {
@@ -292,8 +311,7 @@ const ManagerFarmDash: React.FC = () => {
   const selectedPlotRecord = React.useMemo(() => {
     if (!selectedPlotId || !selectedFarmerId) return null;
     const farmer = farmersForSelectedOfficer.find(
-      (f) =>
-        String(f.id || f.farmer_id || f.farmerId) === String(selectedFarmerId),
+      (f) => getFarmerId(f) === String(selectedFarmerId),
     );
     return (
       farmer?.plots?.find(
@@ -305,6 +323,21 @@ const ManagerFarmDash: React.FC = () => {
   const selectedPlotPlantation = React.useMemo(
     () => extractPlantationInfo(selectedPlotRecord),
     [selectedPlotRecord],
+  );
+
+  const selectedFarmerForStage = React.useMemo(
+    () =>
+      farmersForSelectedOfficer.find(
+        (item) => getFarmerId(item) === String(selectedFarmerId),
+      ) ?? null,
+    [farmersForSelectedOfficer, selectedFarmerId],
+  );
+
+  const currentCropStage = useFieldIndicesCropStage(
+    selectedPlotRecord,
+    selectedFarmerForStage,
+    selectedPlotId,
+    selectedFarmerId,
   );
 
   const displayPlantationDate =
@@ -405,6 +438,42 @@ const ManagerFarmDash: React.FC = () => {
       }
     }
   }, [selectedFieldOfficerId, fieldOfficers]);
+
+  // Enrich farmer plots with /farms/ details (plantation date + planting method for crop stage).
+  useEffect(() => {
+    const farmerId = selectedFarmerId?.trim();
+    if (!farmerId) return;
+
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const farmsRes = await getFarmsByFarmerId(farmerId);
+        if (cancelled) return;
+
+        const farms = parseFarmsListResponse(farmsRes?.data);
+        if (!farms.length) return;
+
+        setFarmersForSelectedOfficer((prev) =>
+          prev.map((farmer) => {
+            if (getFarmerId(farmer) !== farmerId) return farmer;
+            const plots = farmer?.plots ?? [];
+            if (!plots.length) return farmer;
+            return {
+              ...farmer,
+              plots: enrichPlotsWithFarmDetails(plots, farms),
+            };
+          }),
+        );
+      } catch {
+        // Stage hook falls back to its own farms fetch.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedFarmerId]);
 
   // Fetch plots when farmer is selected
   useEffect(() => {
@@ -1227,23 +1296,27 @@ const ManagerFarmDash: React.FC = () => {
 
   // Enhanced chart legend
   const ChartLegend: React.FC = () => (
-    <div className="flex flex-wrap gap-1 text-xs font-medium mb-2">
+    <div className="flex flex-wrap items-center gap-1 text-xs font-medium mb-2">
       {Object.entries(lineStyles).map(([key, { color, label }]) => (
-        <button
-          key={key}
-          onClick={() => toggleLine(key)}
-          className={`flex items-center gap-1 px-2 py-1 rounded-full transition-all duration-200 ${
-            visibleLines[key as keyof VisibleLines]
-              ? "bg-white shadow-sm transform scale-105"
-              : "bg-gray-100 opacity-50 hover:opacity-75"
-          }`}
-        >
-          <span
-            className="w-1.5 h-1.5 rounded-full"
-            style={{ backgroundColor: color }}
-          />
-          <span className="text-gray-700 text-xs">{label}</span>
-        </button>
+        <React.Fragment key={key}>
+          <button
+            onClick={() => toggleLine(key)}
+            className={`flex items-center gap-1 px-2 py-1 rounded-full transition-all duration-200 ${
+              visibleLines[key as keyof VisibleLines]
+                ? "bg-white shadow-sm transform scale-105"
+                : "bg-gray-100 opacity-50 hover:opacity-75"
+            }`}
+          >
+            <span
+              className="w-1.5 h-1.5 rounded-full"
+              style={{ backgroundColor: color }}
+            />
+            <span className="text-gray-700 text-xs">{label}</span>
+          </button>
+          {key === "moisture" && (
+            <FieldIndicesStageBadge stage={currentCropStage} />
+          )}
+        </React.Fragment>
       ))}
     </div>
   );

@@ -51,6 +51,21 @@ export const resolveApiPlotName = (
   return key;
 };
 
+/** Primary plot key for dropdowns and API calls (fastapi id, else gat_plot). */
+export function plotKeyFromRecord(plot: PlotRef | null | undefined): string {
+  const fastapi =
+    plot?.fastapi_plot_id != null ? String(plot.fastapi_plot_id).trim() : "";
+  if (fastapi) return fastapi;
+
+  const gat = plot?.gat_number != null ? String(plot.gat_number).trim() : "";
+  const num = plot?.plot_number != null ? String(plot.plot_number).trim() : "";
+  if (gat && num) return `${gat}_${num}`;
+
+  if (plot?.plot_name) return String(plot.plot_name).trim();
+  if (plot?.id != null) return String(plot.id);
+  return "";
+}
+
 export function findPlotRef(
   plots: PlotRef[] | null | undefined,
   plotId: string,

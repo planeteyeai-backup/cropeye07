@@ -1,23 +1,18 @@
-/** Piecewise yield → chart Y: 0→0%, 75→50%, 85→75%, 100→100%. */
-export const YIELD_CHART_ANCHORS = [
-  { tons: 0, chartY: 0 },
-  { tons: 75, chartY: 0.5 },
-  { tons: 85, chartY: 0.75 },
-  { tons: 100, chartY: 1 },
+/** Grid ton marks — equal visual spacing between each line on the chart. */
+export const YIELD_GRID_TON_MARKS = [
+  0, 25, 50, 75, 80, 85, 90, 95, 100,
 ] as const;
 
-export const YIELD_TICK_MAP: Record<number, string> = {
-  0: '0',
-  0.5: '75',
-  0.75: '85',
-  1: '100',
-};
+/** @deprecated Equal-spacing grid replaces piecewise anchors. */
+export const YIELD_CHART_ANCHORS = YIELD_GRID_TON_MARKS.map((tons, index) => ({
+  tons,
+  chartY: index / (YIELD_GRID_TON_MARKS.length - 1),
+}));
 
-export const CHART_Y_TICKS = [0, 0.5, 0.75, 1] as const;
 export const CHART_Y_DOMAIN: [number, number] = [0, 1];
 
 /** Keep range bubbles inside plot — ~28px radius on a ~400px plot. */
-export const RANGE_BUBBLE_Y_PAD = 0.08;
+export const RANGE_BUBBLE_Y_PAD = 0.04;
 
 export function clampRangeBubbleChartY(chartY: number, avgTons?: number): number {
   if (avgTons != null && avgTons > 0 && avgTons < 75) {
@@ -26,39 +21,132 @@ export function clampRangeBubbleChartY(chartY: number, avgTons?: number): number
   return Math.max(RANGE_BUBBLE_Y_PAD, Math.min(1 - RANGE_BUBBLE_Y_PAD, chartY));
 }
 
-export const YIELD_ZONE_BANDS = [
-  { label: '0 – 75 ton', y1: 0, y2: 0.5, fill: '#FEF3C7' },
-  { label: '75 – 85 ton', y1: 0.5, y2: 0.75, fill: '#DBEAFE' },
-  { label: '85 – 100 ton', y1: 0.75, y2: 1, fill: '#D1FAE5' },
-] as const;
-
-export type YieldZoneBand = (typeof YIELD_ZONE_BANDS)[number];
-
-export const YIELD_ZONE_BOUNDARIES = new Set([75, 85, 100]);
-
+/** Map yield tons → chart Y with equal height between each grid line. */
 export function tonsToChartY(tons: number): number {
+  const marks = YIELD_GRID_TON_MARKS;
   if (tons <= 0) return 0;
-  if (tons >= 100) return 1;
+  if (tons >= marks[marks.length - 1]) return 1;
 
-  for (let i = 1; i < YIELD_CHART_ANCHORS.length; i += 1) {
-    const prev = YIELD_CHART_ANCHORS[i - 1];
-    const next = YIELD_CHART_ANCHORS[i];
-    if (tons <= next.tons) {
-      const span = next.tons - prev.tons;
-      if (span === 0) return next.chartY;
-      const ratio = (tons - prev.tons) / span;
-      return prev.chartY + ratio * (next.chartY - prev.chartY);
+  for (let i = 1; i < marks.length; i += 1) {
+    const prevT = marks[i - 1];
+    const nextT = marks[i];
+    if (tons <= nextT) {
+      const prevY = (i - 1) / (marks.length - 1);
+      const nextY = i / (marks.length - 1);
+      const span = nextT - prevT;
+      const ratio = span === 0 ? 0 : (tons - prevT) / span;
+      return prevY + ratio * (nextY - prevY);
     }
   }
 
   return 1;
 }
 
-/** Grid + axis labels (ton values mapped to piecewise chart Y). */
-export const YIELD_GRID_LINES = [0, 25, 50, 75, 80, 85, 90, 95, 100].map((tons) => ({
+export const YIELD_ZONE_BANDS = [
+  {
+    label: '0 – 75 ton',
+    y1: tonsToChartY(0),
+    y2: tonsToChartY(75),
+    fill: '#FEF3C7',
+  },
+  {
+    label: '75 – 85 ton',
+    y1: tonsToChartY(75),
+    y2: tonsToChartY(85),
+    fill: '#DBEAFE',
+  },
+  {
+    label: '85 – 100 ton',
+    y1: tonsToChartY(85),
+    y2: tonsToChartY(100),
+    fill: '#D1FAE5',
+  },
+] as const;
+
+export type YieldZoneBand = (typeof YIELD_ZONE_BANDS)[number];
+
+export const YIELD_ZONE_BOUNDARIES = new Set([60, 70, 75, 85, 100]);
+
+/** Lighter grid between major marks — helps read 50, 60, 70 ton bands. */
+export const YIELD_MINOR_GRID_LINES = [10, 20, 30, 40, 60, 70].map((tons) => ({
   tons,
   chartY: tonsToChartY(tons),
 }));
+
+/** Extra-visible guides for common check points. */
+export const YIELD_HIGHLIGHT_GRID_LINES = [60, 70].map((tons) => ({
+  tons,
+  chartY: tonsToChartY(tons),
+}));
+
+/** Quick filters — farmer list without changing 0–100 chart scale. */
+export const YIELD_QUICK_FILTERS = [
+  { id: 'under-75', label: 'Under 75 ton', min: 0, max: 75 },
+  { id: '50-60', label: '50 – 60 ton', min: 50, max: 60 },
+  { id: '60-70', label: '60 – 70 ton', min: 60, max: 70 },
+  { id: '70-75', label: '70 – 75 ton', min: 70, max: 75 },
+] as const;
+
+export type YieldQuickFilter = (typeof YIELD_QUICK_FILTERS)[number];
+
+/** Grid + axis labels (equal visual spacing per ton mark). */
+export const YIELD_GRID_LINES = YIELD_GRID_TON_MARKS.map((tons, index) => ({
+  tons,
+  chartY: index / (YIELD_GRID_TON_MARKS.length - 1),
+}));
+
+export const CHART_Y_TICKS = YIELD_GRID_LINES.map((line) => line.chartY);
+
+const CHART_DOMAIN_PAD = 0.035;
+
+/** Zoom Y-axis to data so the 0–75 zone is not half-empty when all farmers are under target. */
+export function getChartYDomainForData(maxTons: number): [number, number] {
+  if (maxTons <= 0) return [0, tonsToChartY(75) + CHART_DOMAIN_PAD];
+  if (maxTons <= 75) return [0, tonsToChartY(75) + CHART_DOMAIN_PAD];
+  if (maxTons <= 85) return [0, tonsToChartY(85) + CHART_DOMAIN_PAD];
+  if (maxTons <= 95) return [0, tonsToChartY(95) + CHART_DOMAIN_PAD];
+  return [0, 1];
+}
+
+/** Denser grid in 0–75 when chart is zoomed to that band. */
+export function getChartGridLinesForData(maxTons: number) {
+  const tonMarks =
+    maxTons <= 75
+      ? [0, 10, 20, 25, 30, 40, 50, 60, 70, 75]
+      : maxTons <= 85
+        ? [0, 25, 50, 75, 80, 85]
+        : [...YIELD_GRID_TON_MARKS];
+
+  return tonMarks.map((tons) => ({
+    tons,
+    chartY: tonsToChartY(tons),
+  }));
+}
+
+export function getChartZoneBandsForData(
+  maxTons: number,
+  domain: [number, number],
+): Array<{ label: string; y1: number; y2: number; fill: string }> {
+  if (maxTons <= 75) {
+    return [{ label: '0 – 75 ton', y1: domain[0], y2: domain[1], fill: '#FEF3C7' }];
+  }
+
+  return YIELD_ZONE_BANDS.filter(
+    (zone) => zone.y2 > domain[0] && zone.y1 < domain[1],
+  ).map((zone) => ({
+    ...zone,
+    y1: Math.max(zone.y1, domain[0]),
+    y2: Math.min(zone.y2, domain[1]),
+  }));
+}
+
+/** Tighter horizontal padding when only a few yield-range columns are shown. */
+export function getChartXDomain(rangeCount: number): [number, number] {
+  if (rangeCount <= 1) return [-0.12, 0.12];
+  if (rangeCount === 2) return [-0.18, 1.18];
+  if (rangeCount === 3) return [-0.28, 2.28];
+  return [-0.35, Math.max(0, rangeCount - 1) + 0.35];
+}
 
 export const YIELD_RANGES = [
   { id: '0-25', label: '0–25', min: 0, max: 25 },
@@ -70,6 +158,17 @@ export const YIELD_RANGES = [
   { id: '90-95', label: '90–95', min: 90, max: 95 },
   { id: '95-100', label: '95–100', min: 95, max: 100 },
 ] as const;
+
+/** Fixed top labels on the progress bubble chart (always shown, clickable). */
+export const CHART_TOP_RANGES = [
+  { id: '0-25', label: '0-25', min: 0, max: 25 },
+  { id: '25-50', label: '25-50', min: 25, max: 50 },
+  { id: '50-75', label: '50-75', min: 50, max: 75 },
+  { id: '75-85', label: '75-85', min: 75, max: 85 },
+  { id: '85-100', label: '85-100', min: 85, max: 100 },
+] as const;
+
+export type ChartTopRange = (typeof CHART_TOP_RANGES)[number];
 
 export type YieldRange = (typeof YIELD_RANGES)[number];
 
@@ -108,6 +207,39 @@ export function groupFarmersByYieldRange(
     const avgTons =
       inRange.length > 0
         ? inRange.reduce((sum, f) => sum + f.tons, 0) / inRange.length
+        : (range.min + range.max) / 2;
+
+    return {
+      rangeIndex,
+      label: range.label,
+      min: range.min,
+      max: range.max,
+      farmers: inRange,
+      count: inRange.length,
+      avgTons,
+      chartY: clampRangeBubbleChartY(tonsToChartY(avgTons), avgTons),
+      xPos: rangeIndex,
+    };
+  });
+}
+
+/** Group farmers into the five fixed chart columns (0-25 … 85-100). */
+export function groupFarmersByChartTopRanges(
+  farmers: ChartBubbleLayoutInput[],
+): YieldRangeGroup[] {
+  return CHART_TOP_RANGES.map((range, rangeIndex) => {
+    const inRange = farmers.filter((farmer) => {
+      const tons = farmer.tons;
+      if (!farmer.hasYieldData || tons <= 0) return false;
+      if (rangeIndex === 0) return tons > 0 && tons <= range.max;
+      if (rangeIndex === CHART_TOP_RANGES.length - 1) {
+        return tons > range.min && tons <= range.max;
+      }
+      return tons > range.min && tons <= range.max;
+    });
+    const avgTons =
+      inRange.length > 0
+        ? inRange.reduce((sum, farmer) => sum + farmer.tons, 0) / inRange.length
         : (range.min + range.max) / 2;
 
     return {
