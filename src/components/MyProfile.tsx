@@ -1,9 +1,70 @@
 import React, { useState, useEffect } from "react";
 import {
   User, Mail, Phone, MapPin, FileText, Edit3, Save, X,
-  ChevronDown, Leaf, Droplets, Calendar, Ruler, AlertCircle, CheckCircle,
+  ChevronDown, Leaf, Droplets, Calendar, Ruler, AlertCircle, CheckCircle, Map,
 } from "lucide-react";
 import { getFarmerMyProfile, patchUserMyProfile, patchFarmMyProfile, refreshApiEndpoints } from "../api";
+import EditPlotBoundaryModal from "./EditPlotBoundaryModal";
+import type { GeoJsonPolygon, GeoJsonPoint } from "../utils/plotGeometry";
+import {
+  resolveGeoJsonPoint,
+} from "../utils/plotGeometry";
+
+/** Normalize boundary from API (handles nested shapes and JSON strings). */
+function normalizeBoundary(raw: any): GeoJsonPolygon | null {
+  if (!raw) return null;
+
+  let value = raw;
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+
+  if (
+    value?.type === "Polygon" &&
+    Array.isArray(value.coordinates?.[0]) &&
+    value.coordinates[0].length >= 3
+  ) {
+    return value as GeoJsonPolygon;
+  }
+
+  if (Array.isArray(value.coordinates?.[0]) && value.coordinates[0].length >= 3) {
+    return {
+      type: "Polygon",
+      coordinates: value.coordinates,
+    };
+  }
+
+  return null;
+}
+
+/** Read saved plot polygon from my-profile (API shape varies). */
+function resolvePlotBoundary(plot: any): GeoJsonPolygon | null {
+  if (!plot) return null;
+
+  const candidates = [
+    plot.boundary,
+    plot.coordinates?.boundary,
+    plot.location?.boundary,
+  ];
+
+  for (const raw of candidates) {
+    const boundary = normalizeBoundary(raw);
+    if (boundary) return boundary;
+  }
+
+  return null;
+}
+
+function resolveNestedPlot(data: any) {
+  if (data?.plot?.id != null || data?.plot?.boundary) return data.plot;
+  const plot = (data?.plots ?? [])[0];
+  const farm = plot?.farms?.[0] ?? data?.farm ?? data;
+  return plot ?? farm?.plot ?? data?.plot ?? null;
+}
 
 // ── Plantation type / method constants (same as Add Farm.tsx) ──────────────
 const PLANTATION_TYPE_OPTIONS = ["Adsali", "Suru", "pre_seasonal", "Ratoon"];
@@ -104,7 +165,7 @@ const SelectField: React.FC<{
 interface Props { onClose?: () => void; }
 
 const MyProfile: React.FC<Props> = ({ onClose }) => {
-  const [profileData, setProfileData] = useState<any>(null);
+  const [, setProfileData] = useState<any>(null);
   const [loadingProfile, setLoadingProfile] = useState(true);
 
   const [editingUser, setEditingUser] = useState(false);
@@ -118,13 +179,22 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
   const [userMsg, setUserMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [farmMsg, setFarmMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
+  const [plotBoundaryMeta, setPlotBoundaryMeta] = useState<{
+    plotId: number | string | null;
+    plotLabel: string;
+    boundary: GeoJsonPolygon | null;
+    location: GeoJsonPoint | null;
+  }>({ plotId: null, plotLabel: "", boundary: null, location: null });
+  const [showBoundaryEditor, setShowBoundaryEditor] = useState(false);
+  const [boundaryMsg, setBoundaryMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
   // ── Load profile ──────────────────────────────────────────────────────────
   useEffect(() => {
     const load = async () => {
       try {
         setLoadingProfile(true);
         const res = await getFarmerMyProfile();
-        const data = res.data ?? res;
+        const data: any = (res as { data?: unknown }).data ?? res;
         setProfileData(data);
         // Prefill user form
         const fp = data.farmer_profile ?? data;
@@ -143,8 +213,17 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
           aadhaar_number: pi.aadhaar_number ?? fp.aadhaar_number ?? "",
         });
         // Prefill farm form from first plot/farm
-        const plot = (data.plots ?? [])[0];
-        const farm = (plot?.farms ?? [])[0] ?? data.farm ?? {};
+        const nestedPlot = resolveNestedPlot(data);
+        const farm = nestedPlot?.farms?.[0] ?? data.farm ?? {};
+        const plotId = nestedPlot?.id ?? null;
+        const gat = nestedPlot?.gat_number ?? "";
+        const plotNum = nestedPlot?.plot_number ?? "";
+        setPlotBoundaryMeta({
+          plotId,
+          plotLabel: gat && plotNum ? `${gat}/${plotNum}` : gat || plotNum || "",
+          boundary: resolvePlotBoundary(nestedPlot),
+          location: resolveGeoJsonPoint(nestedPlot),
+        });
         setFarmForm({
           address: farm.address ?? "",
           area_size: farm.area_size?.toString() ?? "",
@@ -445,8 +524,91 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
               <InputField label="Sugarcane Yield (tonnes)" value={farmForm.sugarcane_yield} onChange={setFarm("sugarcane_yield")} icon={<Leaf size={14} />} type="number" readOnly={!editingFarm} />
               <InputField label="Plants in Field" value={farmForm.plants_in_field} onChange={setFarm("plants_in_field")} icon={<Leaf size={14} />} type="number" readOnly={!editingFarm} />
             </div>
+
+            <div className="pt-2 border-t border-gray-100">
+              <FeedbackBanner msg={boundaryMsg} />
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-gray-800">Plot boundary (KML)</p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {plotBoundaryMeta.boundary?.coordinates?.[0]?.length
+                      ? "Boundary saved — open the map to adjust corners."
+                      : "No boundary yet — draw your plot on the map."}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!plotBoundaryMeta.plotId) {
+                      setBoundaryMsg({
+                        type: "error",
+                        text: "Plot ID not found in profile. Please contact support.",
+                      });
+                      return;
+                    }
+                    setBoundaryMsg(null);
+                    setShowBoundaryEditor(true);
+                  }}
+                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium rounded-xl transition-all"
+                >
+                  <Map size={14} />
+                  Edit Plot Boundary
+                </button>
+              </div>
+            </div>
           </div>
         </div>
+
+        {plotBoundaryMeta.plotId != null && (
+          <EditPlotBoundaryModal
+            open={showBoundaryEditor}
+            onClose={() => setShowBoundaryEditor(false)}
+            plotId={plotBoundaryMeta.plotId}
+            plotLabel={plotBoundaryMeta.plotLabel}
+            initialBoundary={plotBoundaryMeta.boundary}
+            initialLocation={plotBoundaryMeta.location}
+            onSaved={(boundary, location) => {
+              setPlotBoundaryMeta((prev) => ({ ...prev, boundary, location }));
+              setProfileData((prev: any) => {
+                const nestedPlot = resolveNestedPlot(prev);
+                if (!nestedPlot) return prev;
+
+                const updatedPlot = {
+                  ...nestedPlot,
+                  boundary,
+                  location,
+                  coordinates: {
+                    ...(nestedPlot.coordinates ?? {}),
+                    boundary,
+                    location,
+                  },
+                };
+
+                if (Array.isArray(prev?.plots) && prev.plots.length > 0) {
+                  const plots = [...prev.plots];
+                  plots[0] = updatedPlot;
+                  return { ...prev, plots };
+                }
+
+                if (prev?.farm?.plot) {
+                  return {
+                    ...prev,
+                    farm: { ...prev.farm, plot: updatedPlot },
+                  };
+                }
+
+                return { ...prev, plot: updatedPlot };
+              });
+              setBoundaryMsg({
+                type: "success",
+                text: boundary
+                  ? "Plot boundary updated successfully!"
+                  : "Plot boundary removed successfully!",
+              });
+              setTimeout(() => setBoundaryMsg(null), 4000);
+            }}
+          />
+        )}
 
       </div>
     </div>

@@ -495,7 +495,7 @@ const HarvestDashboard: React.FC = () => {
   const [sugarcaneTypeOptions, setSugarcaneTypeOptions] = useState<string[]>([
     "All",
   ]);
-  const [varietyOptions] = useState<string[]>(["All", "Phule 265"]);
+  const [varietyOptions] = useState<string[]>(["All"]);
 
   // Debounce non-representative filters
   const debouncedRegion = useDebouncedValue(filters.region, 300);
@@ -617,7 +617,7 @@ const HarvestDashboard: React.FC = () => {
                       Stage: stage,
                       Region: plot.taluka || "Unknown",
                       "Sugarcane Type": farm.plantation_type || "Unknown",
-                      Variety: "Phule 265",
+                      Variety: "",
                       representative: representativeName,
                       representativeUrl: "",
                       boundaryCoordinates: boundaryCoords,

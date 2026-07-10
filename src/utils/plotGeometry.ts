@@ -12,7 +12,45 @@ export interface GeoJsonPoint {
   coordinates: [number, number];
 }
 
-/** Convert GeoJSON [lng, lat] ring → Leaflet [lat, lng] coords. */
+export function resolveGeoJsonPoint(
+  source: any,
+): GeoJsonPoint | null {
+  const candidates = [
+    source,
+    source?.location,
+    source?.coordinates?.location,
+  ];
+
+  for (const raw of candidates) {
+    if (
+      raw?.type === "Point" &&
+      Array.isArray(raw.coordinates) &&
+      raw.coordinates.length >= 2
+    ) {
+      const lng = Number(raw.coordinates[0]);
+      const lat = Number(raw.coordinates[1]);
+      if (Number.isFinite(lng) && Number.isFinite(lat)) {
+        return { type: "Point", coordinates: [lng, lat] };
+      }
+    }
+  }
+
+  return null;
+}
+
+export function pointToLeafletLatLng(
+  point: GeoJsonPoint | null | undefined,
+): [number, number] | null {
+  if (!point?.coordinates?.length) return null;
+  const [lng, lat] = point.coordinates;
+  if (!Number.isFinite(lng) || !Number.isFinite(lat)) return null;
+  return [lat, lng];
+}
+
+export function leafletLatLngToPoint(lat: number, lng: number): GeoJsonPoint {
+  return { type: "Point", coordinates: [lng, lat] };
+}
+
 export function boundaryToLeafletCoords(
   boundary: GeoJsonPolygon | null | undefined,
 ): [number, number][] {
@@ -24,83 +62,71 @@ export function boundaryToLeafletCoords(
     .map(([lng, lat]) => [lat, lng] as [number, number]);
 }
 
-/** Convert Leaflet [lat, lng] ring → GeoJSON Polygon. */
 export function leafletRingToGeoJsonBoundary(
   coords: [number, number][],
 ): GeoJsonPolygon | null {
-  if (!Array.isArray(coords) || coords.length < 3) return null;
+  if (coords.length < 3) return null;
 
-  const ring = coords.map(([lat, lng]) => [lng, lat]);
-  const first = ring[0];
-  const last = ring[ring.length - 1];
+  const apiRing = coords.map(([lat, lng]) => [lng, lat] as [number, number]);
+  const first = apiRing[0];
+  const last = apiRing[apiRing.length - 1];
   if (first[0] !== last[0] || first[1] !== last[1]) {
-    ring.push([...first]);
+    apiRing.push([first[0], first[1]]);
   }
 
   return {
     type: "Polygon",
-    coordinates: [ring],
+    coordinates: [apiRing],
   };
 }
 
-/** Center point from polygon boundary (lng, lat). */
-export function centerFromBoundary(
-  boundary: GeoJsonPolygon | null | undefined,
-): GeoJsonPoint | null {
-  const leafletCoords = boundaryToLeafletCoords(boundary);
-  if (leafletCoords.length === 0) return null;
+export function centerFromBoundary(boundary: GeoJsonPolygon): GeoJsonPoint {
+  const ring = boundary.coordinates[0] ?? [];
+  const points =
+    ring.length > 1 &&
+    ring[0][0] === ring[ring.length - 1][0] &&
+    ring[0][1] === ring[ring.length - 1][1]
+      ? ring.slice(0, -1)
+      : ring;
 
-  const bounds = L.latLngBounds(leafletCoords.map(([lat, lng]) => [lat, lng]));
-  const c = bounds.getCenter();
+  const sum = points.reduce(
+    (acc, [lng, lat]) => ({ lng: acc.lng + lng, lat: acc.lat + lat }),
+    { lng: 0, lat: 0 },
+  );
+  const count = Math.max(points.length, 1);
+
   return {
     type: "Point",
-    coordinates: [c.lng, c.lat],
+    coordinates: [sum.lng / count, sum.lat / count],
   };
 }
 
-/** Area in acres / hectares from a GeoJSON polygon. */
-export function calculateAreaMetricsFromGeometry(
-  geometry: GeoJsonPolygon | null | undefined,
-): { acres: number; hectares: number; squareMeters: number } | null {
-  const leafletCoords = boundaryToLeafletCoords(geometry);
-  if (leafletCoords.length < 3) return null;
+export function calculateAreaMetricsFromGeometry(geometry: GeoJsonPolygon) {
+  const coordinates = geometry.coordinates?.[0];
+  if (!coordinates || coordinates.length < 4) return null;
 
-  try {
-    const polygon = L.polygon(leafletCoords);
-    const latlngs = polygon.getLatLngs()[0] as L.LatLng[];
-    if (!Array.isArray(latlngs) || latlngs.length < 3) return null;
+  const projectedPoints = coordinates
+    .map((coordinate) => {
+      if (!coordinate || coordinate.length < 2) return null;
+      const [lng, lat] = coordinate;
+      const projected = L.CRS.EPSG3857.project(L.latLng(lat, lng));
+      return [projected.x, projected.y] as [number, number];
+    })
+    .filter(Boolean) as Array<[number, number]>;
 
-    // Spherical excess approximation via Leaflet's geodesic area helper when available
-    const squareMeters =
-      typeof (L.GeometryUtil as any)?.geodesicArea === "function"
-        ? (L.GeometryUtil as any).geodesicArea(latlngs)
-        : leafletPolygonAreaSqM(latlngs);
+  if (projectedPoints.length < 4) return null;
 
-    if (!Number.isFinite(squareMeters) || squareMeters <= 0) return null;
-
-    const acres = squareMeters / SQUARE_METERS_PER_ACRE;
-    const hectares = squareMeters / 10000;
-    return { acres, hectares, squareMeters };
-  } catch {
-    return null;
+  let areaSqMeters = 0;
+  for (let i = 0; i < projectedPoints.length; i++) {
+    const [x1, y1] = projectedPoints[i];
+    const [x2, y2] = projectedPoints[(i + 1) % projectedPoints.length];
+    areaSqMeters += x1 * y2 - x2 * y1;
   }
-}
 
-/** Fallback ring area in m² (equirectangular). */
-function leafletPolygonAreaSqM(latlngs: L.LatLng[]): number {
-  if (latlngs.length < 3) return 0;
-
-  const R = 6378137; // earth radius meters
-  let area = 0;
-  for (let i = 0; i < latlngs.length; i++) {
-    const p1 = latlngs[i];
-    const p2 = latlngs[(i + 1) % latlngs.length];
-    const lat1 = (p1.lat * Math.PI) / 180;
-    const lat2 = (p2.lat * Math.PI) / 180;
-    const lng1 = (p1.lng * Math.PI) / 180;
-    const lng2 = (p2.lng * Math.PI) / 180;
-    area += (lng2 - lng1) * (2 + Math.sin(lat1) + Math.sin(lat2));
-  }
-  area = (area * R * R) / 2;
-  return Math.abs(area);
+  const areaSqm = Math.abs(areaSqMeters) / 2;
+  return {
+    sqm: areaSqm,
+    ha: areaSqm / 10_000,
+    acres: areaSqm / SQUARE_METERS_PER_ACRE,
+  };
 }

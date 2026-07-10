@@ -13,6 +13,10 @@ import {
   //isPlanetEyeDemoUser,
 } from "./utils/auth";
 import { checkAndRefreshToken, isTokenExpired } from "./utils/tokenManager";
+import {
+  parseTeamConnectHierarchy,
+  personDisplayName,
+} from "./utils/teamConnectHarvest";
 
 // Set base URL for backend (use .env VITE_API_BASE_URL or new Render backend)
 const DEFAULT_API_BASE_URL = "https://cropeye-backendd.up.railway.app/api";
@@ -1756,23 +1760,17 @@ export const getOwnerFieldOfficersAgroStats = async (
     me?.industryId;
 
   const response = await getTeamConnect(industryId);
-  const data = response.data;
-  let officers: Array<any> = [];
-  let managers: Array<any> = [];
+  const hierarchy = parseTeamConnectHierarchy(response.data);
+  const officers = hierarchy.fieldOfficers;
+  const managers = hierarchy.managers;
 
-  if (data?.users_by_role && Array.isArray(data.users_by_role.field_officers)) {
-    officers = data.users_by_role.field_officers;
-    if (Array.isArray(data.users_by_role.managers)) {
-      managers = data.users_by_role.managers;
-    }
-  } else if (Array.isArray(data?.field_officers)) {
-    officers = data.field_officers;
-  } else if (Array.isArray(data?.results)) {
-    officers = data.results.filter((u: any) => u.role_id === 2 || String(u.role?.name).toLowerCase().includes('field'));
-    managers = data.results.filter((u: any) => u.role_id === 3 || String(u.role?.name).toLowerCase().includes('manager'));
-  }
-
-  const uniqueIds = Array.from(new Set(officers.map((o) => o.id)));
+  const uniqueIds = Array.from(
+    new Set(
+      officers
+        .map((o) => o?.id ?? o?.user_id)
+        .filter((id) => id != null),
+    ),
+  );
 
   if (uniqueIds.length === 0) {
     return {};
@@ -1783,16 +1781,68 @@ export const getOwnerFieldOfficersAgroStats = async (
       try {
         const stats = await getFieldOfficerAgroStats(officer.id, endDate);
         if (stats) {
-          const manager = managers.find((m) => m.id === officer.created_by);
-          const managerName = manager ? `${manager.first_name || ''} ${manager.last_name || ''}`.trim() : "Unknown";
-          
-          // Inject FO metadata into every plot
+          const createdByRaw = officer?.created_by;
+          const createdByUsername =
+            typeof createdByRaw === "string"
+              ? createdByRaw.trim().match(/^(\S+)/)?.[1]?.toLowerCase()
+              : null;
+          const manager =
+            managers.find(
+              (m) =>
+                m?.id === officer?.created_by ||
+                m?.id === officer?.manager_id ||
+                String(m?.id) === String(officer?.manager_id) ||
+                (createdByUsername &&
+                  `${m?.username ?? ""}`.trim().toLowerCase() ===
+                    createdByUsername),
+            ) ?? null;
+          const managerName = manager ? personDisplayName(manager) : "";
+
+          // Inject FO metadata into every plot (never write "Unknown" — leave blank for farms API fill)
           Object.values(stats).forEach((plot: any) => {
-            if (typeof plot === 'object' && plot !== null) {
-              plot.manager_name = plot.manager_name || managerName || "Unknown";
-              plot.field_officer_name = plot.field_officer_name || `${officer.first_name || ''} ${officer.last_name || ''}`.trim() || "Unknown";
-              plot.taluka = plot.taluka || officer.taluka || officer.region || "Unknown";
-              plot.region = plot.region || officer.taluka || officer.region || "Unknown";
+            if (typeof plot === "object" && plot !== null) {
+              const foName = personDisplayName(officer);
+              const foRegion =
+                officer.taluka || officer.region || officer.district || "";
+
+              if (!plot.manager_name && managerName && managerName !== "Unknown") {
+                plot.manager_name = managerName;
+              }
+              if (
+                !plot.field_officer_name &&
+                foName &&
+                foName !== "Unknown"
+              ) {
+                plot.field_officer_name = foName;
+              }
+              if (officer?.id != null || officer?.user_id != null) {
+                plot.field_officer_id = officer.id ?? officer.user_id;
+              }
+              if (manager?.id != null || manager?.user_id != null) {
+                plot.manager_id = manager.id ?? manager.user_id;
+              }
+              if (!plot.taluka && foRegion) {
+                plot.taluka = foRegion;
+              }
+              if (!plot.region && foRegion) {
+                plot.region = foRegion;
+              }
+              if (!plot.crop_variety && officer?.crop_variety) {
+                plot.crop_variety = officer.crop_variety;
+              }
+              if (
+                !plot.plantation_type &&
+                (officer?.variety_type || officer?.plantation_type)
+              ) {
+                plot.plantation_type =
+                  officer.variety_type || officer.plantation_type;
+              }
+              if (
+                !plot.plantation_type_display &&
+                officer?.plantation_type_display
+              ) {
+                plot.plantation_type_display = officer.plantation_type_display;
+              }
             }
           });
         }
@@ -1976,8 +2026,47 @@ export const patchFarmMyProfile = (data: {
   sugarcane_type?: string;
   sugarcane_yield?: string | null;
   plants_in_field?: number;
+  boundary?: { type: "Polygon"; coordinates: number[][][] } | null;
+  location?: { type: "Point"; coordinates: [number, number] } | null;
+  plot?: {
+    boundary?: { type: "Polygon"; coordinates: number[][][] } | null;
+    location?: { type: "Point"; coordinates: [number, number] } | null;
+  };
 }) => {
   return api.patch("/farms/my-profile/", data);
+};
+
+/**
+ * PATCH /api/farms/my-profile/ — plot boundary for logged-in farmer.
+ * Farmers get 403 on PATCH /plots/{id}/; use this endpoint instead.
+ */
+export const patchFarmerPlotBoundary = (data: {
+  boundary: { type: "Polygon"; coordinates: number[][][] } | null;
+  location: { type: "Point"; coordinates: [number, number] } | null;
+}) => {
+  // Backend my-profile PATCH expects plot geometry nested under `plot`
+  // (same shape as the farm response: farm.plot.boundary / farm.plot.location).
+  return patchFarmMyProfile({
+    plot: {
+      boundary: data.boundary,
+      location: data.location,
+    },
+  });
+};
+
+/** Route plot boundary updates: farmers → my-profile, staff → /plots/{id}/. */
+export const updatePlotBoundary = (
+  plotId: string | number,
+  data: {
+    boundary: { type: "Polygon"; coordinates: number[][][] } | null;
+    location: { type: "Point"; coordinates: [number, number] } | null;
+  },
+) => {
+  const role = getUserRole()?.toLowerCase();
+  if (role === "farmer") {
+    return patchFarmerPlotBoundary(data);
+  }
+  return patchPlot(String(plotId), data);
 };
 
 // ==================== FACTORY PROGRESS API ====================

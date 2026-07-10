@@ -1,4 +1,28 @@
-import api, { getTeamConnect, getCurrentUser, getFieldOfficerAgroStats } from "../api";
+import api, {
+  getTeamConnect,
+  getCurrentUser,
+  getOwnerFieldOfficersAgroStats,
+} from "../api";
+import {
+  buildOwnerHarvestRows,
+  collectHarvestFilterOptions,
+  collectHarvestFilterOptionsFromHierarchy,
+  collectScopedHarvestOptions,
+  enrichHierarchyWithFarmRows,
+  filterHarvestRows,
+  hierarchyHasPlottableData,
+  mergeHarvestFilterOptions,
+  normalizeRegionLabel,
+  parseOwnerHierarchyResponse,
+  parseTeamConnectHierarchy,
+  personDisplayName,
+  pickBestHierarchy,
+  rowBelongsToManager,
+  rowBelongsToFieldOfficer,
+  rowMatchesRegion,
+  type TeamConnectHarvestRow,
+  type TeamConnectHierarchy,
+} from "../utils/teamConnectHarvest";
 import React, { useState, useRef, useEffect, useMemo } from "react";
 //import axios from "axios";
 import {
@@ -39,7 +63,6 @@ import {
 import "leaflet/dist/leaflet.css";
 import { useMap } from "react-leaflet";
 
-const API_BASE_URL = `${import.meta.env.VITE_API_BASE_URL || "https://cropeye-backendd.up.railway.app/api"}/users/owner-hierarchy/`;
 
 // Chart Types
 const CHART_TYPES = {
@@ -52,16 +75,16 @@ type ChartType = (typeof CHART_TYPES)[keyof typeof CHART_TYPES];
 
 // Type definitions
 interface Filters {
-  manager: string;
+  managerId: string;
+  fieldOfficerId: string;
   region: string;
-  representative: string;
   sugarcaneType: string;
   variety: string;
 }
 
-interface DateRange {
-  start: string;
-  end: string;
+interface FilterOption {
+  value: string;
+  label: string;
 }
 
 interface HarvestData {
@@ -89,22 +112,6 @@ interface HarvestData {
   boundaryCoordinates?: [number, number][];
 }
 
-interface PlotPoint {
-  id: string | number;
-  position: [number, number];
-  status: string;
-  plotNo: string;
-  area: string;
-  raw: HarvestData;
-  boundaryCoordinates?: [number, number][];
-}
-
-interface StatusData {
-  name: string;
-  value: number;
-  color: string;
-}
-
 interface BrixData {
   day: number;
   value: number;
@@ -121,16 +128,10 @@ interface StageDistribution {
   color: string;
 }
 
-interface KeyMetric {
-  label: string;
-  value: string;
-  icon: React.ComponentType<{ className?: string }>;
-}
-
 interface FilterDropdownProps {
   label: string;
   value: string;
-  options: string[];
+  options: FilterOption[];
   onChange: (value: string) => void;
 }
 
@@ -226,7 +227,6 @@ const CombinedChart: React.FC<CombinedChartProps> = ({
   const BrixTooltip: React.FC<BrixTooltipProps> = ({
     active,
     payload,
-    label,
   }) => {
     if (active && payload && payload.length) {
       const entry = payload[0].payload;
@@ -257,7 +257,6 @@ const CombinedChart: React.FC<CombinedChartProps> = ({
   const HarvestTooltip: React.FC<HarvestTooltipProps> = ({
     active,
     payload,
-    label,
   }) => {
     if (active && payload && payload.length) {
       const entry = payload[0].payload;
@@ -475,15 +474,11 @@ const HarvestDashboard: React.FC = () => {
   const mapWrapperRef = useRef<HTMLDivElement>(null);
   const [activeChart, setActiveChart] = useState<ChartType>(CHART_TYPES.BRIX);
   const [filters, setFilters] = useState<Filters>({
-    manager: "All",
+    managerId: "All",
+    fieldOfficerId: "All",
     region: "All",
-    representative: "All",
     sugarcaneType: "All",
     variety: "All",
-  });
-  const [dateRange, setDateRange] = useState<DateRange>({
-    start: "2024-12-14",
-    end: "2024-12-14",
   });
   const [harvestRange, setHarvestRange] = useState<[number, number]>([
     -50, 100,
@@ -491,21 +486,40 @@ const HarvestDashboard: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(true);
   const [dropdownsLoading, setDropdownsLoading] = useState<boolean>(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
-  const [rawData, setRawData] = useState<HarvestData[]>([]);
+  const [rawData, setRawData] = useState<TeamConnectHarvestRow[]>([]);
+  const [hierarchyMeta, setHierarchyMeta] = useState<TeamConnectHierarchy>({
+    managers: [],
+    fieldOfficers: [],
+    farmers: [],
+  });
 
   // Dynamic filter options
-  const [managerOptions, setManagerOptions] = useState<string[]>(["All"]);
-  const [regionOptions, setRegionOptions] = useState<string[]>(["All"]);
-  const [representativeOptions, setRepresentativeOptions] = useState<string[]>([
-    "All",
+  const [regionOptions, setRegionOptions] = useState<FilterOption[]>([
+    { value: "All", label: "All" },
   ]);
-  const [sugarcaneTypeOptions, setSugarcaneTypeOptions] = useState<string[]>([
-    "All",
+  const [representativeOptions, setRepresentativeOptions] = useState<
+    FilterOption[]
+  >([{ value: "All", label: "All" }]);
+  const [sugarcaneTypeOptions, setSugarcaneTypeOptions] = useState<
+    FilterOption[]
+  >([{ value: "All", label: "All" }]);
+  const [varietyOptions, setVarietyOptions] = useState<FilterOption[]>([
+    { value: "All", label: "All" },
   ]);
-  const [varietyOptions] = useState<string[]>(["All", "Phule 265"]);
+
+  const managerOptions = useMemo<FilterOption[]>(() => {
+    const managers = hierarchyMeta.managers ?? [];
+    return [
+      { value: "All", label: "All" },
+      ...managers.map((manager) => ({
+        value: String(manager?.id ?? manager?.user_id ?? ""),
+        label: personDisplayName(manager),
+      })),
+    ].filter((option) => option.value !== "");
+  }, [hierarchyMeta.managers]);
 
   // Debounce non-representative filters
-  const debouncedManager = useDebouncedValue(filters.manager, 300);
+  const debouncedManagerId = useDebouncedValue(filters.managerId, 300);
   const debouncedRegion = useDebouncedValue(filters.region, 300);
   const debouncedSugarcaneType = useDebouncedValue(filters.sugarcaneType, 300);
   const debouncedVariety = useDebouncedValue(filters.variety, 300);
@@ -517,7 +531,6 @@ const HarvestDashboard: React.FC = () => {
       setFetchError(null);
 
       try {
-        // ── Step 1: get industry_id from current user ──────────────────────
         const meRes = await getCurrentUser();
         const me = meRes?.data;
         const industryId =
@@ -526,227 +539,132 @@ const HarvestDashboard: React.FC = () => {
           me?.industry?.industry_id ??
           me?.industryId;
 
-        // ── Step 2: fetch team-connect with auth token ─────────────────────
         const teamRes = await getTeamConnect(industryId);
-        const teamData = teamRes?.data;
+        const teamHierarchy = parseTeamConnectHierarchy(teamRes?.data);
+        let ownerHierarchy = teamHierarchy;
 
-        // ── Step 3: parse managers + field officers ────────────────────────
-        let managersList: any[] = [];
-        let fieldOfficersList: any[] = [];
-
-        if (teamData?.users_by_role) {
-          managersList = Array.isArray(teamData.users_by_role.managers)
-            ? teamData.users_by_role.managers
-            : [];
-          fieldOfficersList = Array.isArray(teamData.users_by_role.field_officers)
-            ? teamData.users_by_role.field_officers
-            : [];
-        } else if (Array.isArray(teamData?.managers)) {
-          managersList = teamData.managers;
-          fieldOfficersList = Array.isArray(teamData.field_officers)
-            ? teamData.field_officers
-            : managersList.flatMap((m: any) =>
-                Array.isArray(m.field_officers) ? m.field_officers : []
-              );
-        } else if (Array.isArray(teamData?.results)) {
-          managersList = teamData.results.filter(
-            (u: any) =>
-              u.role_id === 3 ||
-              String(u.role?.name ?? "").toLowerCase().includes("manager")
-          );
-          fieldOfficersList = teamData.results.filter(
-            (u: any) =>
-              u.role_id === 2 ||
-              (String(u.role?.name ?? "").toLowerCase().includes("field") &&
-                String(u.role?.name ?? "").toLowerCase().includes("officer"))
-          );
+        try {
+          const ownerHierarchyRes = await api.get("/users/owner-hierarchy/");
+          ownerHierarchy = parseOwnerHierarchyResponse(ownerHierarchyRes?.data);
+        } catch {
+          // owner-hierarchy optional
         }
 
-        // ── Step 4: immediately populate manager & representative dropdowns ──
-        const managerSet = new Set<string>();
-        const foSet = new Set<string>();
-        const foToManager: Record<string, string> = {};
-
-        managersList.forEach((m: any) => {
-          const name = `${m.first_name ?? ""} ${m.last_name ?? ""}`.trim() || m.username || "Unknown";
-          if (name) managerSet.add(name);
-        });
-
-        // Map field officer → manager name
-        if (fieldOfficersList.length === 0 && managersList.length > 0) {
-          // Derive FOs from nested manager objects
-          fieldOfficersList = managersList.flatMap((m: any) => {
-            const mName = `${m.first_name ?? ""} ${m.last_name ?? ""}`.trim() || m.username;
-            return (Array.isArray(m.field_officers) ? m.field_officers : []).map(
-              (fo: any) => ({ ...fo, _managerName: mName })
-            );
-          });
+        let hierarchy = pickBestHierarchy(teamHierarchy, ownerHierarchy);
+        if (!hierarchyHasPlottableData(hierarchy)) {
+          hierarchy = hierarchyHasPlottableData(ownerHierarchy)
+            ? ownerHierarchy
+            : teamHierarchy;
         }
 
-        fieldOfficersList.forEach((fo: any) => {
-          const foName =
-            `${fo.first_name ?? ""} ${fo.last_name ?? ""}`.trim() || fo.username || "Unknown";
-          if (foName) foSet.add(foName);
+        setHierarchyMeta(hierarchy);
 
-          // Resolve manager name via created_by or _managerName
-          const mgr = fo._managerName
-            ? fo._managerName
-            : managersList.find(
-                (m: any) =>
-                  m.id === fo.created_by ||
-                  m.id === fo.manager_id ||
-                  m.id === fo.manager?.id
-              );
-          const mgrName =
-            typeof mgr === "string"
-              ? mgr
-              : mgr
-              ? `${mgr.first_name ?? ""} ${mgr.last_name ?? ""}`.trim() || mgr.username
-              : "Unknown";
-          foToManager[foName] = mgrName;
-        });
-
-        setManagerOptions(["All", ...Array.from(managerSet).sort()]);
-        setRepresentativeOptions(["All", ...Array.from(foSet).sort()]);
-        setDropdownsLoading(false); // dropdowns are ready — show them now
-
-        // ── Step 5: fetch agro-stats per field officer ────────────────────
         const today = new Date().toISOString().slice(0, 10);
-        const allData: HarvestData[] = [];
-        const talukaSet = new Set<string>();
-        const plantationTypeSet = new Set<string>();
+        let agroStats: Record<string, unknown> = {};
 
-        await Promise.allSettled(
-          fieldOfficersList.map(async (fo: any) => {
-            try {
-              const foId = fo.id;
-              if (!foId) return;
+        try {
+          agroStats = (await getOwnerFieldOfficersAgroStats(today)) as Record<
+            string,
+            unknown
+          >;
+        } catch (err) {
+          if (import.meta.env.DEV) {
+            console.warn("[Harvest] agroStats failed:", err);
+          }
+        }
 
-              const foName =
-                `${fo.first_name ?? ""} ${fo.last_name ?? ""}`.trim() ||
-                fo.username ||
-                "Unknown";
-              const mgrName = foToManager[foName] || "Unknown";
+        // Harvest uses team-connect + agroStats only. /farms/ paginates heavily
+        // and often 403s for owner — it does not re-run when filters change.
+        const farmRows: any[] = [];
 
-              const statsData = await getFieldOfficerAgroStats(foId, today);
-              if (!statsData || typeof statsData !== "object") return;
+        hierarchy = enrichHierarchyWithFarmRows(hierarchy, farmRows);
 
-              Object.entries(statsData).forEach(
-                ([plotId, plotData]: [string, any]) => {
-                  if (!plotData || typeof plotData !== "object") return;
-
-                  const area =
-                    plotData.area_acres ?? plotData.soil?.area_acres ?? 0;
-                  const yieldValue =
-                    plotData.brix_sugar?.sugar_yield?.mean ??
-                    plotData.brix_sugar?.sugar_yield?.min ??
-                    0;
-                  const brixValue =
-                    plotData.brix_sugar?.brix?.mean ??
-                    plotData.brix_sugar?.brix?.min ??
-                    0;
-                  const recoveryValue =
-                    plotData.brix_sugar?.recovery?.mean ??
-                    plotData.brix_sugar?.recovery?.min ??
-                    0;
-
-                  const coords =
-                    plotData.geometry?.coordinates?.[0] || [];
-                  if (!coords.length) return;
-
-                  let cLat = 0,
-                    cLng = 0;
-                  coords.forEach((c: number[]) => {
-                    cLng += c[0];
-                    cLat += c[1];
-                  });
-                  cLat /= coords.length;
-                  cLng /= coords.length;
-
-                  if (!cLat || !cLng) return;
-
-                  const boundaryCoords: [number, number][] = coords.map(
-                    (c: number[]) => [c[1], c[0]] as [number, number]
-                  );
-
-                  let days = 0;
-                  if (plotData.plantation_date) {
-                    const pd = new Date(plotData.plantation_date);
-                    if (!isNaN(pd.getTime())) {
-                      days = Math.floor(
-                        (Date.now() - pd.getTime()) / 86400000
-                      );
-                    }
-                  }
-
-                  let stage = "Germination Stage";
-                  if (days > 150) stage = "Maturity Stage";
-                  else if (days > 90) stage = "Grand Growth Stage";
-                  else if (days > 30) stage = "Tillering Stage";
-
-                  const status =
-                    plotData.Sugarcane_Status ||
-                    plotData.harvest_status ||
-                    (days > 300
-                      ? "Ready to Harvest"
-                      : days > 270
-                      ? "Partially Harvested"
-                      : "Growing");
-
-                  const regionName =
-                    plotData.region ||
-                    plotData.taluka ||
-                    fo.taluka ||
-                    fo.region ||
-                    "Unknown";
-                  const plantationType =
-                    plotData.plantation_type || "Unknown";
-                  const variety = plotData.variety || "Phule 265";
-
-                  talukaSet.add(regionName);
-                  plantationTypeSet.add(plantationType);
-
-                  allData.push({
-                    id: plotId,
-                    "Plot No": plotData.plot_number || plotId,
-                    Latitude: cLat,
-                    Longitude: cLng,
-                    "Sugarcane Status": status,
-                    "Area (Hect)": area,
-                    Days: days,
-                    "Prediction Yield (T/acre)": yieldValue,
-                    "Prediction Yield (T/acer)": yieldValue,
-                    "Brix (Degree)": brixValue,
-                    "Recovery (Degree)": recoveryValue,
-                    "Distance (km)": Math.random() * 10 + 1,
-                    Stage: stage,
-                    Region: regionName,
-                    Manager: mgrName,
-                    "Sugarcane Type": plantationType,
-                    Variety: variety,
-                    representative: foName,
-                    boundaryCoordinates: boundaryCoords,
-                  });
-                }
-              );
-            } catch {
-              // silently skip failed FO stats
-            }
-          })
+        const allData = buildOwnerHarvestRows(
+          hierarchy,
+          agroStats as Record<string, any>,
+        );
+        const options = mergeHarvestFilterOptions(
+          collectHarvestFilterOptionsFromHierarchy(hierarchy),
+          collectHarvestFilterOptions(allData),
         );
 
-        setRegionOptions(["All", ...Array.from(talukaSet).sort()]);
-        setSugarcaneTypeOptions([
-          "All",
-          ...Array.from(plantationTypeSet).sort(),
-        ]);
+        if (import.meta.env.DEV) {
+          console.groupCollapsed(
+            `[Harvest] team-connect industry=${industryId} → filters`,
+          );
+          console.log("rows", allData.length);
+          console.log("farmRows enriched", farmRows.length);
+          console.log("managers", options.managers);
+          console.log("representatives", options.representatives);
+          console.log("regions", options.regions);
+          console.log("sugarcaneTypes", options.sugarcaneTypes);
+          console.log("varieties", options.varieties);
+          console.log(
+            "sample",
+            allData.slice(0, 5).map((row) => ({
+              managerId: row.managerId,
+              fieldOfficerId: row.fieldOfficerId,
+              Manager: row.Manager,
+              representative: row.representative,
+              Region: row.Region,
+              "Sugarcane Type": row["Sugarcane Type"],
+              Variety: row.Variety || "(empty)",
+            })),
+          );
+          console.log(
+            "rowsWithManagerId",
+            allData.filter((row) => row.managerId).length,
+            "/",
+            allData.length,
+          );
+          console.groupEnd();
+        }
+
+        setRegionOptions(
+          options.regions.length > 0
+            ? [
+                { value: "All", label: "All" },
+                ...options.regions.map((value) => ({ value, label: value })),
+              ]
+            : [{ value: "All", label: "All" }],
+        );
+        setSugarcaneTypeOptions(
+          options.sugarcaneTypes.length > 0
+            ? [
+                { value: "All", label: "All" },
+                ...options.sugarcaneTypes.map((value) => ({ value, label: value })),
+              ]
+            : [{ value: "All", label: "All" }],
+        );
+        setVarietyOptions(
+          options.varieties.length > 0
+            ? [
+                { value: "All", label: "All" },
+                ...options.varieties.map((value) => ({ value, label: value })),
+              ]
+            : [{ value: "All", label: "All" }],
+        );
+        setFilters({
+          managerId: "All",
+          fieldOfficerId: "All",
+          region: "All",
+          sugarcaneType: "All",
+          variety: "All",
+        });
         setRawData(allData);
+        setDropdownsLoading(false);
+
+        if (allData.length === 0) {
+          setFetchError(
+            "No harvest plots found. Check team-connect has farmers with plots, or try again later.",
+          );
+        }
       } catch (err: any) {
         console.error("Harvest dashboard fetch error:", err);
         setFetchError(
           err?.response?.data?.detail ||
             err?.message ||
-            "Failed to load data. Please try again."
+            "Failed to load data. Please try again.",
         );
         setDropdownsLoading(false);
         setRawData([]);
@@ -758,49 +676,165 @@ const HarvestDashboard: React.FC = () => {
     fetchData();
   }, []);
 
-  // Cascade: when manager changes, update representative options to only those under that manager
+  // Cascade dropdown options: Manager → Region → Representative → Sugarcane Type → Variety
   useEffect(() => {
     const managerFiltered =
-      debouncedManager === "All"
+      debouncedManagerId === "All"
         ? rawData
-        : rawData.filter((item) => item.Manager === debouncedManager);
-    const repSet = new Set<string>();
-    managerFiltered.forEach((item) => {
-      if (item.representative) repSet.add(item.representative);
+        : rawData.filter((item) =>
+            rowBelongsToManager(item, debouncedManagerId, hierarchyMeta),
+          );
+
+    const scopedOptions = collectScopedHarvestOptions(hierarchyMeta, {
+      managerId: debouncedManagerId,
+      region: debouncedRegion,
+      fieldOfficerId: filters.fieldOfficerId,
     });
-    setRepresentativeOptions(["All", ...Array.from(repSet).sort()]);
-    // Reset representative if the current selection is no longer valid
+
+    const regionSet = new Set<string>();
+    managerFiltered.forEach((item) => {
+      if (item.Region && item.Region !== "Unknown") {
+        regionSet.add(normalizeRegionLabel(item.Region));
+      }
+      for (const key of item.regionKeys ?? []) {
+        if (key && key !== "Unknown") {
+          regionSet.add(normalizeRegionLabel(key));
+        }
+      }
+    });
+    setRegionOptions(
+      regionSet.size > 0
+        ? [
+            { value: "All", label: "All" },
+            ...Array.from(regionSet)
+              .sort()
+              .map((value) => ({ value, label: value })),
+          ]
+        : [{ value: "All", label: "All" }],
+    );
+
+    const regionFiltered =
+      debouncedRegion === "All"
+        ? managerFiltered
+        : managerFiltered.filter((item) =>
+            rowMatchesRegion(item, debouncedRegion, hierarchyMeta),
+          );
+
+    const repMap = new Map<string, string>(scopedOptions.representatives);
+    regionFiltered.forEach((item) => {
+      if (!item.fieldOfficerId) return;
+      const label =
+        item.representative && item.representative !== "Unknown"
+          ? item.representative
+          : item.fieldOfficerId;
+      repMap.set(String(item.fieldOfficerId), label);
+    });
+    setRepresentativeOptions(
+      repMap.size > 0
+        ? [
+            { value: "All", label: "All" },
+            ...Array.from(repMap.entries())
+              .sort((a, b) => a[1].localeCompare(b[1]))
+              .map(([value, label]) => ({ value, label })),
+          ]
+        : [{ value: "All", label: "All" }],
+    );
+
+    const repFiltered =
+      filters.fieldOfficerId === "All"
+        ? regionFiltered
+        : regionFiltered.filter((item) =>
+            rowBelongsToFieldOfficer(
+              item,
+              filters.fieldOfficerId,
+              hierarchyMeta,
+            ),
+          );
+
+    const typeSet = new Set<string>(scopedOptions.sugarcaneTypes);
+    repFiltered.forEach((item) => {
+      if (item["Sugarcane Type"] && item["Sugarcane Type"] !== "Unknown") {
+        typeSet.add(item["Sugarcane Type"]);
+      }
+    });
+    setSugarcaneTypeOptions(
+      typeSet.size > 0
+        ? [
+            { value: "All", label: "All" },
+            ...Array.from(typeSet)
+              .sort()
+              .map((value) => ({ value, label: value })),
+          ]
+        : [{ value: "All", label: "All" }],
+    );
+
+    const typeFiltered =
+      debouncedSugarcaneType === "All"
+        ? repFiltered
+        : repFiltered.filter(
+            (item) => item["Sugarcane Type"] === debouncedSugarcaneType,
+          );
+
+    const varietySet = new Set<string>(scopedOptions.varieties);
+    typeFiltered.forEach((item) => {
+      if (item.Variety?.trim()) varietySet.add(item.Variety.trim());
+    });
+    setVarietyOptions(
+      varietySet.size > 0
+        ? [
+            { value: "All", label: "All" },
+            ...Array.from(varietySet)
+              .sort()
+              .map((value) => ({ value, label: value })),
+          ]
+        : [{ value: "All", label: "All" }],
+    );
+
     setFilters((prev) => ({
       ...prev,
-      representative:
-        prev.representative === "All" || repSet.has(prev.representative)
-          ? prev.representative
+      region:
+        prev.region === "All" || regionSet.has(prev.region) ? prev.region : "All",
+      fieldOfficerId:
+        prev.fieldOfficerId === "All" || repMap.has(prev.fieldOfficerId)
+          ? prev.fieldOfficerId
+          : "All",
+      sugarcaneType:
+        prev.sugarcaneType === "All" || typeSet.has(prev.sugarcaneType)
+          ? prev.sugarcaneType
+          : "All",
+      variety:
+        prev.variety === "All" || varietySet.has(prev.variety)
+          ? prev.variety
           : "All",
     }));
-  }, [debouncedManager, rawData]);
+  }, [
+    rawData,
+    hierarchyMeta,
+    debouncedManagerId,
+    debouncedRegion,
+    debouncedSugarcaneType,
+    filters.fieldOfficerId,
+  ]);
 
   const filteredData = useMemo(
     () =>
-      rawData.filter((item) => {
-        const managerMatch =
-          debouncedManager === "All" || item.Manager === debouncedManager;
-        const regionMatch =
-          debouncedRegion === "All" || item.Region === debouncedRegion;
-        const repMatch =
-          filters.representative === "All" ||
-          item.representative === filters.representative;
-        const typeMatch =
-          debouncedSugarcaneType === "All" ||
-          item["Sugarcane Type"] === debouncedSugarcaneType;
-        const varietyMatch =
-          debouncedVariety === "All" || item.Variety === debouncedVariety;
-        return managerMatch && regionMatch && repMatch && typeMatch && varietyMatch;
-      }),
+      filterHarvestRows(
+        rawData,
+        {
+          managerId: debouncedManagerId,
+          fieldOfficerId: filters.fieldOfficerId,
+          region: debouncedRegion,
+          sugarcaneType: debouncedSugarcaneType,
+          variety: debouncedVariety,
+        },
+        hierarchyMeta,
+      ),
     [
       rawData,
-      debouncedManager,
+      hierarchyMeta,
+      debouncedManagerId,
       debouncedRegion,
-      filters.representative,
+      filters.fieldOfficerId,
       debouncedSugarcaneType,
       debouncedVariety,
     ],
@@ -855,7 +889,7 @@ const HarvestDashboard: React.FC = () => {
       id: item.id || idx,
       position: [item.Latitude, item.Longitude] as [number, number],
       status: item["Sugarcane Status"],
-      plotNo: item["Plot No"] || item["plot in no."] || `P${idx + 1}`,
+      plotNo: item["Plot No"] || `P${idx + 1}`,
       area: `${item["Area (Hect)"]} Ha`,
       raw: item,
       boundaryCoordinates: item.boundaryCoordinates,
@@ -1077,8 +1111,8 @@ const HarvestDashboard: React.FC = () => {
             <option>Loading…</option>
           ) : (
             options.map((option) => (
-              <option key={option} value={option}>
-                {option}
+              <option key={option.value} value={option.value}>
+                {option.label}
               </option>
             ))
           )}
@@ -1233,11 +1267,18 @@ const HarvestDashboard: React.FC = () => {
 
               <FilterDropdown
                 label="Manager"
-                value={filters.manager}
+                value={filters.managerId}
                 options={managerOptions}
                 isLoading={dropdownsLoading}
                 onChange={(value) =>
-                  setFilters((prev) => ({ ...prev, manager: value }))
+                  setFilters((prev) => ({
+                    ...prev,
+                    managerId: value,
+                    fieldOfficerId: "All",
+                    region: "All",
+                    sugarcaneType: "All",
+                    variety: "All",
+                  }))
                 }
               />
               <FilterDropdown
@@ -1246,16 +1287,27 @@ const HarvestDashboard: React.FC = () => {
                 options={regionOptions}
                 isLoading={loading}
                 onChange={(value) =>
-                  setFilters((prev) => ({ ...prev, region: value }))
+                  setFilters((prev) => ({
+                    ...prev,
+                    region: value,
+                    fieldOfficerId: "All",
+                    sugarcaneType: "All",
+                    variety: "All",
+                  }))
                 }
               />
               <FilterDropdown
                 label="Representative"
-                value={filters.representative}
+                value={filters.fieldOfficerId}
                 options={representativeOptions}
                 isLoading={dropdownsLoading}
                 onChange={(value) =>
-                  setFilters((prev) => ({ ...prev, representative: value }))
+                  setFilters((prev) => ({
+                    ...prev,
+                    fieldOfficerId: value,
+                    sugarcaneType: "All",
+                    variety: "All",
+                  }))
                 }
               />
               <FilterDropdown
@@ -1396,7 +1448,7 @@ const HarvestDashboard: React.FC = () => {
                         paddingAngle={5}
                         dataKey="value"
                       >
-                        {plotStatusData.map((entry, index) => (
+                        {plotStatusData.map((_item, index) => (
                           <Cell
                             key={`cell-${index}`}
                             fill={

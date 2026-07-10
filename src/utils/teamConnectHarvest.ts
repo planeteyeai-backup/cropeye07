@@ -1,0 +1,2064 @@
+import { normalizePlotKey, plotKeyFromRecord } from "./plotName";
+import { collectFarmsFromRecord } from "./plantation";
+
+export interface TeamConnectHarvestRow {
+  id?: string;
+  "Plot No"?: string;
+  Latitude: number;
+  Longitude: number;
+  "Sugarcane Status": string;
+  "Area (Hect)": number;
+  Days: number;
+  "Prediction Yield (T/acre)": number;
+  "Prediction Yield (T/acer)"?: number;
+  "Brix (Degree)": number;
+  "Recovery (Degree)": number;
+  "Distance (km)": number;
+  Stage: string;
+  Region: string;
+  regionKeys?: string[];
+  Manager?: string;
+  managerId?: string;
+  fieldOfficerId?: string;
+  "Sugarcane Type": string;
+  Variety: string;
+  representative?: string;
+  boundaryCoordinates?: [number, number][];
+}
+
+export interface TeamConnectHierarchy {
+  managers: any[];
+  fieldOfficers: any[];
+  farmers: any[];
+}
+
+interface PlotContext {
+  fo: any;
+  farmer: any;
+  plot: any;
+  farm: any | null;
+  managerName: string;
+  managerId: string;
+  representative: string;
+  plotKeys: string[];
+}
+
+export function isRoleLikeDisplayName(name: string): boolean {
+  return /^(field\s*officer|manager|farmer|owner|admin|representative)$/i.test(
+    name.trim(),
+  );
+}
+
+/** Prefer real names; skip API role titles like "Field Officer" when username/id exists. */
+export function personDisplayName(user: any): string {
+  const full = `${user?.first_name ?? ""} ${user?.last_name ?? ""}`.trim();
+  const username = `${user?.username ?? ""}`.trim();
+  const roleLike = full ? isRoleLikeDisplayName(full) : false;
+
+  if (full && !roleLike) return full;
+  if (username) return username;
+  const email = `${user?.email ?? ""}`.trim();
+  if (email.includes("@")) return email.split("@")[0];
+  const id = user?.id ?? user?.user_id;
+  if (id != null) return `User-${id}`;
+  if (full) return full;
+  return "Unknown";
+}
+
+function resolvePersonLabel(...values: unknown[]): string {
+  for (const value of values) {
+    const text = firstNonEmpty(value);
+    if (!text || isRoleLikeDisplayName(text)) continue;
+    return text;
+  }
+  return "Unknown";
+}
+
+function formatPlantationLabel(raw: string): string {
+  const key = raw.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const labels: Record<string, string> = {
+    pre_seasonal: "Pre-Seasonal",
+    preseasonal: "Pre-Seasonal",
+    adsali: "Adsali",
+    suru: "Suru",
+    ratoon: "Ratoon",
+    new: "New",
+    old: "Old",
+  };
+  if (labels[key]) return labels[key];
+  return raw
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function parseCreatedByUsername(createdBy: unknown): string | null {
+  if (typeof createdBy !== "string" || !createdBy.trim()) return null;
+  const match = createdBy.trim().match(/^(\S+)/);
+  return match ? match[1].toLowerCase() : null;
+}
+
+function normalizeRole(user: any) {
+  const roleId = user?.role_id ?? user?.role?.id ?? user?.role?.role_id ?? null;
+  const roleNameRaw =
+    user?.role?.name ?? user?.role_name ?? user?.roleName ?? user?.type ?? "";
+  return { roleId, roleName: `${roleNameRaw}`.toLowerCase() };
+}
+
+function uniqueSorted(values: Array<string | undefined | null>): string[] {
+  return [...new Set(values.filter((value) => value && `${value}`.trim() !== ""))]
+    .map((value) => String(value).trim())
+    .sort((a, b) => a.localeCompare(b));
+}
+
+export function parseTeamConnectHierarchy(teamData: any): TeamConnectHierarchy {
+  let managers: any[] = [];
+  let fieldOfficers: any[] = [];
+  let farmers: any[] = [];
+
+  if (!teamData) {
+    return { managers, fieldOfficers, farmers };
+  }
+
+  if (teamData.users_by_role) {
+    managers = Array.isArray(teamData.users_by_role.managers)
+      ? teamData.users_by_role.managers
+      : [];
+    fieldOfficers = Array.isArray(teamData.users_by_role.field_officers)
+      ? teamData.users_by_role.field_officers
+      : [];
+    farmers = Array.isArray(teamData.users_by_role.farmers)
+      ? teamData.users_by_role.farmers
+      : [];
+  }
+
+  if (!managers.length && Array.isArray(teamData.managers)) {
+    managers = teamData.managers;
+  }
+  if (!fieldOfficers.length && Array.isArray(teamData.field_officers)) {
+    fieldOfficers = teamData.field_officers;
+  }
+  if (!farmers.length && Array.isArray(teamData.farmers)) {
+    farmers = teamData.farmers;
+  }
+
+  if (Array.isArray(teamData.results)) {
+    teamData.results.forEach((user: any) => {
+      const { roleId, roleName } = normalizeRole(user);
+      if (roleId === 3 || roleName.includes("manager")) {
+        managers.push(user);
+      } else if (
+        roleId === 2 ||
+        (roleName.includes("field") && roleName.includes("officer"))
+      ) {
+        fieldOfficers.push(user);
+      } else if (roleId === 1 || roleName.includes("farmer")) {
+        farmers.push(user);
+      }
+    });
+  }
+
+  if (!fieldOfficers.length && managers.length) {
+    fieldOfficers = managers.flatMap((manager: any) => {
+      const managerName = personDisplayName(manager);
+      const nested = manager.field_officers ?? manager.fieldOfficers ?? [];
+      if (!Array.isArray(nested)) return [];
+      return nested.map((fo: any) => ({
+        ...fo,
+        _managerName: managerName,
+        manager_id:
+          fo?.manager_id ?? fo?.manager?.id ?? manager?.id ?? manager?.user_id,
+        farmers: fo?.farmers ?? [],
+      }));
+    });
+  }
+
+  fieldOfficers = enrichFieldOfficersWithManagerIds(fieldOfficers, managers);
+  fieldOfficers = enrichFieldOfficersWithFarmers(fieldOfficers, farmers);
+
+  return { managers, fieldOfficers, farmers };
+}
+
+/** owner-hierarchy has nested managers → field_officers → farmers → plots with boundaries. */
+export function parseOwnerHierarchyResponse(data: any): TeamConnectHierarchy {
+  const managers = Array.isArray(data?.managers) ? data.managers : [];
+  let fieldOfficers = managers.flatMap((manager: any) => {
+    const managerName = personDisplayName(manager);
+    const nested = manager?.field_officers ?? manager?.fieldOfficers ?? [];
+    if (!Array.isArray(nested)) return [];
+    return nested.map((fo: any) => ({
+      ...fo,
+      _managerName: managerName,
+      manager_id: fo?.manager_id ?? fo?.manager?.id ?? manager?.id,
+      farmers: fo?.farmers ?? [],
+    }));
+  });
+
+  if (!fieldOfficers.length && Array.isArray(data?.field_officers)) {
+    fieldOfficers = data.field_officers;
+  }
+
+  const farmers = fieldOfficers.flatMap((fo: any) =>
+    Array.isArray(fo?.farmers) ? fo.farmers : [],
+  );
+
+  fieldOfficers = enrichFieldOfficersWithManagerIds(fieldOfficers, managers);
+  fieldOfficers = enrichFieldOfficersWithFarmers(fieldOfficers, farmers);
+
+  return { managers, fieldOfficers, farmers };
+}
+
+export function countHierarchyPlots(hierarchy: TeamConnectHierarchy): number {
+  let count = 0;
+  for (const fo of hierarchy.fieldOfficers) {
+    for (const farmer of fo?.farmers ?? []) {
+      if (Array.isArray(farmer?.plots)) count += farmer.plots.length;
+      count += collectFarmsFromRecord(farmer).length;
+    }
+  }
+  return count;
+}
+
+/** Prefer owner-hierarchy when it has more plot/farm data than team-connect. */
+export function pickBestHierarchy(
+  ...sources: TeamConnectHierarchy[]
+): TeamConnectHierarchy {
+  let best = sources[0] ?? { managers: [], fieldOfficers: [], farmers: [] };
+  let bestCount = countHierarchyPlots(best);
+
+  for (let i = 1; i < sources.length; i += 1) {
+    const candidate = sources[i];
+    if (!candidate) continue;
+    const count = countHierarchyPlots(candidate);
+    if (count > bestCount) {
+      best = candidate;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+export function hierarchyHasPlottableData(hierarchy: TeamConnectHierarchy): boolean {
+  for (const fo of hierarchy.fieldOfficers) {
+    for (const farmer of fo?.farmers ?? []) {
+      if (Array.isArray(farmer?.plots) && farmer.plots.length > 0) {
+        return true;
+      }
+      if (collectFarmsFromRecord(farmer).length > 0) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function enrichFieldOfficersWithManagerIds(
+  fieldOfficers: any[],
+  managers: any[],
+): any[] {
+  const managersByUsername = new Map<string, any>();
+  for (const manager of managers || []) {
+    const username = `${manager?.username ?? ""}`.trim().toLowerCase();
+    if (username) managersByUsername.set(username, manager);
+  }
+
+  return (fieldOfficers || []).map((fo) => {
+    let managerId =
+      fo?.manager_id ?? fo?.manager?.id ?? fo?.managerId ?? null;
+
+    if (managerId == null) {
+      const creatorUsername = parseCreatedByUsername(fo?.created_by);
+      const mgr = creatorUsername
+        ? managersByUsername.get(creatorUsername)
+        : null;
+      if (mgr) managerId = mgr?.id ?? mgr?.user_id ?? null;
+    }
+
+    return { ...fo, manager_id: managerId };
+  });
+}
+
+function farmerBelongsToFieldOfficer(farmer: any, officer: any): boolean {
+  const officerId = officer?.id ?? officer?.user_id ?? null;
+  const officerUsername = `${officer?.username ?? ""}`.trim().toLowerCase();
+
+  const farmerFoId =
+    farmer?.field_officer_id ??
+    farmer?.field_officer?.id ??
+    farmer?.fieldOfficerId ??
+    null;
+
+  if (
+    officerId != null &&
+    farmerFoId != null &&
+    String(farmerFoId) === String(officerId)
+  ) {
+    return true;
+  }
+
+  const creatorUsername = parseCreatedByUsername(farmer?.created_by);
+  return (
+    !!officerUsername &&
+    !!creatorUsername &&
+    creatorUsername === officerUsername
+  );
+}
+
+function getFarmersForFieldOfficer(officer: any, allFarmers: any[]): any[] {
+  const nested = officer?.farmers;
+  if (Array.isArray(nested) && nested.length > 0) return nested;
+  return (allFarmers || []).filter((farmer) =>
+    farmerBelongsToFieldOfficer(farmer, officer),
+  );
+}
+
+function enrichFieldOfficersWithFarmers(
+  fieldOfficers: any[],
+  farmers: any[],
+): any[] {
+  return (fieldOfficers || []).map((fo) => {
+    const foFarmers = getFarmersForFieldOfficer(fo, farmers);
+    return {
+      ...fo,
+      farmers: foFarmers,
+      farmers_count: foFarmers.length,
+    };
+  });
+}
+
+function resolveManagerId(fo: any, managers: any[]): string {
+  const directId = fo?.manager_id ?? fo?.manager?.id ?? null;
+  if (directId != null) return String(directId);
+
+  const creatorUsername = parseCreatedByUsername(fo?.created_by);
+  if (creatorUsername) {
+    const manager = managers.find(
+      (item) =>
+        `${item?.username ?? ""}`.trim().toLowerCase() === creatorUsername,
+    );
+    if (manager) return String(manager?.id ?? manager?.user_id ?? "");
+  }
+  return "";
+}
+
+function fieldOfficerId(fo: any): string {
+  const id = fo?.id ?? fo?.user_id;
+  return id != null ? String(id) : "";
+}
+
+/** Same manager-matching rules as OwnerFarmDash field-officer dropdown. */
+export function fieldOfficerBelongsToManager(
+  fo: any,
+  managerId: string,
+  managers: any[],
+): boolean {
+  if (!managerId || managerId === "All") return true;
+
+  const foManagerId =
+    fo?.manager_id ?? fo?.manager?.id ?? fo?.managerId ?? null;
+  if (
+    foManagerId != null &&
+    String(foManagerId) === String(managerId)
+  ) {
+    return true;
+  }
+
+  const selectedManager = managers.find(
+    (manager) =>
+      String(manager?.id ?? manager?.user_id) === String(managerId),
+  );
+  if (!selectedManager) return false;
+
+  const creatorUsername = parseCreatedByUsername(fo?.created_by);
+  const managerUsername = `${selectedManager?.username ?? ""}`
+    .trim()
+    .toLowerCase();
+  return (
+    !!creatorUsername &&
+    !!managerUsername &&
+    creatorUsername === managerUsername
+  );
+}
+
+export function getFieldOfficersForManager(
+  hierarchy: TeamConnectHierarchy,
+  managerId: string,
+): any[] {
+  if (!managerId || managerId === "All") return hierarchy.fieldOfficers;
+  return hierarchy.fieldOfficers.filter((fo) =>
+    fieldOfficerBelongsToManager(fo, managerId, hierarchy.managers),
+  );
+}
+
+export function rowBelongsToManager(
+  row: TeamConnectHarvestRow,
+  managerId: string,
+  hierarchy: TeamConnectHierarchy,
+): boolean {
+  if (!managerId || managerId === "All") return true;
+
+  if (
+    row.managerId != null &&
+    String(row.managerId) === String(managerId)
+  ) {
+    return true;
+  }
+
+  const manager = hierarchy.managers.find(
+    (item) => String(item?.id ?? item?.user_id) === String(managerId),
+  );
+  const managerLabel = manager ? personDisplayName(manager) : "";
+  if (managerLabel && row.Manager && labelsMatch(row.Manager, managerLabel)) {
+    return true;
+  }
+
+  const officersUnderManager = getFieldOfficersForManager(hierarchy, managerId);
+  if (row.fieldOfficerId) {
+    if (
+      officersUnderManager.some(
+        (officer) =>
+          String(officer?.id ?? officer?.user_id) ===
+          String(row.fieldOfficerId),
+      )
+    ) {
+      return true;
+    }
+  }
+
+  if (row.representative && row.representative !== "Unknown") {
+    if (
+      officersUnderManager.some(
+        (officer) => personDisplayName(officer) === row.representative,
+      )
+    ) {
+      return true;
+    }
+  }
+
+  if (row.fieldOfficerId) {
+    const fo = hierarchy.fieldOfficers.find(
+      (officer) =>
+        String(officer?.id ?? officer?.user_id) ===
+        String(row.fieldOfficerId),
+    );
+    if (
+      fo &&
+      fieldOfficerBelongsToManager(fo, managerId, hierarchy.managers)
+    ) {
+      return true;
+    }
+  }
+
+  if (row.representative && row.representative !== "Unknown") {
+    const fo = hierarchy.fieldOfficers.find(
+      (officer) => personDisplayName(officer) === row.representative,
+    );
+    if (
+      fo &&
+      fieldOfficerBelongsToManager(fo, managerId, hierarchy.managers)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function rowBelongsToFieldOfficer(
+  row: TeamConnectHarvestRow,
+  fieldOfficerIdFilter: string,
+  hierarchy: TeamConnectHierarchy,
+): boolean {
+  if (!fieldOfficerIdFilter || fieldOfficerIdFilter === "All") return true;
+
+  if (
+    row.fieldOfficerId != null &&
+    String(row.fieldOfficerId) === String(fieldOfficerIdFilter)
+  ) {
+    return true;
+  }
+
+  const fo = hierarchy.fieldOfficers.find(
+    (officer) =>
+      String(officer?.id ?? officer?.user_id) ===
+      String(fieldOfficerIdFilter),
+  );
+  if (!fo) return false;
+
+  const foLabel = personDisplayName(fo);
+  return (
+    row.representative === foLabel ||
+    row.representative === `${fo?.username ?? ""}`.trim()
+  );
+}
+
+function resolveManagerName(fo: any, managers: any[]): string {
+  if (fo?._managerName) return fo._managerName;
+
+  const managerId = fo?.manager_id ?? fo?.manager?.id ?? null;
+  if (managerId != null) {
+    const manager = managers.find(
+      (item) => String(item?.id ?? item?.user_id) === String(managerId),
+    );
+    if (manager) return personDisplayName(manager);
+  }
+
+  const creatorUsername = parseCreatedByUsername(fo?.created_by);
+  if (creatorUsername) {
+    const manager = managers.find(
+      (item) =>
+        `${item?.username ?? ""}`.trim().toLowerCase() === creatorUsername,
+    );
+    if (manager) return personDisplayName(manager);
+  }
+
+  return "Unknown";
+}
+
+function firstNonEmpty(...values: unknown[]): string {
+  for (const value of values) {
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (!text) continue;
+    const lower = text.toLowerCase();
+    if (
+      lower === "null" ||
+      lower === "undefined" ||
+      lower === "unknown" ||
+      lower === "n/a" ||
+      lower === "-"
+    ) {
+      continue;
+    }
+    return text;
+  }
+  return "";
+}
+
+/** Plantation type (Suru / Adsali / Ratoon…) — matches MyProfile `variety_type`. */
+function readSugarcaneType(
+  farm: any,
+  plot: any,
+  farmer: any,
+  agro?: any,
+): string {
+  const cropType = farm?.crop_type;
+  // Prefer human labels (_display) over raw codes like pre_seasonal.
+  const value = firstNonEmpty(
+    farm?.plantation_type_display,
+    cropType?.plantation_type_display,
+    agro?.plantation_type_display,
+    farm?.plantation_type,
+    farm?.variety_type,
+    cropType?.plantation_type,
+    cropType?.variety_type,
+    plot?.plantation_type,
+    plot?.variety_type,
+    farmer?.plantation_type,
+    farmer?.variety_type,
+    agro?.plantation_type,
+    agro?.variety_type,
+  );
+  return value ? formatPlantationLabel(value) : "Unknown";
+}
+
+/** Crop variety name — matches MyProfile / FarmList `crop_variety`. */
+function readVariety(farm: any, plot: any, farmer?: any, agro?: any): string {
+  const cropType = farm?.crop_type;
+  return firstNonEmpty(
+    farm?.crop_variety,
+    cropType?.crop_variety,
+    farm?.variety,
+    cropType?.variety,
+    plot?.crop_variety,
+    plot?.variety,
+    farmer?.crop_variety,
+    farmer?.variety,
+    agro?.crop_variety,
+    agro?.variety,
+    agro?.properties?.crop_variety,
+    agro?.features?.[0]?.properties?.crop_variety,
+  );
+}
+
+function readPlantationDate(
+  farm: any,
+  plot: any,
+  farmer: any,
+  agro?: any,
+): string | null {
+  const value = firstNonEmpty(
+    farm?.plantation_date,
+    farm?.planting_date,
+    farm?.crop_type?.plantation_date,
+    plot?.plantation_date,
+    plot?.planting_date,
+    farmer?.plantation_date,
+    agro?.plantation_date,
+    agro?.planting_date,
+  );
+  return value || null;
+}
+
+export function normalizeRegionLabel(value: string): string {
+  return `${value}`.trim().toUpperCase();
+}
+
+export function regionsMatch(a: string, b: string): boolean {
+  if (!a || !b || a === "All" || b === "All") return a === "All" || b === "All";
+  return normalizeRegionLabel(a) === normalizeRegionLabel(b);
+}
+
+/** Case-insensitive label match; allows truncated display names. */
+export function labelsMatch(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  if (regionsMatch(a, b)) return true;
+  const left = normalizeRegionLabel(a);
+  const right = normalizeRegionLabel(b);
+  if (left.length < 4 || right.length < 4) return false;
+  return left.startsWith(right) || right.startsWith(left);
+}
+
+function collectLocationKeys(...records: Array<any | null | undefined>): string[] {
+  const keys = new Set<string>();
+  const add = (value: unknown) => {
+    if (value == null) return;
+    const text = String(value).trim();
+    if (!text || text.toLowerCase() === "unknown") return;
+    keys.add(normalizeRegionLabel(text));
+  };
+
+  for (const record of records) {
+    if (!record) continue;
+    add(record.village);
+    add(record.taluka);
+    add(record.region);
+    add(record.district);
+    const address = record.address;
+    if (address && typeof address === "object") {
+      add(address.village);
+      add(address.taluka);
+      add(address.district);
+      add(address.region);
+    }
+    const addressInfo = record.address_info;
+    if (addressInfo && typeof addressInfo === "object") {
+      add(addressInfo.village);
+      add(addressInfo.taluka);
+      add(addressInfo.district);
+    }
+    add(record.properties?.village);
+    add(record.properties?.taluka);
+    add(record.properties?.district);
+    add(record.properties?.region);
+    add(record.soil?.taluka);
+    add(record.soil?.district);
+    add(record.soil?.village);
+    const features = record.features;
+    if (Array.isArray(features)) {
+      for (const feature of features) {
+        add(feature?.properties?.village);
+        add(feature?.properties?.taluka);
+        add(feature?.properties?.district);
+        add(feature?.properties?.region);
+      }
+    } else {
+      add(record.features?.[0]?.properties?.village);
+      add(record.features?.[0]?.properties?.taluka);
+      add(record.features?.[0]?.properties?.district);
+      add(record.features?.[0]?.properties?.region);
+    }
+  }
+
+  return [...keys];
+}
+
+/** Region labels from team-connect hierarchy, optionally scoped to one manager. */
+export function collectRegionsFromHierarchy(
+  hierarchy: TeamConnectHierarchy,
+  managerId?: string,
+): string[] {
+  const regionSet = new Set<string>();
+  const officers =
+    managerId && managerId !== "All"
+      ? getFieldOfficersForManager(hierarchy, managerId)
+      : hierarchy.fieldOfficers;
+
+  for (const fo of officers) {
+    for (const key of collectLocationKeys(fo)) {
+      regionSet.add(key);
+    }
+    for (const farmer of fo?.farmers ?? []) {
+      for (const { plot, farms } of plotEntriesForFarmer(farmer)) {
+        const farm = pickBestFarm(farms);
+        const region = readRegion(plot, farmer, fo);
+        if (region && region !== "Unknown") {
+          regionSet.add(normalizeRegionLabel(region));
+        }
+        for (const key of collectLocationKeys(plot, farm, farmer, fo)) {
+          regionSet.add(key);
+        }
+      }
+    }
+  }
+
+  return uniqueSorted([...regionSet]);
+}
+
+function harvestRowPlotKeys(row: TeamConnectHarvestRow): Set<string> {
+  const keys = new Set<string>();
+  const add = (value: unknown) => {
+    if (value == null || value === "") return;
+    keys.add(normalizePlotKey(String(value)));
+  };
+  add(row.id);
+  add(row["Plot No"]);
+  if (row.id) {
+    add(String(row.id).replace(/^"|"$/g, ""));
+    add(String(row.id).split("-")[0]);
+  }
+  return keys;
+}
+
+function plotRowLinks(
+  row: TeamConnectHarvestRow,
+  plotKeys: string[],
+): boolean {
+  const rowKeys = harvestRowPlotKeys(row);
+  if (plotKeys.some((pk) => rowKeys.has(normalizePlotKey(pk)))) {
+    return true;
+  }
+
+  const plotNo = normalizePlotKey(`${row["Plot No"] ?? ""}`);
+  const rowId = normalizePlotKey(`${row.id ?? ""}`);
+  if (!plotNo && !rowId) return false;
+
+  return plotKeys.some((pk) => {
+    const normalized = normalizePlotKey(pk);
+    if (!normalized) return false;
+    return (
+      (plotNo && (normalized.includes(plotNo) || plotNo.includes(normalized))) ||
+      (rowId && (normalized.includes(rowId) || rowId.includes(normalized)))
+    );
+  });
+}
+
+export function rowMatchesRegion(
+  row: TeamConnectHarvestRow,
+  regionFilter: string,
+  hierarchy?: TeamConnectHierarchy,
+): boolean {
+  if (!regionFilter || regionFilter === "All") return true;
+  if (regionsMatch(row.Region, regionFilter)) return true;
+  if ((row.regionKeys ?? []).some((key) => regionsMatch(key, regionFilter))) {
+    return true;
+  }
+
+  if (!hierarchy) return false;
+
+  const rowKeys = harvestRowPlotKeys(row);
+  const officers = row.fieldOfficerId
+    ? hierarchy.fieldOfficers.filter(
+        (fo) => String(fieldOfficerId(fo)) === String(row.fieldOfficerId),
+      )
+    : row.representative && row.representative !== "Unknown"
+      ? hierarchy.fieldOfficers.filter(
+          (fo) => personDisplayName(fo) === row.representative,
+        )
+      : [];
+
+  for (const fo of officers) {
+    if (recordMatchesRegion(regionFilter, fo)) return true;
+
+    for (const farmer of fo?.farmers ?? []) {
+      for (const { plot, farms } of plotEntriesForFarmer(farmer)) {
+        const farm = pickBestFarm(farms);
+        const plotKeys = plotKeysForContext(plot, farm);
+        const linkedToRow =
+          rowKeys.size === 0 ||
+          plotKeys.some((pk) => rowKeys.has(normalizePlotKey(pk))) ||
+          plotRowLinks(row, plotKeys);
+
+        if (
+          linkedToRow &&
+          recordMatchesRegion(regionFilter, plot, farm, farmer, fo)
+        ) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+function recordMatchesRegion(
+  regionFilter: string,
+  ...records: Array<any | null | undefined>
+): boolean {
+  if (!regionFilter || regionFilter === "All") return true;
+  return collectLocationKeys(...records).some((key) =>
+    regionsMatch(key, regionFilter),
+  );
+}
+
+export function collectScopedHarvestOptions(
+  hierarchy: TeamConnectHierarchy,
+  scope: {
+    managerId?: string;
+    region?: string;
+    fieldOfficerId?: string;
+  },
+) {
+  const representatives = new Map<string, string>();
+  const sugarcaneTypes = new Set<string>();
+  const varieties = new Set<string>();
+
+  let fieldOfficers = hierarchy.fieldOfficers;
+  if (scope.managerId && scope.managerId !== "All") {
+    fieldOfficers = getFieldOfficersForManager(hierarchy, scope.managerId);
+  }
+  if (scope.fieldOfficerId && scope.fieldOfficerId !== "All") {
+    fieldOfficers = fieldOfficers.filter(
+      (fo) =>
+        String(fo?.id ?? fo?.user_id) === String(scope.fieldOfficerId),
+    );
+  }
+
+  for (const fo of fieldOfficers) {
+    let foHasRegionMatch = scope.region == null || scope.region === "All";
+
+    for (const farmer of fo?.farmers ?? []) {
+      for (const { plot, farms } of plotEntriesForFarmer(farmer)) {
+        const farm = pickBestFarm(farms);
+        if (
+          scope.region &&
+          scope.region !== "All" &&
+          !recordMatchesRegion(scope.region, plot, farm, farmer, fo)
+        ) {
+          continue;
+        }
+
+        foHasRegionMatch = true;
+        const foId = fieldOfficerId(fo);
+        if (foId) representatives.set(foId, personDisplayName(fo));
+
+        const sugarcaneType = readSugarcaneType(farm, plot, farmer);
+        if (sugarcaneType && sugarcaneType !== "Unknown") {
+          sugarcaneTypes.add(sugarcaneType);
+        }
+
+        const variety = readVariety(farm, plot, farmer);
+        if (variety) varieties.add(variety);
+      }
+    }
+
+    if (
+      foHasRegionMatch &&
+      (scope.region == null || scope.region === "All")
+    ) {
+      const foId = fieldOfficerId(fo);
+      if (foId) representatives.set(foId, personDisplayName(fo));
+    }
+  }
+
+  return {
+    representatives,
+    sugarcaneTypes: [...sugarcaneTypes].sort(),
+    varieties: [...varieties].sort(),
+  };
+}
+
+function readRegion(plot: any, farmer: any, fo: any, agro?: any): string {
+  const plotAddress = plot?.address;
+  const farmerAddress = farmer?.address;
+  const foAddress = fo?.address;
+  const farmOwner = farmer?.farmer_profile ?? farmer?.personal_info;
+
+  const value = firstNonEmpty(
+    agro?.region,
+    agro?.taluka,
+    agro?.district,
+    agro?.village,
+    agro?.properties?.region,
+    agro?.properties?.taluka,
+    agro?.properties?.district,
+    agro?.properties?.village,
+    agro?.soil?.region,
+    agro?.soil?.taluka,
+    agro?.soil?.district,
+    agro?.features?.[0]?.properties?.region,
+    agro?.features?.[0]?.properties?.taluka,
+    agro?.features?.[0]?.properties?.district,
+    agro?.features?.[0]?.properties?.village,
+    plot?.taluka,
+    plot?.region,
+    plot?.district,
+    typeof plotAddress === "object"
+      ? plotAddress?.taluka ?? plotAddress?.district ?? plotAddress?.village
+      : null,
+    farmer?.taluka,
+    farmer?.district,
+    farmer?.region,
+    farmer?.village,
+    typeof farmerAddress === "object"
+      ? farmerAddress?.taluka ??
+          farmerAddress?.district ??
+          farmerAddress?.village
+      : farmerAddress,
+    farmOwner?.taluka,
+    farmOwner?.district,
+    farmOwner?.village,
+    fo?.taluka,
+    fo?.region,
+    fo?.district,
+    typeof foAddress === "object"
+      ? foAddress?.taluka ?? foAddress?.district
+      : null,
+    plot?.village,
+  );
+  return value || "Unknown";
+}
+
+function extractCoordinatesFromRecord(record: any): number[][] {
+  if (!record) return [];
+
+  const boundary = record.boundary ?? record.geometry;
+  if (boundary?.coordinates?.[0]?.length) {
+    return boundary.coordinates[0];
+  }
+
+  const lat =
+    record?.location?.lat ??
+    record?.location?.latitude ??
+    record?.lat ??
+    record?.latitude;
+  const lng =
+    record?.location?.lng ??
+    record?.location?.longitude ??
+    record?.lng ??
+    record?.longitude;
+
+  if (lat != null && lng != null) {
+    const latNum = Number(lat);
+    const lngNum = Number(lng);
+    if (Number.isFinite(latNum) && Number.isFinite(lngNum)) {
+      return [[lngNum, latNum]];
+    }
+  }
+
+  return [];
+}
+
+function centerFromCoordinates(coordinates: number[][]): {
+  lat: number;
+  lng: number;
+  boundary?: [number, number][];
+} | null {
+  if (!coordinates.length) return null;
+
+  if (coordinates.length === 1) {
+    const [lng, lat] = coordinates[0];
+    if (!lat || !lng) return null;
+    return { lat, lng };
+  }
+
+  let centerLat = 0;
+  let centerLng = 0;
+  coordinates.forEach((coord) => {
+    centerLng += coord[0];
+    centerLat += coord[1];
+  });
+  centerLat /= coordinates.length;
+  centerLng /= coordinates.length;
+
+  if (!centerLat || !centerLng) return null;
+
+  const boundary = coordinates.map(
+    (coord) => [coord[1], coord[0]] as [number, number],
+  );
+
+  return { lat: centerLat, lng: centerLng, boundary };
+}
+
+function resolveCenter(
+  agro: any,
+  plot: any,
+  farm: any,
+  farmer: any,
+  fo: any,
+): ReturnType<typeof centerFromCoordinates> {
+  const sources = [
+    agro?.geometry,
+    plot,
+    farm,
+    farmer,
+    fo,
+    agro ? { geometry: agro.geometry } : null,
+  ];
+
+  for (const source of sources) {
+    const coords = extractCoordinatesFromRecord(source);
+    const center = centerFromCoordinates(coords);
+    if (center) return center;
+  }
+
+  return null;
+}
+
+function computeDaysSincePlantation(plantationDate: unknown): number {
+  if (!plantationDate) return 0;
+  const planted = new Date(String(plantationDate));
+  if (Number.isNaN(planted.getTime())) return 0;
+  return Math.max(
+    0,
+    Math.floor((Date.now() - planted.getTime()) / (1000 * 60 * 60 * 24)),
+  );
+}
+
+function computeStage(days: number): string {
+  if (days > 150) return "Maturity Stage";
+  if (days > 90) return "Grand Growth Stage";
+  if (days > 30) return "Tillering Stage";
+  return "Germination Stage";
+}
+
+function computeStatus(days: number, agro?: any): string {
+  const fromAgro =
+    agro?.Sugarcane_Status ??
+    agro?.harvest_status ??
+    agro?.features?.[0]?.properties?.harvest_status;
+  if (fromAgro) return String(fromAgro);
+
+  if (days > 300) return "Ready to Harvest";
+  if (days > 270) return "Partially Harvested";
+  return "Growing";
+}
+
+function lookupAgroPlot(
+  agroStats: Record<string, any>,
+  plotKey: string,
+): any | null {
+  if (!plotKey?.trim() || !agroStats) return null;
+
+  const direct =
+    agroStats[plotKey] ??
+    agroStats[`"${plotKey}"`] ??
+    agroStats[plotKey.replace(/_/g, "/")];
+
+  if (direct) return direct;
+
+  const target = normalizePlotKey(plotKey);
+  const matched = Object.entries(agroStats).find(
+    ([key]) => normalizePlotKey(key) === target,
+  );
+  return matched?.[1] ?? null;
+}
+
+function plotKeysForContext(plot: any, farm: any | null): string[] {
+  const keys = new Set<string>();
+  const add = (value: unknown) => {
+    if (value == null || `${value}`.trim() === "") return;
+    keys.add(normalizePlotKey(String(value)));
+  };
+
+  add(plotKeyFromRecord(plot));
+  add(plot?.fastapi_plot_id);
+  add(plot?.plot_name);
+  add(plot?.plot_id);
+  add(farm?.fastapi_plot_id);
+  add(farm?.plot_id);
+
+  const gat = plot?.gat_number ?? farm?.gat_number;
+  const num = plot?.plot_number ?? farm?.plot_number;
+  if (gat != null && num != null) {
+    add(`${gat}_${num}`);
+    add(`${gat}/${num}`);
+  }
+
+  return [...keys];
+}
+
+function pickBestFarm(farms: any[]): any | null {
+  if (!Array.isArray(farms) || farms.length === 0) return null;
+
+  const scored = farms.map((farm) => {
+    let score = 0;
+    if (firstNonEmpty(farm?.crop_variety, farm?.crop_type?.crop_variety, farm?.variety)) {
+      score += 4;
+    }
+    if (
+      firstNonEmpty(
+        farm?.plantation_type,
+        farm?.variety_type,
+        farm?.crop_type?.plantation_type,
+        farm?.plantation_type_display,
+      )
+    ) {
+      score += 3;
+    }
+    if (firstNonEmpty(farm?.plantation_date, farm?.planting_date)) {
+      score += 2;
+    }
+    if (farm?.area_size != null || farm?.boundary) score += 1;
+    return { farm, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0]?.farm ?? farms[0];
+}
+
+function plotEntriesForFarmer(farmer: any): Array<{ plot: any; farms: any[] }> {
+  const plots = Array.isArray(farmer?.plots) ? farmer.plots : [];
+  if (plots.length > 0) {
+    return plots.map((plot: any) => {
+      const plotFarms = Array.isArray(plot?.farms) ? plot.farms : [];
+      const farmerFarms = collectFarmsFromRecord(farmer).filter((farm: any) => {
+        if (!farm) return false;
+        if (plot?.id != null && String(farm?.plot_id) === String(plot.id)) return true;
+        const gat = plot?.gat_number;
+        const num = plot?.plot_number;
+        if (gat != null && num != null) {
+          return (
+            String(farm?.gat_number ?? "") === String(gat) &&
+            String(farm?.plot_number ?? "") === String(num)
+          );
+        }
+        return false;
+      });
+      const farms = plotFarms.length > 0 ? plotFarms : farmerFarms;
+      return { plot, farms };
+    });
+  }
+
+  return collectFarmsFromRecord(farmer).map((farm: any, index: number) => ({
+    plot: {
+      id: farm?.plot_id ?? farm?.id ?? `${farmer?.id ?? "farmer"}-${index}`,
+      plot_number: farm?.plot_number,
+      gat_number: farm?.gat_number,
+      fastapi_plot_id: farm?.fastapi_plot_id,
+      taluka: farm?.taluka ?? farmer?.taluka,
+      region: farm?.region ?? farmer?.region,
+      district: farm?.district ?? farmer?.district,
+      village: farm?.village ?? farmer?.village,
+      boundary: farm?.boundary ?? farm?.geometry,
+      location: farm?.location ?? farmer?.location,
+      crop_variety: farm?.crop_variety,
+      variety_type: farm?.variety_type,
+      plantation_type: farm?.plantation_type,
+      plantation_date: farm?.plantation_date,
+    },
+    farms: [farm],
+  }));
+}
+
+function farmRowIdentityIds(farmRow: any): number[] {
+  const ids = [
+    farmRow?.farmer?.id,
+    farmRow?.farmer_id,
+    farmRow?.farm_owner?.id,
+    farmRow?.user?.id,
+    farmRow?.user_id,
+  ]
+    .map((id) => Number(id))
+    .filter((id) => Number.isFinite(id));
+  return [...new Set(ids)];
+}
+
+function normalizePhoneKey(phone: unknown): string {
+  if (phone == null || phone === "") return "";
+  return String(phone).replace(/\D/g, "").slice(-10);
+}
+
+function farmRowPhoneKeys(farmRow: any): string[] {
+  const raw = [
+    farmRow?.farmer?.phone_number,
+    farmRow?.farmer?.phone,
+    farmRow?.farm_owner?.phone_number,
+    farmRow?.phone_number,
+    farmRow?.phone,
+  ];
+  return [
+    ...new Set(
+      raw.map(normalizePhoneKey).filter((value) => value.length >= 10),
+    ),
+  ];
+}
+
+function farmerPhoneKeys(farmer: any): string[] {
+  const raw = [
+    farmer?.phone_number,
+    farmer?.phone,
+    farmer?.personal_info?.phone_number,
+    farmer?.farmer_profile?.personal_info?.phone_number,
+  ];
+  return [
+    ...new Set(
+      raw.map(normalizePhoneKey).filter((value) => value.length >= 10),
+    ),
+  ];
+}
+
+function farmRowPlotKeys(farmRow: any): string[] {
+  const keys = new Set<string>();
+  const add = (value: unknown) => {
+    if (value == null || `${value}`.trim() === "") return;
+    keys.add(normalizePlotKey(String(value)));
+  };
+
+  add(plotKeyFromRecord(farmRow));
+  add(farmRow?.fastapi_plot_id);
+  add(farmRow?.plot_id);
+  add(farmRow?.plot_name);
+  add(farmRow?.farm_uid);
+
+  const gat = farmRow?.gat_number ?? farmRow?.gat_No ?? farmRow?.plot?.gat_number;
+  const num =
+    farmRow?.plot_number ?? farmRow?.plot_No ?? farmRow?.plot?.plot_number;
+  if (gat != null && num != null) {
+    add(`${gat}_${num}`);
+    add(`${gat}/${num}`);
+  }
+
+  return [...keys];
+}
+
+function mergeFarmDetailsOntoRecord(target: any, farmRow: any): any {
+  if (!target || !farmRow) return target;
+
+  const farmerSrc = farmRow.farmer ?? farmRow.farm_owner ?? farmRow.user ?? {};
+  const cropType = farmRow.crop_type ?? target.crop_type ?? {};
+
+  return {
+    ...target,
+    area_size: firstNonEmpty(target.area_size, farmRow.area_size) || target.area_size,
+    crop_variety:
+      firstNonEmpty(
+        target.crop_variety,
+        farmRow.crop_variety,
+        cropType.crop_variety,
+      ) || target.crop_variety,
+    variety_type:
+      firstNonEmpty(
+        target.variety_type,
+        farmRow.variety_type,
+        cropType.plantation_type,
+      ) || target.variety_type,
+    variety_subtype:
+      firstNonEmpty(target.variety_subtype, farmRow.variety_subtype) ||
+      target.variety_subtype,
+    plantation_type:
+      firstNonEmpty(
+        target.plantation_type,
+        farmRow.plantation_type,
+        farmRow.plantation_type_display,
+        cropType.plantation_type,
+        cropType.plantation_type_display,
+        farmRow.variety_type,
+      ) || target.plantation_type,
+    plantation_type_display:
+      firstNonEmpty(
+        target.plantation_type_display,
+        farmRow.plantation_type_display,
+        cropType.plantation_type_display,
+      ) || target.plantation_type_display,
+    plantation_date:
+      firstNonEmpty(
+        target.plantation_date,
+        farmRow.plantation_date,
+        cropType.plantation_date,
+      ) || target.plantation_date,
+    planting_method:
+      firstNonEmpty(
+        target.planting_method,
+        farmRow.planting_method,
+        farmRow.variety_subtype,
+        cropType.planting_method,
+      ) || target.planting_method,
+    crop_type: {
+      ...cropType,
+      ...(target.crop_type && typeof target.crop_type === "object"
+        ? target.crop_type
+        : {}),
+      crop_variety: firstNonEmpty(
+        target?.crop_type?.crop_variety,
+        cropType.crop_variety,
+        farmRow.crop_variety,
+      ),
+      plantation_type: firstNonEmpty(
+        target?.crop_type?.plantation_type,
+        cropType.plantation_type,
+        farmRow.plantation_type,
+        farmRow.variety_type,
+      ),
+      plantation_type_display: firstNonEmpty(
+        target?.crop_type?.plantation_type_display,
+        cropType.plantation_type_display,
+        farmRow.plantation_type_display,
+      ),
+      plantation_date: firstNonEmpty(
+        target?.crop_type?.plantation_date,
+        cropType.plantation_date,
+        farmRow.plantation_date,
+      ),
+    },
+    taluka: firstNonEmpty(
+      target.taluka,
+      farmRow.taluka,
+      farmerSrc.taluka,
+      farmerSrc.address_info?.taluka,
+      farmRow.address_info?.taluka,
+      typeof farmerSrc.address === "object" ? farmerSrc.address?.taluka : null,
+      typeof farmRow.address === "object" ? farmRow.address?.taluka : null,
+    ),
+    district: firstNonEmpty(
+      target.district,
+      farmRow.district,
+      farmerSrc.district,
+      farmerSrc.address_info?.district,
+      farmRow.address_info?.district,
+      typeof farmerSrc.address === "object" ? farmerSrc.address?.district : null,
+      typeof farmRow.address === "object" ? farmRow.address?.district : null,
+    ),
+    region: firstNonEmpty(
+      target.region,
+      farmRow.region,
+      farmerSrc.region,
+      farmRow.taluka,
+      farmerSrc.taluka,
+      farmerSrc.address_info?.taluka,
+      farmRow.address_info?.taluka,
+      farmerSrc.address_info?.district,
+    ),
+    village: firstNonEmpty(
+      target.village,
+      farmRow.village,
+      farmerSrc.village,
+      farmerSrc.address_info?.village,
+      farmRow.address_info?.village,
+      typeof farmerSrc.address === "object" ? farmerSrc.address?.village : null,
+    ),
+    gat_number: firstNonEmpty(target.gat_number, farmRow.gat_number) || target.gat_number,
+    plot_number:
+      firstNonEmpty(target.plot_number, farmRow.plot_number) || target.plot_number,
+    fastapi_plot_id:
+      firstNonEmpty(target.fastapi_plot_id, farmRow.fastapi_plot_id) ||
+      target.fastapi_plot_id,
+    boundary: target.boundary ?? farmRow.boundary,
+    location: target.location ?? farmRow.location,
+  };
+}
+
+/**
+ * Fill missing crop/location fields on team-connect farmers using /farms/?include_farmer=true.
+ * team-connect often returns null crop_variety / variety_type / plantation_date / taluka.
+ */
+export function enrichHierarchyWithFarmRows(
+  hierarchy: TeamConnectHierarchy,
+  farmRows: any[] | null | undefined,
+): TeamConnectHierarchy {
+  if (!farmRows?.length) return hierarchy;
+
+  const byFarmerId = new Map<number, any[]>();
+  const byPlotKey = new Map<string, any>();
+  const byPhone = new Map<string, any[]>();
+
+  for (const farmRow of farmRows) {
+    for (const id of farmRowIdentityIds(farmRow)) {
+      const list = byFarmerId.get(id) ?? [];
+      list.push(farmRow);
+      byFarmerId.set(id, list);
+    }
+    for (const key of farmRowPlotKeys(farmRow)) {
+      if (!byPlotKey.has(key)) byPlotKey.set(key, farmRow);
+    }
+    for (const phone of farmRowPhoneKeys(farmRow)) {
+      const list = byPhone.get(phone) ?? [];
+      list.push(farmRow);
+      byPhone.set(phone, list);
+    }
+  }
+
+  const farmsForFarmerLookup = (farmer: any): any[] => {
+    const farmerId = Number(farmer?.id ?? farmer?.user_id);
+    if (Number.isFinite(farmerId) && byFarmerId.has(farmerId)) {
+      return byFarmerId.get(farmerId) ?? [];
+    }
+    for (const phone of farmerPhoneKeys(farmer)) {
+      if (byPhone.has(phone)) return byPhone.get(phone) ?? [];
+    }
+    return [];
+  };
+
+  const enrichFarmer = (farmer: any): any => {
+    if (!farmer) return farmer;
+    const farmsForFarmer = farmsForFarmerLookup(farmer);
+
+    const plots = Array.isArray(farmer.plots) ? farmer.plots : [];
+    if (plots.length > 0) {
+      const nextPlots = plots.map((plot: any) => {
+        const keys = plotKeysForContext(plot, plot?.farms?.[0] ?? null);
+        let match =
+          keys.map((key) => byPlotKey.get(key)).find(Boolean) ??
+          farmsForFarmer.find((row) => {
+            const gat = plot?.gat_number;
+            const num = plot?.plot_number;
+            if (gat == null || num == null) return false;
+            return (
+              String(row?.gat_number ?? "") === String(gat) &&
+              String(row?.plot_number ?? "") === String(num)
+            );
+          }) ??
+          farmsForFarmer[0] ??
+          null;
+
+        if (!match) return plot;
+
+        const existingFarms = Array.isArray(plot.farms) ? plot.farms : [];
+        const mergedFarm = mergeFarmDetailsOntoRecord(
+          existingFarms[0] ?? {},
+          match,
+        );
+        const mergedPlot = mergeFarmDetailsOntoRecord(plot, match);
+
+        return {
+          ...mergedPlot,
+          farms: existingFarms.length
+            ? [mergedFarm, ...existingFarms.slice(1)]
+            : [mergedFarm],
+        };
+      });
+
+      const locationDonor = farmsForFarmer[0] ?? nextPlots[0];
+      return mergeFarmDetailsOntoRecord(
+        { ...farmer, plots: nextPlots },
+        locationDonor,
+      );
+    }
+
+    if (!farmsForFarmer.length) {
+      return mergeFarmDetailsOntoRecord(farmer, null);
+    }
+
+    const mergedFarms = farmsForFarmer.map((row) =>
+      mergeFarmDetailsOntoRecord(row, row),
+    );
+    return {
+      ...mergeFarmDetailsOntoRecord(farmer, farmsForFarmer[0]),
+      farms: mergedFarms,
+      plots: mergedFarms.map((farm: any, index: number) => ({
+        id: farm?.plot_id ?? farm?.id ?? `${farmer?.id ?? "farmer"}-${index}`,
+        plot_number: farm?.plot_number,
+        gat_number: farm?.gat_number,
+        fastapi_plot_id: farm?.fastapi_plot_id,
+        taluka: farm?.taluka,
+        district: farm?.district,
+        region: farm?.region,
+        village: farm?.village,
+        boundary: farm?.boundary,
+        location: farm?.location,
+        crop_variety: farm?.crop_variety,
+        variety_type: farm?.variety_type,
+        plantation_type: farm?.plantation_type,
+        plantation_date: farm?.plantation_date,
+        farms: [farm],
+      })),
+    };
+  };
+
+  const fieldOfficers = hierarchy.fieldOfficers.map((fo) => ({
+    ...fo,
+    farmers: Array.isArray(fo?.farmers)
+      ? fo.farmers.map((farmer: any) => enrichFarmer(farmer))
+      : [],
+  }));
+
+  const farmers = hierarchy.farmers.map((farmer) => enrichFarmer(farmer));
+
+  return { ...hierarchy, fieldOfficers, farmers };
+}
+
+function buildPlotContextMap(
+  hierarchy: TeamConnectHierarchy,
+): Map<string, PlotContext> {
+  const map = new Map<string, PlotContext>();
+
+  for (const fo of hierarchy.fieldOfficers) {
+    const representative = personDisplayName(fo);
+    const managerName = resolveManagerName(fo, hierarchy.managers);
+    const managerId = resolveManagerId(fo, hierarchy.managers);
+
+    for (const farmer of fo?.farmers ?? []) {
+      for (const { plot, farms } of plotEntriesForFarmer(farmer)) {
+        const farm = pickBestFarm(farms);
+        const plotKeys = plotKeysForContext(plot, farm);
+        if (!plotKeys.length) continue;
+
+        const context: PlotContext = {
+          fo,
+          farmer,
+          plot,
+          farm,
+          managerName,
+          managerId,
+          representative,
+          plotKeys,
+        };
+
+        for (const key of plotKeys) {
+          if (!map.has(key)) {
+            map.set(key, context);
+          }
+        }
+      }
+    }
+  }
+
+  return map;
+}
+
+function buildRowFromContext(
+  ctx: PlotContext,
+  agro: any | null,
+  plotKey: string,
+): TeamConnectHarvestRow | null {
+  const { plot, farm, farmer, managerName, managerId, representative } = ctx;
+  const center = resolveCenter(agro, plot, farm, farmer, ctx.fo);
+  if (!center) return null;
+
+  const plantationDate = readPlantationDate(farm, plot, farmer, agro);
+  const days = computeDaysSincePlantation(plantationDate);
+
+  const area =
+    agro?.area_acres ??
+    agro?.soil?.area_acres ??
+    (parseFloat(String(farm?.area_size ?? "0")) || 0);
+
+  const yieldValue =
+    agro?.brix_sugar?.sugar_yield?.mean ??
+    agro?.brix_sugar?.sugar_yield?.min ??
+    0;
+  const brixValue =
+    agro?.brix_sugar?.brix?.mean ?? agro?.brix_sugar?.brix?.min ?? 0;
+  const recoveryValue =
+    agro?.brix_sugar?.recovery?.mean ??
+    agro?.brix_sugar?.recovery?.min ??
+    0;
+
+  const plotId = plotKeyFromRecord(plot) || plotKey;
+  const dataPointId = `${plot?.id ?? plotId}-${farm?.id ?? plotKey}`;
+
+  const resolvedManager = resolvePersonLabel(managerName, agro?.manager_name);
+  const resolvedRepresentative = resolvePersonLabel(
+    representative,
+    agro?.field_officer_name,
+  );
+  const regionKeys = collectLocationKeys(plot, farm, farmer, ctx.fo, agro);
+  const primaryRegion = readRegion(plot, farmer, ctx.fo, agro);
+
+  return {
+    id: dataPointId,
+    "Plot No": plot?.plot_number || plotId || plotKey,
+    Latitude: center.lat,
+    Longitude: center.lng,
+    "Sugarcane Status": computeStatus(days, agro),
+    "Area (Hect)": area,
+    Days: days,
+    "Prediction Yield (T/acre)": yieldValue,
+    "Prediction Yield (T/acer)": yieldValue,
+    "Brix (Degree)": brixValue,
+    "Recovery (Degree)": recoveryValue,
+    "Distance (km)": 0,
+    Stage: computeStage(days),
+    Region:
+      primaryRegion !== "Unknown"
+        ? normalizeRegionLabel(primaryRegion)
+        : "Unknown",
+    regionKeys,
+    Manager: resolvedManager,
+    managerId,
+    fieldOfficerId: fieldOfficerId(ctx.fo),
+    "Sugarcane Type": readSugarcaneType(farm, plot, farmer, agro),
+    Variety: readVariety(farm, plot, farmer, agro),
+    representative: resolvedRepresentative,
+    boundaryCoordinates: center.boundary,
+  };
+}
+
+function findContextForPlotKey(
+  contextMap: Map<string, PlotContext>,
+  plotKey: string,
+): PlotContext | null {
+  const normalized = normalizePlotKey(plotKey);
+  for (const [key, ctx] of contextMap) {
+    if (normalizePlotKey(key) === normalized) return ctx;
+    if (ctx.plotKeys.some((pk) => normalizePlotKey(pk) === normalized)) {
+      return ctx;
+    }
+  }
+  return null;
+}
+
+function enrichRowFromContext(
+  row: TeamConnectHarvestRow,
+  ctx: PlotContext,
+  agro?: any,
+): TeamConnectHarvestRow {
+  const regionFromContext = readRegion(ctx.plot, ctx.farmer, ctx.fo, agro);
+  const contextRegionKeys = collectLocationKeys(
+    ctx.plot,
+    ctx.farm,
+    ctx.farmer,
+    ctx.fo,
+    agro,
+  );
+
+  return {
+    ...row,
+    managerId: row.managerId || ctx.managerId || undefined,
+    fieldOfficerId: row.fieldOfficerId || fieldOfficerId(ctx.fo) || undefined,
+    Manager:
+      row.Manager && row.Manager !== "Unknown"
+        ? row.Manager
+        : resolvePersonLabel(ctx.managerName, agro?.manager_name),
+    representative:
+      row.representative && row.representative !== "Unknown"
+        ? row.representative
+        : ctx.representative,
+    Region:
+      row.Region && row.Region !== "Unknown"
+        ? row.Region
+        : regionFromContext !== "Unknown"
+          ? normalizeRegionLabel(regionFromContext)
+          : row.Region,
+    regionKeys: [
+      ...new Set([...(row.regionKeys ?? []), ...contextRegionKeys]),
+    ],
+  };
+}
+
+function buildRowFromAgroOnly(
+  plotKey: string,
+  agro: any,
+  hierarchy: TeamConnectHierarchy,
+): TeamConnectHarvestRow | null {
+  const center = resolveCenter(agro, null, null, null, null);
+  if (!center) return null;
+
+  const regionName =
+    agro?.region ?? agro?.taluka ?? agro?.district ?? "Unknown";
+
+  const agroFoId = agro?.field_officer_id ?? null;
+  let fo =
+    agroFoId != null
+      ? hierarchy.fieldOfficers.find(
+          (officer) =>
+            String(officer?.id ?? officer?.user_id) === String(agroFoId),
+        ) ?? null
+      : null;
+
+  if (!fo && agro?.field_officer_name) {
+    const foName = `${agro.field_officer_name}`.trim();
+    fo =
+      hierarchy.fieldOfficers.find((officer) => {
+        const label = personDisplayName(officer);
+        const username = `${officer?.username ?? ""}`.trim();
+        return (
+          label === foName ||
+          username === foName ||
+          regionsMatch(label, foName)
+        );
+      }) ?? null;
+  }
+
+  if (!fo && agro?.manager_id != null) {
+    const officersUnderManager = getFieldOfficersForManager(
+      hierarchy,
+      String(agro.manager_id),
+    );
+    if (officersUnderManager.length === 1) {
+      fo = officersUnderManager[0];
+    } else if (officersUnderManager.length > 1 && regionName !== "Unknown") {
+      fo =
+        officersUnderManager.find((officer) =>
+          recordMatchesRegion(regionName, officer),
+        ) ?? null;
+    }
+  }
+
+  if (!fo && regionName !== "Unknown") {
+    fo =
+      hierarchy.fieldOfficers.find((officer) =>
+        recordMatchesRegion(regionName, officer),
+      ) ?? null;
+  }
+
+  const representative = fo ? personDisplayName(fo) : "Unknown";
+  const managerName = fo
+    ? resolveManagerName(fo, hierarchy.managers)
+    : "Unknown";
+  const managerId = fo ? resolveManagerId(fo, hierarchy.managers) : "";
+  const resolvedFoId = fo
+    ? fieldOfficerId(fo)
+    : agroFoId != null
+      ? String(agroFoId)
+      : "";
+
+  const plantationDate = readPlantationDate(null, null, null, agro);
+  const days = computeDaysSincePlantation(plantationDate);
+  const area = agro?.area_acres ?? agro?.soil?.area_acres ?? 0;
+  const cleanPlotKey = plotKey.replace(/^"|"$/g, "");
+  const regionKeys = collectLocationKeys(agro, fo);
+  const primaryRegion =
+    firstNonEmpty(agro?.region, agro?.taluka, agro?.district, regionName) ||
+    regionName;
+
+  return {
+    id: cleanPlotKey,
+    "Plot No": agro?.plot_number || cleanPlotKey,
+    Latitude: center.lat,
+    Longitude: center.lng,
+    "Sugarcane Status": computeStatus(days, agro),
+    "Area (Hect)": area,
+    Days: days,
+    "Prediction Yield (T/acre)":
+      agro?.brix_sugar?.sugar_yield?.mean ??
+      agro?.brix_sugar?.sugar_yield?.min ??
+      0,
+    "Brix (Degree)":
+      agro?.brix_sugar?.brix?.mean ?? agro?.brix_sugar?.brix?.min ?? 0,
+    "Recovery (Degree)":
+      agro?.brix_sugar?.recovery?.mean ??
+      agro?.brix_sugar?.recovery?.min ??
+      0,
+    "Distance (km)": 0,
+    Stage: computeStage(days),
+    Region:
+      primaryRegion !== "Unknown"
+        ? normalizeRegionLabel(String(primaryRegion))
+        : "Unknown",
+    regionKeys,
+    Manager: resolvePersonLabel(managerName, agro?.manager_name),
+    managerId:
+      managerId ||
+      (agro?.manager_id != null ? String(agro.manager_id) : undefined),
+    fieldOfficerId: resolvedFoId || undefined,
+    "Sugarcane Type": readSugarcaneType(null, null, null, agro),
+    Variety: readVariety(null, null, null, agro),
+    representative: resolvePersonLabel(representative, agro?.field_officer_name),
+    boundaryCoordinates: center.boundary,
+  };
+}
+
+/** Build harvest rows: team-connect metadata + agroStats geometry/metrics. */
+export function buildOwnerHarvestRows(
+  hierarchy: TeamConnectHierarchy,
+  agroStats: Record<string, any> | null | undefined,
+): TeamConnectHarvestRow[] {
+  const contextMap = buildPlotContextMap(hierarchy);
+  const rows: TeamConnectHarvestRow[] = [];
+  const seenPlotKeys = new Set<string>();
+  const seenRowIds = new Set<string>();
+  const agro = agroStats ?? {};
+
+  // One row per unique plot context (not per alias key).
+  const uniqueContexts: Array<{ key: string; ctx: PlotContext }> = [];
+  const seenContexts = new Set<PlotContext>();
+  for (const [key, ctx] of contextMap) {
+    if (seenContexts.has(ctx)) continue;
+    seenContexts.add(ctx);
+    uniqueContexts.push({ key, ctx });
+  }
+
+  for (const { key, ctx } of uniqueContexts) {
+    let agroPlot: any | null = null;
+    for (const plotKey of ctx.plotKeys) {
+      agroPlot = lookupAgroPlot(agro, plotKey);
+      if (agroPlot) break;
+    }
+    if (!agroPlot) agroPlot = lookupAgroPlot(agro, key);
+
+    const row = buildRowFromContext(ctx, agroPlot, key);
+    if (!row) continue;
+    if (row.id && seenRowIds.has(row.id)) continue;
+
+    const enrichedRow = enrichRowFromContext(row, ctx, agroPlot);
+    rows.push(enrichedRow);
+    if (enrichedRow.id) seenRowIds.add(enrichedRow.id);
+    ctx.plotKeys.forEach((plotKey) => seenPlotKeys.add(normalizePlotKey(plotKey)));
+    seenPlotKeys.add(normalizePlotKey(key));
+  }
+
+  for (const [plotKey, plotData] of Object.entries(agro)) {
+    if (!plotData || typeof plotData !== "object") continue;
+    const normalized = normalizePlotKey(plotKey);
+    if (seenPlotKeys.has(normalized)) continue;
+
+    let row = buildRowFromAgroOnly(plotKey, plotData, hierarchy);
+    if (!row) continue;
+
+    const ctx = findContextForPlotKey(contextMap, plotKey);
+    if (ctx) {
+      row = enrichRowFromContext(row, ctx, plotData);
+    }
+
+    if (row.id && seenRowIds.has(row.id)) continue;
+
+    rows.push(row);
+    if (row.id) seenRowIds.add(row.id);
+    seenPlotKeys.add(normalized);
+  }
+
+  return backfillHarvestRowIds(rows, hierarchy);
+}
+
+function backfillHarvestRowIds(
+  rows: TeamConnectHarvestRow[],
+  hierarchy: TeamConnectHierarchy,
+): TeamConnectHarvestRow[] {
+  return rows.map((row) => {
+    const fo =
+      hierarchy.fieldOfficers.find((officer) => {
+        const officerId = fieldOfficerId(officer);
+        if (
+          row.fieldOfficerId &&
+          officerId &&
+          String(officerId) === String(row.fieldOfficerId)
+        ) {
+          return true;
+        }
+        return (
+          !!row.representative &&
+          row.representative !== "Unknown" &&
+          personDisplayName(officer) === row.representative
+        );
+      }) ??
+      (row.Manager && row.Manager !== "Unknown"
+        ? hierarchy.fieldOfficers.find((officer) =>
+            labelsMatch(
+              resolveManagerName(officer, hierarchy.managers),
+              row.Manager as string,
+            ),
+          )
+        : null);
+
+    let updated: TeamConnectHarvestRow = { ...row };
+
+    if (fo) {
+      updated = {
+        ...updated,
+        fieldOfficerId: updated.fieldOfficerId || fieldOfficerId(fo),
+        managerId: updated.managerId || resolveManagerId(fo, hierarchy.managers),
+        Manager:
+          updated.Manager && updated.Manager !== "Unknown"
+            ? updated.Manager
+            : resolveManagerName(fo, hierarchy.managers),
+        representative:
+          updated.representative && updated.representative !== "Unknown"
+            ? updated.representative
+            : personDisplayName(fo),
+      };
+
+      const regionKeys = new Set(updated.regionKeys ?? []);
+      for (const key of collectLocationKeys(fo)) {
+        regionKeys.add(key);
+      }
+
+      let primaryRegion =
+        updated.Region && updated.Region !== "Unknown"
+          ? updated.Region
+          : "Unknown";
+
+      for (const farmer of fo?.farmers ?? []) {
+        for (const { plot, farms } of plotEntriesForFarmer(farmer)) {
+          const farm = pickBestFarm(farms);
+          const plotKeys = plotKeysForContext(plot, farm);
+          const matchesRow = plotRowLinks(updated, plotKeys);
+
+          if (!matchesRow) continue;
+
+          for (const key of collectLocationKeys(plot, farm, farmer, fo)) {
+            regionKeys.add(key);
+          }
+          const region = readRegion(plot, farmer, fo);
+          if (region !== "Unknown") {
+            primaryRegion = normalizeRegionLabel(region);
+          }
+        }
+      }
+
+      if (primaryRegion === "Unknown") {
+        const foRegion = readRegion(null, null, fo);
+        if (foRegion !== "Unknown") {
+          primaryRegion = normalizeRegionLabel(foRegion);
+        }
+      }
+
+      updated = {
+        ...updated,
+        Region: primaryRegion,
+        regionKeys: [...regionKeys],
+      };
+    }
+
+    return updated;
+  });
+}
+
+/** @deprecated Use buildOwnerHarvestRows */
+export function buildHarvestRowsFromTeamConnect(
+  hierarchy: TeamConnectHierarchy,
+): TeamConnectHarvestRow[] {
+  return buildOwnerHarvestRows(hierarchy, {});
+}
+
+export function collectHarvestFilterOptionsFromHierarchy(
+  hierarchy: TeamConnectHierarchy,
+) {
+  const managers = new Set<string>();
+  const representatives = new Set<string>();
+  const regions = new Set<string>();
+  const sugarcaneTypes = new Set<string>();
+  const varieties = new Set<string>();
+
+  for (const fo of hierarchy.fieldOfficers) {
+    const representative = personDisplayName(fo);
+    const managerName = resolveManagerName(fo, hierarchy.managers);
+    if (managerName && managerName !== "Unknown") managers.add(managerName);
+    if (representative && representative !== "Unknown") {
+      representatives.add(representative);
+    }
+    for (const key of collectLocationKeys(fo)) {
+      regions.add(key);
+    }
+
+    for (const farmer of fo?.farmers ?? []) {
+      for (const { plot, farms } of plotEntriesForFarmer(farmer)) {
+        const farm = pickBestFarm(farms);
+        const region = readRegion(plot, farmer, fo);
+        if (region && region !== "Unknown") {
+          regions.add(normalizeRegionLabel(region));
+        }
+        for (const key of collectLocationKeys(plot, farm, farmer, fo)) {
+          regions.add(key);
+        }
+
+        const sugarcaneType = readSugarcaneType(farm, plot, farmer);
+        if (sugarcaneType && sugarcaneType !== "Unknown") {
+          sugarcaneTypes.add(sugarcaneType);
+        }
+
+        const variety = readVariety(farm, plot, farmer);
+        if (variety) varieties.add(variety);
+      }
+    }
+  }
+
+  return {
+    managers: uniqueSorted([...managers]),
+    representatives: uniqueSorted([...representatives]),
+    regions: uniqueSorted([...regions]),
+    sugarcaneTypes: uniqueSorted([...sugarcaneTypes]),
+    varieties: uniqueSorted([...varieties]),
+  };
+}
+
+function mergeOptionLists(...lists: string[][]): string[] {
+  return uniqueSorted(lists.flat());
+}
+
+export function mergeHarvestFilterOptions(
+  ...sources: Array<ReturnType<typeof collectHarvestFilterOptions>>
+) {
+  return {
+    managers: mergeOptionLists(...sources.map((source) => source.managers)),
+    representatives: mergeOptionLists(
+      ...sources.map((source) => source.representatives),
+    ),
+    regions: mergeOptionLists(...sources.map((source) => source.regions)),
+    sugarcaneTypes: mergeOptionLists(
+      ...sources.map((source) => source.sugarcaneTypes),
+    ),
+    varieties: mergeOptionLists(...sources.map((source) => source.varieties)),
+  };
+}
+
+export function collectHarvestFilterOptions(rows: TeamConnectHarvestRow[]) {
+  return {
+    managers: uniqueSorted(
+      rows.map((row) => row.Manager).filter((value) => value && value !== "Unknown"),
+    ),
+    representatives: uniqueSorted(
+      rows
+        .map((row) => row.representative)
+        .filter((value) => value && value !== "Unknown"),
+    ),
+    regions: uniqueSorted(
+      rows.flatMap((row) => {
+        const values: string[] = [];
+        if (row.Region && row.Region !== "Unknown") values.push(row.Region);
+        for (const key of row.regionKeys ?? []) {
+          if (key && key !== "Unknown") values.push(key);
+        }
+        return values;
+      }),
+    ),
+    sugarcaneTypes: uniqueSorted(
+      rows
+        .map((row) => row["Sugarcane Type"])
+        .filter((value) => value && value !== "Unknown"),
+    ),
+    varieties: uniqueSorted(
+      rows.map((row) => row.Variety).filter((value) => Boolean(value?.trim())),
+    ),
+  };
+}
+
+export function filterHarvestRows(
+  rows: TeamConnectHarvestRow[],
+  filters: {
+    managerId?: string;
+    fieldOfficerId?: string;
+    manager?: string;
+    representative?: string;
+    region: string;
+    sugarcaneType: string;
+    variety: string;
+  },
+  hierarchy?: TeamConnectHierarchy,
+): TeamConnectHarvestRow[] {
+  return rows.filter((row) => {
+    const managerMatch = hierarchy
+      ? rowBelongsToManager(row, filters.managerId ?? "All", hierarchy)
+      : !filters.managerId ||
+        filters.managerId === "All" ||
+        (row.managerId != null &&
+          String(row.managerId) === String(filters.managerId)) ||
+        (filters.manager != null &&
+          filters.manager !== "All" &&
+          row.Manager === filters.manager);
+
+    const repMatch = hierarchy
+      ? rowBelongsToFieldOfficer(
+          row,
+          filters.fieldOfficerId ?? "All",
+          hierarchy,
+        )
+      : !filters.fieldOfficerId ||
+        filters.fieldOfficerId === "All" ||
+        (row.fieldOfficerId != null &&
+          String(row.fieldOfficerId) === String(filters.fieldOfficerId)) ||
+        (filters.representative != null &&
+          filters.representative !== "All" &&
+          row.representative === filters.representative);
+
+    const regionMatch =
+      filters.region === "All" ||
+      rowMatchesRegion(row, filters.region, hierarchy);
+    const typeMatch =
+      filters.sugarcaneType === "All" ||
+      row["Sugarcane Type"] === filters.sugarcaneType;
+    const varietyMatch =
+      filters.variety === "All" || row.Variety === filters.variety;
+    return managerMatch && repMatch && regionMatch && typeMatch && varietyMatch;
+  });
+}
