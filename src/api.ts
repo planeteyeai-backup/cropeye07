@@ -65,8 +65,8 @@ function resolveSefFieldApiBaseUrl(): string {
 
 const SEF_FIELD_API_BASE_URL = resolveSefFieldApiBaseUrl();
 
-/** Large snapshot payload — allow up to 2 minutes on slow networks. */
-const SEF_INDUSTRIAL_YIELD_SNAPSHOT_TIMEOUT_MS = 120_000;
+/** Large industrial yield payload — allow up to 2 minutes on slow networks. */
+const SEF_INDUSTRIAL_YIELD_TIMEOUT_MS = 120_000;
 
 function hasIndustrialYieldFactories(payload: unknown): boolean {
   const data = payload as { factories?: unknown[] };
@@ -108,7 +108,7 @@ eventsApi.interceptors.request.use((config) => {
 
 export const sefApi = axios.create({
   baseURL: SEF_FIELD_API_BASE_URL,
-  timeout: SEF_INDUSTRIAL_YIELD_SNAPSHOT_TIMEOUT_MS,
+  timeout: SEF_INDUSTRIAL_YIELD_TIMEOUT_MS,
   headers: {
     "Content-Type": "application/json",
     Accept: "application/json",
@@ -1722,23 +1722,100 @@ export const getManagerFieldOfficersAgroStats = async (
   endDate?: string,
 ): Promise<Record<string, unknown>> => {
   const response = await getMyFieldOfficers();
-  const officers: Array<{ id: number }> =
-    response.data?.field_officers ?? [];
+  const data = response?.data;
+  const officers: any[] = data?.field_officers ?? [];
+  const manager = data?.manager ?? null;
+  const managers = manager ? [manager] : [];
 
   if (officers.length === 0) {
     return {};
   }
 
   const results = await Promise.all(
-    officers.map((officer) =>
-      getFieldOfficerAgroStats(officer.id, endDate).catch((err) => {
+    officers.map(async (officer) => {
+      try {
+        const stats = await getFieldOfficerAgroStats(officer.id, endDate);
+        if (stats) {
+          const createdByRaw = officer?.created_by;
+          const createdByUsername =
+            typeof createdByRaw === "string"
+              ? createdByRaw.trim().match(/^(\S+)/)?.[1]?.toLowerCase()
+              : null;
+          const resolvedManager =
+            managers.find(
+              (m) =>
+                m?.id === officer?.created_by ||
+                m?.id === officer?.manager_id ||
+                String(m?.id) === String(officer?.manager_id) ||
+                (createdByUsername &&
+                  `${m?.username ?? ""}`.trim().toLowerCase() ===
+                    createdByUsername),
+            ) ?? manager;
+
+          const managerName = resolvedManager
+            ? personDisplayName(resolvedManager)
+            : "";
+
+          Object.values(stats).forEach((plot: any) => {
+            if (typeof plot === "object" && plot !== null) {
+              const foName = personDisplayName(officer);
+              const foRegion =
+                officer.taluka || officer.region || officer.district || "";
+
+              if (!plot.manager_name && managerName && managerName !== "Unknown") {
+                plot.manager_name = managerName;
+              }
+              if (
+                !plot.field_officer_name &&
+                foName &&
+                foName !== "Unknown"
+              ) {
+                plot.field_officer_name = foName;
+              }
+              if (officer?.id != null || officer?.user_id != null) {
+                plot.field_officer_id = officer.id ?? officer.user_id;
+              }
+              if (
+                resolvedManager?.id != null ||
+                resolvedManager?.user_id != null
+              ) {
+                plot.manager_id = resolvedManager.id ?? resolvedManager.user_id;
+              }
+              if (!plot.taluka && foRegion) {
+                plot.taluka = foRegion;
+              }
+              if (!plot.region && foRegion) {
+                plot.region = foRegion;
+              }
+              if (!plot.crop_variety && officer?.crop_variety) {
+                plot.crop_variety = officer.crop_variety;
+              }
+              if (
+                !plot.plantation_type &&
+                (officer?.variety_type || officer?.plantation_type)
+              ) {
+                plot.plantation_type =
+                  officer.variety_type || officer.plantation_type;
+              }
+              if (
+                !plot.plantation_type_display &&
+                officer?.plantation_type_display
+              ) {
+                plot.plantation_type_display =
+                  officer.plantation_type_display;
+              }
+            }
+          });
+        }
+        return stats;
+      } catch (err) {
         console.error(
           `Error fetching agroStats for field officer ${officer.id}:`,
           err,
         );
         return null;
-      })
-    )
+      }
+    }),
   );
 
   return mergeAgroStatsPlotData(...results);
@@ -2055,18 +2132,28 @@ export const patchFarmerPlotBoundary = (data: {
 };
 
 /** Route plot boundary updates: farmers → my-profile, staff → /plots/{id}/. */
-export const updatePlotBoundary = (
+export const updatePlotBoundary = async (
   plotId: string | number,
   data: {
     boundary: { type: "Polygon"; coordinates: number[][][] } | null;
     location: { type: "Point"; coordinates: [number, number] } | null;
   },
 ) => {
-  const role = getUserRole()?.toLowerCase();
+  const role = getUserRole()?.toLowerCase()?.replace(/\s+/g, "");
   if (role === "farmer") {
     return patchFarmerPlotBoundary(data);
   }
-  return patchPlot(String(plotId), data);
+
+  try {
+    return await patchPlot(String(plotId), data);
+  } catch (error: any) {
+    const status = error?.response?.status;
+    // Farmers sometimes have a missing/wrong role in localStorage; my-profile still works.
+    if (status === 403 || status === 404) {
+      return patchFarmerPlotBoundary(data);
+    }
+    throw error;
+  }
 };
 
 // ==================== FACTORY PROGRESS API ====================
@@ -2132,17 +2219,23 @@ async function fetchJsonGet(
   }
 }
 
-function resolveSefSnapshotUrl(ownerId: number): string {
-  const query = new URLSearchParams({ owner_id: String(ownerId) }).toString();
-  return `${SEF_PRODUCTION_URL}/industrial_yield_by_owner_snapshot?${query}`;
+function resolveSefIndustrialYieldUrl(ownerId: number): string {
+  const query = new URLSearchParams({
+    owner_id: String(ownerId),
+    source: "auto",
+  }).toString();
+  // SEF docs: GET /industrial-yield-by-owner?owner_id=2476
+  return `${SEF_PRODUCTION_URL}/industrial-yield-by-owner?${query}`;
 }
 
-function resolveSefSnapshotUrls(ownerId: number): string[] {
-  const direct = resolveSefSnapshotUrl(ownerId);
+function resolveSefIndustrialYieldUrls(ownerId: number): string[] {
+  const direct = resolveSefIndustrialYieldUrl(ownerId);
   if (import.meta.env.DEV) {
-    const query = new URLSearchParams({ owner_id: String(ownerId) }).toString();
-    const proxied = `/api/sef/industrial_yield_by_owner_snapshot?${query}`;
-    // Try Vite proxy first locally; fall back to direct Railway if proxy is down.
+    const query = new URLSearchParams({
+      owner_id: String(ownerId),
+      source: "auto",
+    }).toString();
+    const proxied = `/api/sef/industrial-yield-by-owner?${query}`;
     return [proxied, direct];
   }
   return [direct];
@@ -2171,25 +2264,22 @@ export async function fetchPublicFactoryFarmers(
   );
 }
 
-/** Industrial yield snapshot only — SEF `/industrial_yield_by_owner_snapshot`. */
+/** Industrial yield only — SEF GET `/industrial-yield-by-owner` (public-factory-farmers unchanged). */
 export async function fetchIndustrialYieldByOwner(
   ownerId: number,
 ): Promise<FactoryApiResult> {
-  const urls = resolveSefSnapshotUrls(ownerId);
-  let lastError = "Failed to load industrial yield snapshot";
+  const urls = resolveSefIndustrialYieldUrls(ownerId);
+  let lastError = "Failed to load industrial yield data";
 
   for (const url of urls) {
-    const result = await fetchJsonGet(
-      url,
-      SEF_INDUSTRIAL_YIELD_SNAPSHOT_TIMEOUT_MS,
-    );
+    const result = await fetchJsonGet(url, SEF_INDUSTRIAL_YIELD_TIMEOUT_MS);
     if (!result.ok) {
       const err = (result.data as { error?: string })?.error;
       if (err) lastError = err;
       continue;
     }
     if (!hasIndustrialYieldFactories(result.data)) {
-      lastError = "Industrial yield snapshot returned no factories";
+      lastError = "Industrial yield returned no factories";
       continue;
     }
     return result;
