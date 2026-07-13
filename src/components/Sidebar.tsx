@@ -96,7 +96,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     switch (userRole) {
       case 'planeteye':
         return [
-          renderMenu('Progress Dashboard', <Route size={20} />),
+          renderMenu('Crop Growth Progress', <Route size={20} />),
           renderMenu('Chart of Progress', <LayoutGrid size={20} />),
         ];
       case 'farmer':

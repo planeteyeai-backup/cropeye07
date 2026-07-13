@@ -73,10 +73,14 @@ export function estimatedTonsFromPlantation(
   return Math.min(100, Math.max(0, baseYield + weeks * 0.08));
 }
 
-/** Roster row from public-factory-farmers — yield comes from industrial snapshot only. */
+/** Roster row from public-factory-farmers — attach single-yield from API when present. */
 export function mapPublicFarmerBaseConfig(
   farmer: PublicFactoryFarmer,
 ): FarmerProgressConfig {
+  if (farmerHasYieldData(farmer)) {
+    return mapApiFarmerToProgressConfig(farmer);
+  }
+
   return {
     farmerId: String(farmer.id),
     farmerName: farmer.farmer_name?.trim() || `Farmer ${farmer.id}`,

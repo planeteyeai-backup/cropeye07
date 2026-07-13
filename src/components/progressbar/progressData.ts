@@ -11,7 +11,7 @@ export interface FarmerProgressConfig {
   tons: number;
   baseYield: number;
   plantationDate?: string | null;
-  /** Weekly yield readings from SEF industrial_yield_by_owner_snapshot API. */
+  /** Weekly yield readings from SEF industrial-yield-by-owner API. */
   yieldReadings?: { yield: number; date: string }[];
   /** Latest yield date from API (public-factory-farmers or industrial yield). */
   yieldDate?: string | null;

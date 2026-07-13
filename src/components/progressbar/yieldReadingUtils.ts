@@ -85,5 +85,6 @@ export function pickLatestYieldReading(
     return { yield: val, date: current.date };
   }
 
-  return null;
+  // Spike filter removed all readings — still show newest valid chart reading.
+  return pickChartYieldReading(readings);
 }

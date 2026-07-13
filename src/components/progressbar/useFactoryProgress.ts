@@ -33,7 +33,7 @@ export function resolveProgressOwnerId(): number {
   }
 
   const user = getUserData();
-  const role = getUserRole()?.toLowerCase().replace(/\s+/g, '');
+  const role = getUserRole()?.toLowerCase()?.replace(/\s+/g, '');
 
   // Sugar owner_id — never use auth user.id (Django user pk) for SEF snapshot.
   const linkedOwner = parseOwnerId(
@@ -70,18 +70,18 @@ async function fetchIndustrialYieldFactories(
   try {
     const { ok, data } = await fetchIndustrialYieldByOwner(ownerId);
     if (!ok) {
-      const err = (data as { error?: string })?.error ?? "SEF snapshot failed";
+      const err = (data as { error?: string })?.error ?? "SEF industrial yield failed";
       return { factories: null, error: String(err) };
     }
     const payload = data as IndustrialYieldByOwnerResponse;
     if (!Array.isArray(payload?.factories) || payload.factories.length === 0) {
-      return { factories: null, error: "Industrial yield snapshot returned no factories" };
+      return { factories: null, error: "Industrial yield returned no factories" };
     }
     return { factories: payload.factories, error: null };
   } catch (err) {
     return {
       factories: null,
-      error: err instanceof Error ? err.message : "Failed to load industrial yield snapshot",
+      error: err instanceof Error ? err.message : "Failed to load industrial yield data",
     };
   }
 }
@@ -267,7 +267,7 @@ export function useFactoryProgress(initialFactoryId?: FactoryId) {
         if (result.factories.length === 0) {
           setError(
             result.industrialLoadError ??
-              'No sugar factories found in industrial yield snapshot.',
+              'No sugar factories found in industrial yield data.',
           );
           setSelectedFactoryId('');
           return;

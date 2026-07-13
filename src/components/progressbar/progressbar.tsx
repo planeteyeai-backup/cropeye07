@@ -859,7 +859,7 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     setFarmerSections(() => {
       const next: Record<string, MonthSectionLabel> = {};
       for (const cfg of farmerConfigs) {
-        next[cfg.farmerId] = DEFAULT_MONTH_SECTION;
+        next[cfg.farmerId] = resolveLatestMonthSectionFromConfigs([cfg]);
       }
       return next;
     });
@@ -889,7 +889,7 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
         if (prev[cfg.farmerId]) {
           next[cfg.farmerId] = prev[cfg.farmerId];
         } else {
-          next[cfg.farmerId] = DEFAULT_MONTH_SECTION;
+          next[cfg.farmerId] = resolveLatestMonthSectionFromConfigs([cfg]);
         }
       }
       return next;

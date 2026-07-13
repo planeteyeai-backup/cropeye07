@@ -32,6 +32,30 @@ export interface SectionTimelineNode {
 
 const DEFAULT_PLANTATION = '2025-01-15';
 
+function resolvePlantationDate(
+  plantationDate?: string | null,
+  yieldReadings: YieldReading[] = [],
+): Date {
+  if (plantationDate) {
+    const parsed = new Date(plantationDate);
+    if (!Number.isNaN(parsed.getTime())) {
+      parsed.setHours(0, 0, 0, 0);
+      return parsed;
+    }
+  }
+
+  const sorted = sanitizeYieldReadings(yieldReadings);
+  if (sorted.length > 0) {
+    const fromYield = new Date(sorted[0].date);
+    fromYield.setHours(0, 0, 0, 0);
+    return fromYield;
+  }
+
+  const base = new Date(DEFAULT_PLANTATION);
+  base.setHours(0, 0, 0, 0);
+  return base;
+}
+
 export function formatTimelineDate(date: Date): string {
   return date.toLocaleDateString('en-IN', {
     day: '2-digit',
@@ -40,10 +64,11 @@ export function formatTimelineDate(date: Date): string {
   });
 }
 
-function parsePlantationDate(plantationDate?: string | null): Date {
-  const base = plantationDate ? new Date(plantationDate) : new Date(DEFAULT_PLANTATION);
-  base.setHours(0, 0, 0, 0);
-  return base;
+function parsePlantationDate(
+  plantationDate?: string | null,
+  yieldReadings: YieldReading[] = [],
+): Date {
+  return resolvePlantationDate(plantationDate, yieldReadings);
 }
 
 function globalWeekIndexFromReading(plantation: Date, readingDate: Date): number {
@@ -120,7 +145,7 @@ export function buildSectionTimelineNodes(
   } = {},
 ): SectionTimelineNode[] {
   const { plantationDate, yieldReadings = [] } = options;
-  const plantation = parsePlantationDate(plantationDate);
+  const plantation = parsePlantationDate(plantationDate, yieldReadings);
 
   const sortedAll = sanitizeYieldReadings(yieldReadings);
 
@@ -192,7 +217,7 @@ export function buildLiveTimelineNode(
     hasYieldData,
   } = options;
 
-  const plantation = parsePlantationDate(plantationDate);
+  const plantation = parsePlantationDate(plantationDate, yieldReadings);
 
   const latestIndustrial =
     pickLatestYieldReading(yieldReadings) ??

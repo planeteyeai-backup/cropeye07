@@ -23,7 +23,9 @@ export function mapIndustrialFarmerToProgressConfig(
     farmerName: farmer.farmer_name?.trim() || `Farmer ${farmer.id}`,
     tons: Math.min(tons, YIELD_TON_MAX),
     baseYield: 2,
-    plantationDate: farmer.plantation_date,
+    plantationDate:
+      farmer.plantation_date ??
+      (sortedYields.length > 0 ? sortedYields[0].date : null),
     yieldReadings: sortedYields,
     yieldDate: latest?.date ?? null,
     hasYieldData: sortedYields.length > 0,
@@ -35,20 +37,43 @@ export function mapIndustrialFarmerToProgressConfig(
   };
 }
 
+function normalizeFarmerName(value: string | null | undefined): string {
+  return `${value ?? ""}`
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
 export function findIndustrialFarmerMatch(
-  publicFarmer: Pick<PublicFactoryFarmer, 'id' | 'farmer_name'>,
+  publicFarmer: Pick<PublicFactoryFarmer, 'id' | 'farmer_name' | 'phone_number'>,
   industrialFarmers: IndustrialYieldFarmer[],
 ): IndustrialYieldFarmer | undefined {
   const pubId = String(publicFarmer.id);
   const byId = industrialFarmers.find((farmer) => String(farmer.id) === pubId);
   if (byId) return byId;
 
-  const pubName = publicFarmer.farmer_name?.trim().toLowerCase() ?? '';
+  const pubPhone = `${publicFarmer.phone_number ?? ""}`.replace(/\D/g, "");
+  if (pubPhone.length >= 8) {
+    const byPhone = industrialFarmers.find((farmer) => {
+      const phone = `${farmer.phone_number ?? ""}`.replace(/\D/g, "");
+      return phone.length >= 8 && phone === pubPhone;
+    });
+    if (byPhone) return byPhone;
+  }
+
+  const pubName = normalizeFarmerName(publicFarmer.farmer_name);
   if (!pubName) return undefined;
 
-  return industrialFarmers.find(
-    (farmer) => farmer.farmer_name?.trim().toLowerCase() === pubName,
+  const byExactName = industrialFarmers.find(
+    (farmer) => normalizeFarmerName(farmer.farmer_name) === pubName,
   );
+  if (byExactName) return byExactName;
+
+  return industrialFarmers.find((farmer) => {
+    const name = normalizeFarmerName(farmer.farmer_name);
+    if (!name) return false;
+    return name.includes(pubName) || pubName.includes(name);
+  });
 }
 
 /** Keep farmer list from main DB; attach weekly yields from industrial API when matched. */
