@@ -11,14 +11,26 @@ export function normalizePlotKey(name: string): string {
   return String(name ?? "")
     .trim()
     .replace(/^"|"$/g, "")
+    .replace(/^_+|_+$/g, "")
+    .replace(/\/*$/g, "")
     .replace(/\//g, "_")
     .replace(/ /g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "")
     .toLowerCase();
+}
+
+/** Trim junk that backends sometimes leave on gat/plot ids (trailing `_`, `/`). */
+export function sanitizePlotName(name: string): string {
+  return String(name ?? "")
+    .trim()
+    .replace(/^"|"$/g, "")
+    .replace(/^[_/\s]+|[_/\s]+$/g, "");
 }
 
 /** Format plot name for SEF/field-score API query (spaces → `+`). */
 export function formatPlotNameForApi(plotName: string): string {
-  return String(plotName ?? "").trim().replace(/ /g, "+");
+  return sanitizePlotName(plotName).replace(/ /g, "+");
 }
 
 export function fieldScoreCacheKey(plotId: string): string {
@@ -30,20 +42,24 @@ export const resolveApiPlotName = (
   plotKey: string,
   plots?: PlotRef[] | null,
 ): string => {
-  const key = plotKey?.trim();
+  const key = sanitizePlotName(plotKey);
   if (!key) return key;
 
   const matched = findPlotRef(plots, plotKey);
   const fastapi = matched?.fastapi_plot_id
-    ? String(matched.fastapi_plot_id).trim()
+    ? sanitizePlotName(String(matched.fastapi_plot_id))
     : "";
 
   if (fastapi) return fastapi;
 
   const gat =
-    matched?.gat_number != null ? String(matched.gat_number).trim() : "";
+    matched?.gat_number != null
+      ? sanitizePlotName(String(matched.gat_number))
+      : "";
   const num =
-    matched?.plot_number != null ? String(matched.plot_number).trim() : "";
+    matched?.plot_number != null
+      ? sanitizePlotName(String(matched.plot_number))
+      : "";
   if (gat && num) {
     return `${gat}/${num}`;
   }
@@ -54,14 +70,18 @@ export const resolveApiPlotName = (
 /** Primary plot key for dropdowns and API calls (fastapi id, else gat_plot). */
 export function plotKeyFromRecord(plot: PlotRef | null | undefined): string {
   const fastapi =
-    plot?.fastapi_plot_id != null ? String(plot.fastapi_plot_id).trim() : "";
+    plot?.fastapi_plot_id != null
+      ? sanitizePlotName(String(plot.fastapi_plot_id))
+      : "";
   if (fastapi) return fastapi;
 
-  const gat = plot?.gat_number != null ? String(plot.gat_number).trim() : "";
-  const num = plot?.plot_number != null ? String(plot.plot_number).trim() : "";
+  const gat =
+    plot?.gat_number != null ? sanitizePlotName(String(plot.gat_number)) : "";
+  const num =
+    plot?.plot_number != null ? sanitizePlotName(String(plot.plot_number)) : "";
   if (gat && num) return `${gat}_${num}`;
 
-  if (plot?.plot_name) return String(plot.plot_name).trim();
+  if (plot?.plot_name) return sanitizePlotName(String(plot.plot_name));
   if (plot?.id != null) return String(plot.id);
   return "";
 }
@@ -103,27 +123,41 @@ export function getPlotNameCandidates(
   plots?: PlotRef[] | null,
 ): string[] {
   const out: string[] = [];
-  const seen = new Set<string>();
+  const seenExact = new Set<string>();
 
-  const add = (value: string | undefined | null) => {
-    const s = String(value ?? "").trim();
+  const addExact = (value: string | undefined | null) => {
+    const s = sanitizePlotName(String(value ?? ""));
     if (!s) return;
-    const k = normalizePlotKey(s);
-    if (seen.has(k)) return;
-    seen.add(k);
+    const exact = s.toLowerCase();
+    if (seenExact.has(exact)) return;
+    seenExact.add(exact);
     out.push(s);
+  };
+
+  const addWithForms = (value: string | undefined | null) => {
+    const s = sanitizePlotName(String(value ?? ""));
+    if (!s) return;
+    addExact(s);
+    // SAR water-stress accepts slash (`8/1A`) but 404s on underscore (`8_1A`).
+    if (s.includes("_")) addExact(s.replace(/_/g, "/"));
+    if (s.includes("/")) addExact(s.replace(/\//g, "_"));
   };
 
   const matched = findPlotRef(plots, plotId);
 
-  if (matched?.fastapi_plot_id) add(matched.fastapi_plot_id);
-  add(plotId);
-  add(resolveApiPlotName(plotId, plots));
+  if (matched?.fastapi_plot_id) addWithForms(matched.fastapi_plot_id);
+  addWithForms(plotId);
+  addWithForms(resolveApiPlotName(plotId, plots));
   if (matched?.gat_number != null && matched?.plot_number != null) {
-    add(`${matched.gat_number}_${matched.plot_number}`);
-    add(`${matched.gat_number}/${matched.plot_number}`);
+    const gat = sanitizePlotName(String(matched.gat_number));
+    const num = sanitizePlotName(String(matched.plot_number));
+    if (gat && num) {
+      addWithForms(`${gat}_${num}`);
+      addWithForms(`${gat}/${num}`);
+    }
   }
-  if (matched?.plot_name) add(matched.plot_name);
+  if (matched?.plot_name) addWithForms(matched.plot_name);
 
-  return out.length > 0 ? out : [plotId];
+  const cleaned = sanitizePlotName(plotId);
+  return out.length > 0 ? out : cleaned ? [cleaned] : [];
 }

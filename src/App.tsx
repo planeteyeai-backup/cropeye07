@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, Suspense, lazy } from "react";
 import { Header } from "./components/Header";
 import { Sidebar } from "./components/Sidebar";
 import { DashboardGrid } from "./components/DashboardGrid";
@@ -35,7 +35,7 @@ import Fertilizer from "./components/Fertilizer";
 import Irrigation from "./components/Irrigation/Irrigation";
 import BlogCard from "./components/BlogCard";
 import AgricultureData from "./components/AgricultureData";
-import Map from "./components/Map";
+const CropEyeMap = lazy(() => import("./components/Map"));
 import FarmerDashboard from "./components/FarmerDashboard";
 import ProgressBarDashboard from "./components/ProgressBarDashboard";
 import ProgressGridDashboard from "./components/ProgressGridDashboard";
@@ -388,6 +388,7 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
         nextView = View.FarmerDashboard;
         break;
       case "Crop Growth Progress":
+      case "Progress Dashboard":
         nextView = View.ProgressDashboard;
         break;
       case "Chart of Progress":
@@ -746,7 +747,9 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
 
             {cachedViews.includes(View.Map) && (
               <div style={{ display: currentView === View.Map ? 'block' : 'none' }}>
-                <Map onSoilDataChange={handleSoilDataChange} />
+                <Suspense fallback={<div className="p-6 text-center text-slate-600">Loading map…</div>}>
+                  <CropEyeMap onSoilDataChange={handleSoilDataChange} />
+                </Suspense>
               </div>
             )}
 

@@ -29,6 +29,8 @@ import {
   MapPin,
   Beaker,
   MessageCircle,
+  Sprout,
+  Loader2,
 } from "lucide-react";
 import Chatbot from "./Chatbot";
 import axios from "axios";
@@ -40,6 +42,11 @@ import CommonSpinner from "./CommanSpinner";
 import { useI18nLite } from "../i18nLite.ts";
 import FieldIndicesStageBadge from "./FieldIndicesStageBadge";
 import { useFieldIndicesCropStage } from "../hooks/useFieldIndicesCropStage";
+import {
+  cropConditionStyleFromCci,
+  fetchWaterStressAnalysis,
+  parseWaterStressMetrics,
+} from "../utils/waterStressApi";
 
 // Type definitions
 interface PieChartWithNeedleProps {
@@ -93,6 +100,8 @@ interface Metrics {
   cnRatio: number | null;
   sugarYieldMax: number | null;
   sugarYieldMin: number | null;
+  cropConditionLabel: string | null;
+  cropConditionValue: number | null;
 }
 
 interface VisibleLines {
@@ -233,7 +242,10 @@ const FarmerDashboard: React.FC = () => {
     cnRatio: null,
     sugarYieldMax: null,
     sugarYieldMin: null,
+    cropConditionLabel: null,
+    cropConditionValue: null,
   });
+  const [loadingCci, setLoadingCci] = useState(false);
 
   // Mobile layout flag for charts
   const [isMobile, setIsMobile] = useState(false);
@@ -462,12 +474,42 @@ const FarmerDashboard: React.FC = () => {
       return;
     }
 
-    try {
-      const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
-      const endDate = new Date(Date.now() - tzOffsetMs)
-        .toISOString()
-        .slice(0, 10);
+    const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
+    const endDate = new Date(Date.now() - tzOffsetMs)
+      .toISOString()
+      .slice(0, 10);
 
+    const plotRecord =
+      profile?.plots?.find(
+        (plot: { fastapi_plot_id?: string }) =>
+          plot.fastapi_plot_id === currentPlotId,
+      ) ?? selectedPlotForStage;
+
+    const plantationForWaterStress =
+      plotRecord?.farms?.[0]?.plantation_date ??
+      (plotRecord as { plantation_date?: string } | null)?.plantation_date ??
+      null;
+
+    // CCI / water-stress runs independently so other dashboard API failures don't block it.
+    setLoadingCci(true);
+    void fetchWaterStressAnalysis(currentPlotId, {
+      plantationDate: plantationForWaterStress,
+      endDate,
+      plots: profile?.plots,
+    })
+      .then((waterStressData) => {
+        const waterStressMetrics = parseWaterStressMetrics(waterStressData);
+        setMetrics((prev) => ({
+          ...prev,
+          cropConditionLabel: waterStressMetrics.cropConditionLabel,
+          cropConditionValue: waterStressMetrics.cropConditionValue,
+        }));
+      })
+      .finally(() => {
+        setLoadingCci(false);
+      });
+
+    try {
       const indicesCacheKey = `indices_${currentPlotId}`;
       let rawIndices = getCache(indicesCacheKey);
 
@@ -641,7 +683,10 @@ const FarmerDashboard: React.FC = () => {
         sugarYieldMin: currentPlotData?.brix_sugar?.sugar_yield?.min ?? null,
       };
 
-      setMetrics(newMetrics);
+      setMetrics((prev) => ({
+        ...prev,
+        ...newMetrics,
+      }));
     } catch (err) {
       console.error("Error fetching data:", err);
     }
@@ -1081,8 +1126,8 @@ const FarmerDashboard: React.FC = () => {
           </div>
         )}
 
-        {/* Top Priority Metrics - 4 Key Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Top Priority Metrics - 5 Key Cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-green-200 hover:shadow-xl transition-all duration-300">
             <div className="flex items-center justify-between mb-2">
               <MapPin className="w-6 h-6 text-green-600" />
@@ -1182,6 +1227,53 @@ const FarmerDashboard: React.FC = () => {
               </div>
             </div>
           </div>
+
+          {(() => {
+            const cciStyle = cropConditionStyleFromCci(metrics.cropConditionValue);
+            const showCciValue =
+              Boolean(currentPlotId) &&
+              !loadingCci &&
+              metrics.cropConditionValue != null;
+
+            return (
+              <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-emerald-200 hover:shadow-xl transition-all duration-300">
+                <div className="flex items-center justify-between mb-2">
+                  <Sprout className="w-6 h-6 shrink-0 text-emerald-600" />
+                  <div className="text-right min-w-0">
+                    <div className="text-2xl font-bold text-gray-800">
+                      {!currentPlotId ? (
+                        "-"
+                      ) : loadingCci ? (
+                        <Loader2 className="w-5 h-5 animate-spin inline-block" />
+                      ) : showCciValue ? (
+                        metrics.cropConditionValue!.toFixed(1)
+                      ) : (
+                        "-"
+                      )}
+                    </div>
+                    <div
+                      className="text-xs font-semibold leading-tight max-w-[7.5rem] ml-auto truncate"
+                      style={{ color: cciStyle?.textColor ?? "#6b7280" }}
+                      title={
+                        showCciValue
+                          ? (cciStyle?.label ?? metrics.cropConditionLabel ?? "")
+                          : undefined
+                      }
+                    >
+                      {!currentPlotId || loadingCci
+                        ? "CCI"
+                        : (cciStyle?.label ?? metrics.cropConditionLabel ?? "-")}
+                    </div>
+                  </div>
+                </div>
+                <p className="text-xs text-gray-600 font-medium">
+                  {t("farmerDashboard.cards.cropConditionIndex", {
+                    defaultValue: "Crop Condition Index",
+                  })}
+                </p>
+              </div>
+            );
+          })()}
         </div>
 
         {/* Field Indices Analysis Chart */}

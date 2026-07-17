@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, Component, type ReactNode } from "react";
 import {
   Line,
   XAxis,
@@ -20,13 +20,12 @@ import {
   MapContainer,
   TileLayer,
   Polygon,
-  Tooltip as LeafletTooltip,
   useMap,
 } from "react-leaflet";
+import { LatLngBounds } from "leaflet";
 import {
   AlertTriangle,
   Calendar,
-  Thermometer,
   Activity,
   Target,
   Leaf,
@@ -38,6 +37,7 @@ import {
   Maximize2,
   Gauge,
   Loader2,
+  Sprout,
 } from "lucide-react";
 import "leaflet/dist/leaflet.css";
 import { getCache, setCache } from "../utils/cache";
@@ -57,6 +57,11 @@ import MapCropStatusOverlay from "./MapCropStatusOverlay";
 import FieldIndicesStageBadge from "./FieldIndicesStageBadge";
 import { useFieldIndicesCropStage } from "../hooks/useFieldIndicesCropStage";
 import { enrichPlotsWithFarmDetails } from "../utils/fertilizerStage";
+import {
+  cropConditionStyleFromCci,
+  fetchWaterStressAnalysis,
+  parseWaterStressMetrics,
+} from "../utils/waterStressApi";
 
 // Constants (same as FarmerDashboard)
 const BASE_URL = "https://events-cropeye.up.railway.app";
@@ -129,6 +134,9 @@ interface Metrics {
   biomassMin: number | null;
   biomassMax: number | null;
   stressCount: number | null;
+  stressTotalDays: number | null;
+  cropConditionLabel: string | null;
+  cropConditionValue: number | null;
   irrigationEvents: number | null;
   fieldScore: number | null;
   expectedYield: number | null;
@@ -201,7 +209,64 @@ function extractPlantationInfo(source: any): {
 function getFarmerId(farmer: any): string | null {
   const id =
     farmer?.id ?? farmer?.farmer_id ?? farmer?.farmerId ?? farmer?.user_id ?? null;
-  return id != null ? String(id) : null;
+  return id != null && String(id).trim() !== "" && String(id) !== "undefined"
+    ? String(id)
+    : null;
+}
+
+function getPlotIdFromRecord(plot: any): string | null {
+  const id =
+    plot?.fastapi_plot_id ??
+    plot?.events_plot_id ??
+    plot?.plot_id ??
+    plot?.plot_name ??
+    null;
+  return id != null && String(id).trim() !== "" ? String(id) : null;
+}
+
+function getPlotIdsFromFarmer(farmer: any): string[] {
+  const plots = Array.isArray(farmer?.plots) ? farmer.plots : [];
+  const ids: string[] = [];
+  for (const plot of plots) {
+    const id = getPlotIdFromRecord(plot);
+    if (id) ids.push(id);
+  }
+  return ids;
+}
+
+/** Convert GeoJSON boundary ring to Leaflet [lat, lng] pairs; ignore bad points. */
+function boundaryToLeafletCoords(boundary: any): [number, number][] {
+  let value = boundary;
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return [];
+    }
+  }
+  const coordsList = value?.coordinates;
+  if (!Array.isArray(coordsList) || coordsList.length === 0) return [];
+  const ring = coordsList[0];
+  if (!Array.isArray(ring)) return [];
+  return ring
+    .filter(
+      (pt) =>
+        Array.isArray(pt) &&
+        pt.length >= 2 &&
+        Number.isFinite(Number(pt[0])) &&
+        Number.isFinite(Number(pt[1])),
+    )
+    .map(([lng, lat]: [number, number]) => [Number(lat), Number(lng)]);
+}
+
+function resolvePlotBoundary(plot: any): any {
+  if (!plot || typeof plot !== "object") return null;
+  return (
+    plot.boundary ??
+    plot.coordinates?.boundary ??
+    plot.location?.boundary ??
+    null
+  );
 }
 
 function parseFarmsListResponse(data: unknown): any[] {
@@ -209,6 +274,75 @@ function parseFarmsListResponse(data: unknown): any[] {
   if (Array.isArray(payload?.results)) return payload.results;
   if (Array.isArray(data)) return data as any[];
   return [];
+}
+
+/** Keep map errors from blanking the whole Manager dashboard. */
+class MapSectionErrorBoundary extends Component<
+  { children: ReactNode; resetKey: string },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.warn("[ManagerFarmDash] map section error:", error, info.componentStack);
+  }
+
+  componentDidUpdate(prevProps: { resetKey: string }) {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.hasError) {
+      this.setState({ hasError: false });
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex h-full min-h-[300px] items-center justify-center bg-slate-100 text-sm text-slate-600">
+          Map failed to update. Select the farmer/plot again.
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+/** Fit map to plot without remounting MapContainer (avoids removeChild crashes). */
+function MapFitToPlot({
+  center,
+  boundsCoords,
+}: {
+  center: [number, number];
+  boundsCoords: [number, number][];
+}) {
+  const map = useMap();
+
+  useEffect(() => {
+    let cancelled = false;
+    const frame = window.requestAnimationFrame(() => {
+      if (cancelled) return;
+      try {
+        if (boundsCoords.length >= 3) {
+          const bounds = new LatLngBounds(boundsCoords);
+          if (bounds.isValid()) {
+            map.fitBounds(bounds, { padding: [24, 24], maxZoom: 18, animate: false });
+            return;
+          }
+        }
+        map.setView(center, map.getZoom(), { animate: false });
+      } catch (err) {
+        console.warn("[ManagerFarmDash] map view update failed:", err);
+      }
+    });
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(frame);
+    };
+  }, [center, boundsCoords, map]);
+
+  return null;
 }
 
 const ManagerFarmDash: React.FC = () => {
@@ -232,6 +366,7 @@ const ManagerFarmDash: React.FC = () => {
     () => !getCache(MANAGER_FIELD_OFFICERS_CACHE_KEY, MANAGER_OFFICERS_TTL_MS),
   );
   const [loadingData, setLoadingData] = useState<boolean>(false);
+  const [loadingWaterStress, setLoadingWaterStress] = useState<boolean>(false);
   const [plotStatsError, setPlotStatsError] = useState<string | null>(null);
   const [showDebugInfo] = useState(false);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
@@ -267,6 +402,9 @@ const ManagerFarmDash: React.FC = () => {
     biomassMin: null,
     biomassMax: null,
     stressCount: null,
+    stressTotalDays: null,
+    cropConditionLabel: null,
+    cropConditionValue: null,
     irrigationEvents: null,
     fieldScore: null,
     expectedYield: null,
@@ -292,7 +430,6 @@ const ManagerFarmDash: React.FC = () => {
   );
   const [timePeriod, setTimePeriod] = useState<TimePeriod>("yearly");
   const [aggregatedData, setAggregatedData] = useState<LineChartData[]>([]);
-  const [mapKey, setMapKey] = useState<number>(0);
   const [mapCenter, setMapCenter] = useState<[number, number]>([
     17.5789, 75.053,
   ]);
@@ -378,12 +515,8 @@ const ManagerFarmDash: React.FC = () => {
     }
 
     const farmer = farmersList[0];
-    const farmerId = String(
-      farmer.id ?? farmer.farmer_id ?? farmer.farmerId ?? "",
-    );
-    const plotIds = (farmer.plots ?? [])
-      .map((plot: any) => plot.fastapi_plot_id)
-      .filter(Boolean);
+    const farmerId = getFarmerId(farmer) ?? "";
+    const plotIds = getPlotIdsFromFarmer(farmer);
 
     setSelectedFarmerId(farmerId);
     setPlots(plotIds);
@@ -392,28 +525,24 @@ const ManagerFarmDash: React.FC = () => {
 
   // NEW: Function to set plot coordinates from existing state
   const setPlotCoordinatesFromState = (plotId: string): void => {
-    // Find the selected farmer and their plot
-    const farmer = farmersForSelectedOfficer.find(
-      (f) => String(f.id) === selectedFarmerId,
-    );
-    const plot = farmer?.plots?.find((p: any) => p.fastapi_plot_id === plotId);
+    try {
+      const farmer = farmersForSelectedOfficer.find(
+        (f) => getFarmerId(f) === String(selectedFarmerId),
+      );
+      const plot = farmer?.plots?.find(
+        (p: any) => getPlotIdFromRecord(p) === String(plotId),
+      );
 
-    if (plot && plot.boundary?.coordinates) {
-      const geom = plot.boundary.coordinates[0];
-      if (geom) {
-        // The API gives [lng, lat], Leaflet needs [lat, lng]
-        const coords = geom.map(([lng, lat]: [number, number]) => [lat, lng]);
+      const coords = boundaryToLeafletCoords(resolvePlotBoundary(plot));
+      if (coords.length >= 3) {
         setPlotCoordinates(coords);
-
-        // Calculate and set map center
-        const center = calculateCenter(coords);
-        setMapCenter(center);
-        setMapKey((prev) => prev + 1); // Force map re-render
+        setMapCenter(calculateCenter(coords));
       } else {
         setPlotCoordinates([]);
       }
-    } else {
-      setPlotCoordinates([]);
+    } catch (err) {
+      console.warn("[ManagerFarmDash] Failed to apply plot boundary:", err);
+      // Keep previous polygon on parse errors to avoid Leaflet unmount crash.
     }
   };
 
@@ -423,18 +552,22 @@ const ManagerFarmDash: React.FC = () => {
       const officer = fieldOfficers.find(
         (fo) => String(fo.id) === selectedFieldOfficerId,
       );
-      const farmersList = officer ? officer.farmers ?? [] : [];
+      const farmersList = Array.isArray(officer?.farmers) ? officer.farmers : [];
       setFarmersForSelectedOfficer(farmersList);
+      dashboardLoadedForPlotRef.current = "";
+      // Keep previous polygon until new plot coords arrive (Leaflet removeChild safety).
       if (farmersList.length > 0) {
         setSelectedFarmerId((prev) => {
           const stillValid = farmersList.some(
-            (f: any) =>
-              String(f.id || f.farmer_id || f.farmerId) === String(prev),
+            (f: any) => getFarmerId(f) === String(prev),
           );
-          return stillValid ? prev : String(farmersList[0].id);
+          if (stillValid) return prev;
+          return getFarmerId(farmersList[0]) ?? "";
         });
       } else {
         setSelectedFarmerId("");
+        setPlots([]);
+        setSelectedPlotId("");
       }
     }
   }, [selectedFieldOfficerId, fieldOfficers]);
@@ -442,7 +575,7 @@ const ManagerFarmDash: React.FC = () => {
   // Enrich farmer plots with /farms/ details (plantation date + planting method for crop stage).
   useEffect(() => {
     const farmerId = selectedFarmerId?.trim();
-    if (!farmerId) return;
+    if (!farmerId || farmerId === "undefined") return;
 
     let cancelled = false;
 
@@ -457,7 +590,7 @@ const ManagerFarmDash: React.FC = () => {
         setFarmersForSelectedOfficer((prev) =>
           prev.map((farmer) => {
             if (getFarmerId(farmer) !== farmerId) return farmer;
-            const plots = farmer?.plots ?? [];
+            const plots = Array.isArray(farmer?.plots) ? farmer.plots : [];
             if (!plots.length) return farmer;
             return {
               ...farmer,
@@ -477,18 +610,13 @@ const ManagerFarmDash: React.FC = () => {
 
   // Fetch plots when farmer is selected
   useEffect(() => {
-    if (selectedFarmerId) {
+    if (selectedFarmerId && selectedFarmerId !== "undefined") {
       const selectedFarmer = farmersForSelectedOfficer.find(
-        (f) =>
-          String(f.id || f.farmer_id || f.farmerId) ===
-          String(selectedFarmerId),
+        (f) => getFarmerId(f) === String(selectedFarmerId),
       );
 
       if (selectedFarmer) {
-        const farmerPlots = selectedFarmer.plots || [];
-        const plotIds = farmerPlots
-          .map((plot: any) => plot.fastapi_plot_id)
-          .filter(Boolean);
+        const plotIds = getPlotIdsFromFarmer(selectedFarmer);
 
         setPlots(plotIds);
 
@@ -497,11 +625,13 @@ const ManagerFarmDash: React.FC = () => {
             if (prev && plotIds.includes(prev)) {
               return prev;
             }
+            dashboardLoadedForPlotRef.current = "";
             return plotIds[0];
           });
         } else {
           dashboardLoadedForPlotRef.current = "";
           setSelectedPlotId("");
+          // Keep last polygon until next plot loads (avoids Leaflet removeChild crash).
         }
       } else {
         setPlots([]);
@@ -683,12 +813,53 @@ const ManagerFarmDash: React.FC = () => {
       setLoadingData(true);
     }
     setPlotStatsError(null);
-    setMetrics((prev) => ({ ...prev, fieldScore: null }));
+    setLoadingWaterStress(true);
+    setMetrics((prev) => ({
+      ...prev,
+      fieldScore: null,
+      cropConditionLabel: null,
+      cropConditionValue: null,
+      stressCount: null,
+      stressTotalDays: null,
+    }));
     try {
       const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
       const today = new Date(Date.now() - tzOffsetMs)
         .toISOString()
         .slice(0, 10);
+
+      // Water stress (SAR API) — CCI + stress event cards (same as Owner dashboard)
+      const farmerForWaterStress = farmersForSelectedOfficer.find(
+        (f) => getFarmerId(f) === String(selectedFarmerId),
+      );
+      const plotForWaterStress =
+        farmerForWaterStress?.plots?.find(
+          (p: any) => getPlotIdFromRecord(p) === String(plotId),
+        ) ?? null;
+      const plantationForWaterStress =
+        plotForWaterStress?.plantation_date ??
+        plotForWaterStress?.crop_type?.plantation_date ??
+        null;
+
+      void fetchWaterStressAnalysis(plotId, {
+        plantationDate: plantationForWaterStress,
+        endDate: today,
+        plots: farmerForWaterStress?.plots ?? null,
+      })
+        .then((data) => {
+          if (isStale()) return;
+          const parsed = parseWaterStressMetrics(data);
+          setMetrics((prev) => ({
+            ...prev,
+            cropConditionLabel: parsed.cropConditionLabel,
+            cropConditionValue: parsed.cropConditionValue,
+            stressCount: parsed.stressCount,
+            stressTotalDays: parsed.stressTotalDays,
+          }));
+        })
+        .finally(() => {
+          if (!isStale()) setLoadingWaterStress(false);
+        });
 
       const harvestPromise = (async () => {
         const harvestCacheKey = `harvest_${plotId}_${today}`;
@@ -771,7 +942,8 @@ const ManagerFarmDash: React.FC = () => {
             MANAGER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
           )
             .then((data) => {
-              const processed = data.map((item: any) => ({
+              const rows = Array.isArray(data) ? data : [];
+              const processed = rows.map((item: any) => ({
                 date: new Date(item.date).toISOString().split("T")[0],
                 growth: item.NDVI,
                 stress: item.NDMI,
@@ -837,9 +1009,7 @@ const ManagerFarmDash: React.FC = () => {
       const cachedFieldScore = getCache(scoreCacheKey);
       if (cachedFieldScore === undefined || cachedFieldScore === null) {
         const farmer = farmersForSelectedOfficer.find(
-          (f) =>
-            String(f.id || f.farmer_id || f.farmerId) ===
-            String(selectedFarmerId),
+          (f) => getFarmerId(f) === String(selectedFarmerId),
         );
         fetchPromises.push(
           fetchFieldScoreForPlot(plotId, farmer?.plots)
@@ -977,9 +1147,9 @@ const ManagerFarmDash: React.FC = () => {
       setLineChartData(rawIndices);
       setStressEvents(stressData?.events ?? []);
 
+      // NDRE stress is for chart overlay only; CCI / Stress Events cards use water-stress API
       setMetrics((prev) => ({
         ...prev,
-        stressCount: stressData?.total_events ?? 0,
         irrigationEvents: irrigationData?.total_events ?? null,
         fieldScore,
         cnRatio: null,
@@ -1054,7 +1224,6 @@ const ManagerFarmDash: React.FC = () => {
         // Calculate center from coordinates
         const center = calculateCenter(cachedCoords);
         setMapCenter(center);
-        setMapKey((prev) => prev + 1);
         return;
       }
     }
@@ -1065,9 +1234,10 @@ const ManagerFarmDash: React.FC = () => {
         `${BASE_URL}/analyze?plot_name=${encodePlotIdForEventsUrl(plotId)}&date=${today}`,
       );
 
-      const geom = response.data?.features?.[0]?.geometry?.coordinates?.[0];
-      if (geom) {
-        const coords = geom.map(([lng, lat]: [number, number]) => [lat, lng]);
+      const coords = boundaryToLeafletCoords(
+        response.data?.features?.[0]?.geometry,
+      );
+      if (coords.length >= 3) {
         setPlotCoordinates(coords);
 
         // Cache the coordinates
@@ -1076,7 +1246,6 @@ const ManagerFarmDash: React.FC = () => {
         // Calculate and set map center
         const center = calculateCenter(coords);
         setMapCenter(center);
-        setMapKey((prev) => prev + 1);
       }
     } catch (error) {}
   };
@@ -1206,14 +1375,7 @@ const ManagerFarmDash: React.FC = () => {
     }
   };
 
-  // Map auto-center component (from Harvest Dashboard)
-  function MapAutoCenter({ center }: { center: [number, number] }) {
-    const map = useMap();
-    useEffect(() => {
-      map.setView(center, map.getZoom());
-    }, [center, map]);
-    return null;
-  }
+  // Map helpers live outside this component (MapFitToPlot).
 
   const getPlotBorderStyle = () => ({
     color: "#ffffff",
@@ -1364,7 +1526,9 @@ const ManagerFarmDash: React.FC = () => {
     title = "Gauge",
     unit = "",
   }) => {
-    const percent = Math.max(0, Math.min(1, value / max));
+    const safeMax = max > 0 ? max : 1;
+    const safeValue = Number.isFinite(value) ? value : 0;
+    const percent = Math.max(0, Math.min(1, safeValue / safeMax));
     const angle = 180 * percent;
     const cx = width / 2;
     const cy = height * 0.8;
@@ -1416,7 +1580,7 @@ const ManagerFarmDash: React.FC = () => {
             textAnchor="middle"
             className="text-lg font-bold fill-gray-700"
           >
-            {value.toFixed(1)} {unit}
+            {safeValue.toFixed(1)} {unit}
           </text>
         </svg>
         <p className="text-sm text-gray-600 mt-2 font-medium">{title}</p>
@@ -1503,8 +1667,11 @@ const ManagerFarmDash: React.FC = () => {
                             key={`officer-${officer.id}`}
                             value={officer.id}
                           >
-                            {officer.first_name} {officer.last_name} (
-                            {officer.farmers.length} farmers)
+                            {officer.first_name ?? ""} {officer.last_name ?? ""}{" "}
+                            ({Array.isArray(officer.farmers)
+                              ? officer.farmers.length
+                              : 0}{" "}
+                            farmers)
                           </option>
                         ))}
                       </>
@@ -1521,6 +1688,11 @@ const ManagerFarmDash: React.FC = () => {
                     className="px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200 bg-white shadow-sm w-full sm:w-64"
                     value={selectedFarmerId}
                     onChange={(e) => {
+                      dashboardLoadedForPlotRef.current = "";
+                      // Do not clear plotCoordinates here — emptying Polygon/tooltip
+                      // mid-render causes removeChild crashes (esp. with kn locale).
+                      setPlots([]);
+                      setSelectedPlotId("");
                       setSelectedFarmerId(e.target.value);
                     }}
                     disabled={
@@ -1535,11 +1707,16 @@ const ManagerFarmDash: React.FC = () => {
                     ) : (
                       <>
                         <option value="">Select a farmer</option>
-                        {farmersForSelectedOfficer.map((farmer) => {
-                          const farmerId = String(farmer.id);
+                        {farmersForSelectedOfficer.map((farmer, index) => {
+                          const farmerId = getFarmerId(farmer) ?? `unknown-${index}`;
                           const farmerName =
-                            `${farmer.first_name} ${farmer.last_name}`.trim();
-                          const plotsCount = farmer.plots?.length || 0;
+                            `${farmer.first_name ?? ""} ${farmer.last_name ?? ""}`.trim() ||
+                            farmer.name ||
+                            farmer.username ||
+                            `Farmer ${farmerId}`;
+                          const plotsCount = Array.isArray(farmer.plots)
+                            ? farmer.plots.length
+                            : 0;
 
                           return (
                             <option key={`farmer-${farmerId}`} value={farmerId}>
@@ -1766,35 +1943,73 @@ const ManagerFarmDash: React.FC = () => {
             <p className="text-xs text-gray-600 font-medium">Expected Yield</p>
           </div>
 
-          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-teal-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2">
-              <Thermometer className="w-6 h-6 text-teal-600" />
-              <div className="text-right">
-                <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    metrics.organicCarbonDensity?.toFixed(1) || "-"
-                  )}
+          {(() => {
+            const cciStyle = cropConditionStyleFromCci(
+              metrics.cropConditionValue,
+            );
+            const showCciValue =
+              Boolean(selectedPlotId) &&
+              !loadingWaterStress &&
+              metrics.cropConditionValue != null;
+
+            return (
+              <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-emerald-200 hover:shadow-xl transition-all duration-300">
+                <div className="flex items-center justify-between mb-2">
+                  <Sprout className="w-6 h-6 shrink-0 text-emerald-600" />
+                  <div className="text-right min-w-0">
+                    <div className="text-2xl font-bold text-gray-800">
+                      {!selectedPlotId ? (
+                        "-"
+                      ) : loadingWaterStress ? (
+                        <Loader2 className="w-5 h-5 animate-spin inline-block" />
+                      ) : showCciValue ? (
+                        metrics.cropConditionValue!.toFixed(1)
+                      ) : (
+                        "-"
+                      )}
+                    </div>
+                    <div
+                      className="text-xs font-semibold leading-tight max-w-[7.5rem] ml-auto truncate"
+                      style={{ color: cciStyle?.textColor ?? "#6b7280" }}
+                      title={
+                        showCciValue
+                          ? (cciStyle?.label ?? metrics.cropConditionLabel ?? "")
+                          : undefined
+                      }
+                    >
+                      {!selectedPlotId || loadingWaterStress
+                        ? "CCI"
+                        : (cciStyle?.label ?? metrics.cropConditionLabel ?? "-")}
+                    </div>
+                  </div>
                 </div>
-                <div className="text-sm font-semibold text-teal-600">g/kg</div>
+                <p className="text-xs text-gray-600 font-medium">
+                  Crop Condition Index
+                </p>
               </div>
-            </div>
-            <p className="text-xs text-gray-600 font-medium">Organic Carbon</p>
-          </div>
+            );
+          })()}
 
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-red-200 hover:shadow-xl transition-all duration-300">
             <div className="flex items-center justify-between mb-2">
-              <Activity className="w-5 h-5 text-red-600" />
+              <Activity className="w-5 h-5 text-red-600 shrink-0" />
               <div className="text-right">
                 <div className="text-lg font-bold text-gray-800">
-                  {loadingData ? (
+                  {!selectedPlotId ? (
+                    "-"
+                  ) : loadingWaterStress ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : (
-                    (metrics.stressCount ?? 0)
+                    (metrics.stressCount ?? "-")
                   )}
                 </div>
-                <div className="text-xs font-semibold text-red-600">Events</div>
+                <div className="text-xs font-semibold text-red-600">
+                  {!selectedPlotId || loadingWaterStress
+                    ? "Total days"
+                    : metrics.stressTotalDays != null
+                      ? `${metrics.stressTotalDays} days`
+                      : "-"}
+                </div>
               </div>
             </div>
             <p className="text-xs text-gray-600">Stress Events</p>
@@ -1854,7 +2069,8 @@ const ManagerFarmDash: React.FC = () => {
           <div className="lg:col-span-2 bg-white rounded-xl shadow-lg overflow-hidden">
             <div
               ref={mapWrapperRef}
-              className="relative w-full h-[400px] sm:h-[400px] md:h-[450px] lg:h-[500px] xl:h-full min-h-[300px]"
+              className="relative w-full h-[400px] sm:h-[400px] md:h-[450px] lg:h-[500px] xl:h-full min-h-[300px] notranslate"
+              translate="no"
             >
               {/* Fullscreen Toggle */}
               <div
@@ -1877,66 +2093,45 @@ const ManagerFarmDash: React.FC = () => {
                 loading={loadingData}
               />
 
-              <MapContainer
-                key={mapKey}
-                center={mapCenter}
-                zoom={16}
-                minZoom={10}
-                maxZoom={20}
-                className="w-full h-full z-0"
-                style={{
-                  height: "100%",
-                  width: "100%",
-                  borderRadius: "inherit",
-                  position: "relative",
-                }}
+              <MapSectionErrorBoundary
+                resetKey={`${selectedFarmerId}|${selectedPlotId}`}
               >
-                <MapAutoCenter center={mapCenter} />
-                <TileLayer
-                  url="http://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
-                  attribution="© Google"
-                  maxZoom={20}
-                  maxNativeZoom={18}
+                <MapContainer
+                  center={mapCenter}
+                  zoom={16}
                   minZoom={10}
-                  tileSize={256}
-                  zoomOffset={0}
-                  updateWhenZooming={false}
-                  updateWhenIdle={true}
-                />
-                {plotCoordinates.length > 0 && (
-                  <Polygon
-                    positions={plotCoordinates}
-                    pathOptions={getPlotBorderStyle()}
-                  >
-                    <LeafletTooltip
-                      direction="top"
-                      offset={[0, -10]}
-                      opacity={0.9}
-                      sticky
-                    >
-                      <div className="text-sm">
-                        <p>
-                          <strong>Plot:</strong> {selectedPlotId}
-                        </p>
-                        {/* <p>
-                          <strong>Farmer:</strong> Ramesh Patil
-                        </p>
-                        <p>
-                          <strong>Representative:</strong> Sunil Joshi
-                        </p> */}
-                        <p>
-                          <strong>Status:</strong>{" "}
-                          {metrics.growthStage ?? "Loading..."}
-                        </p>
-                        <p>
-                          <strong>Area:</strong> {metrics.area ?? "Loading..."}{" "}
-                          Ha
-                        </p>
-                      </div>
-                    </LeafletTooltip>
-                  </Polygon>
-                )}
-              </MapContainer>
+                  maxZoom={20}
+                  className="w-full h-full z-0"
+                  style={{
+                    height: "100%",
+                    width: "100%",
+                    borderRadius: "inherit",
+                    position: "relative",
+                  }}
+                >
+                  <MapFitToPlot
+                    center={mapCenter}
+                    boundsCoords={plotCoordinates}
+                  />
+                  <TileLayer
+                    url="http://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
+                    attribution="© Google"
+                    maxZoom={20}
+                    maxNativeZoom={18}
+                    minZoom={10}
+                    tileSize={256}
+                    zoomOffset={0}
+                    updateWhenZooming={false}
+                    updateWhenIdle={true}
+                  />
+                  {plotCoordinates.length >= 3 && (
+                    <Polygon
+                      positions={plotCoordinates}
+                      pathOptions={getPlotBorderStyle()}
+                    />
+                  )}
+                </MapContainer>
+              </MapSectionErrorBoundary>
             </div>
           </div>
 

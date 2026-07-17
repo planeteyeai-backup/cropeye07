@@ -46,23 +46,44 @@ const AppRoutesContent: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(true);
 
   useEffect(() => {
+    let cancelled = false;
+
     // Check authentication status on app start
     const token = getAuthToken();
     const savedRole = getUserRole() as UserRole | null;
+
+    const finishLoading = () => {
+      if (!cancelled) setLoading(false);
+    };
+
+    // Never leave the app on a blank loading screen
+    const loadingGuard = window.setTimeout(finishLoading, 12000);
 
     if (token && savedRole) {
       if (isPlanetEyeDemoToken(token)) {
         setAuthData(token, "planeteye", getUserData());
         setUserRole("planeteye");
         setIsAuthenticated(true);
-        setLoading(false);
-        return;
+        finishLoading();
+        window.clearTimeout(loadingGuard);
+        return () => {
+          cancelled = true;
+        };
       }
       // Validate token with backend
-      validateToken(token, savedRole);
+      void validateToken(token, savedRole).finally(() => {
+        window.clearTimeout(loadingGuard);
+        finishLoading();
+      });
     } else {
-      setLoading(false);
+      finishLoading();
+      window.clearTimeout(loadingGuard);
     }
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(loadingGuard);
+    };
   }, []);
 
   // Initialize token refresh when authenticated (skip demo session)

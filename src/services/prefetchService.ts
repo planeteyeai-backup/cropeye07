@@ -6,6 +6,8 @@ import {
   getFieldOfficerAgroStats,
   getManagerFieldOfficersAgroStats,
   getMyFieldOfficers,
+  managerAgroStatsCacheKey,
+  fieldOfficerAgroStatsCacheKey,
 } from '../api';
 import { getFastApiToken } from '../utils/auth';
 import { getCache, setCache } from '../utils/cache';
@@ -74,6 +76,7 @@ export const prefetchFieldOfficerAgroStats = async (
     const data = await getFieldOfficerAgroStats(fieldOfficerId, endDate);
     // Cache by end_date so harvested plots (different yieldDataDate) remain correct
     setCached(`fieldOfficerAgroStats_${endDate}`, data);
+    setCache(fieldOfficerAgroStatsCacheKey(fieldOfficerId, endDate), data);
     return true;
   } catch (err) {
     console.warn('⚠️ Field officer agroStats prefetch failed:', err);
@@ -163,13 +166,15 @@ export const prefetchAllData = async (
         commonPromises.push(agroPromise);
       }
 
-      // 2c. For manager: prefetch agroStats for all field officers in parallel
+      // 2c. For manager: prefetch agroStats for all field officers once (shared cache)
       if (role === 'manager') {
         const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
         const endDate = new Date(Date.now() - tzOffsetMs).toISOString().slice(0, 10);
         const managerAgroPromise = getManagerFieldOfficersAgroStats(endDate)
           .then((data) => {
-            setCached(`managerAgroStats_${endDate}`, data);
+            const key = managerAgroStatsCacheKey(endDate);
+            setCached(key, data);
+            setCache(key, data);
             fetchedEndpoints.push('managerAgroStats');
             return data;
           })

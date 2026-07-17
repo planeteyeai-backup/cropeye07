@@ -57,6 +57,7 @@ const translations: Record<AppLanguage, Record<string, string>> = {
     "farmerDashboard.cards.days": "Days",
     "farmerDashboard.cards.daysToHarvest": "Days to Harvest",
     "farmerDashboard.cards.sugarContent": "Sugar Content",
+    "farmerDashboard.cards.cropConditionIndex": "Crop Condition Index",
     "farmerDashboard.labels.max": "Max",
     "farmerDashboard.labels.min": "Min",
     "farmerDashboard.cards.organicCarbonDensity": "Organic Carbon Density",

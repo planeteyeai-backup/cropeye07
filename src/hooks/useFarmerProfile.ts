@@ -1,7 +1,14 @@
 import { useState, useEffect } from 'react';
 import { getFarmerProfile, getFarmerMyProfile } from '../api';
 import { getAuthToken, isValidToken, getUserRole, isPlanetEyeDemoUser } from '../utils/auth';
-import { getCache } from '../components/utils/cache';
+import { getCache, setCache, removeCache } from '../utils/cache';
+import {
+  PLOT_BOUNDARY_UPDATED_EVENT,
+  mergeBoundaryIntoProfilePayload,
+  readLocalPlotBoundaryForPlot,
+  type PlotBoundaryUpdatedDetail,
+} from '../utils/plotBoundarySync';
+import { plotKeyFromRecord } from '../utils/plotName';
 
 interface FarmerProfile {
   success?: boolean;
@@ -195,8 +202,23 @@ export const useFarmerProfile = () => {
       setLoading(true);
       setError(null);
       const response = await getFarmerMyProfile();
-      const data = response.data;
+      let data = (response as { data?: any })?.data ?? response;
+
+      // Prefer last saved boundary from sessionStorage if GET lags behind PATCH.
+      const plots = Array.isArray(data?.plots) ? data.plots : [];
+      const firstKey =
+        (plots[0] && plotKeyFromRecord(plots[0])) ||
+        (data?.plot && plotKeyFromRecord(data.plot)) ||
+        "";
+      if (firstKey) {
+        const localBoundary = readLocalPlotBoundaryForPlot(firstKey, plots);
+        if (localBoundary) {
+          data = mergeBoundaryIntoProfilePayload(data, firstKey, localBoundary);
+        }
+      }
+
       setProfile(data);
+      setCache('farmerProfile', data);
       setError(null);
     } catch (err: any) {
       // Handle authentication errors gracefully
@@ -254,6 +276,33 @@ export const useFarmerProfile = () => {
     }
 
     fetchMyProfile();
+  }, []);
+
+  useEffect(() => {
+    const refreshAfterBoundaryEdit = (event: Event) => {
+      const detail = (event as CustomEvent<PlotBoundaryUpdatedDetail>).detail;
+      removeCache("farmerProfile");
+      void fetchMyProfile().then(() => {
+        if (!detail?.plotKey || detail.boundary === undefined) return;
+        setProfile((prev) => {
+          if (!prev) return prev;
+          const merged = mergeBoundaryIntoProfilePayload(
+            prev,
+            detail.plotKey,
+            detail.boundary,
+          ) as FarmerProfile;
+          setCache("farmerProfile", merged);
+          return merged;
+        });
+      });
+    };
+    window.addEventListener(PLOT_BOUNDARY_UPDATED_EVENT, refreshAfterBoundaryEdit);
+    return () => {
+      window.removeEventListener(
+        PLOT_BOUNDARY_UPDATED_EVENT,
+        refreshAfterBoundaryEdit,
+      );
+    };
   }, []);
 
   const getFarmerName = () => {

@@ -18,7 +18,10 @@ const MapCropStatusOverlay: React.FC<MapCropStatusOverlayProps> = ({
     loading && !growthStage ? "Loading..." : growthStage ?? "Loading...";
 
   return (
-    <div className="absolute top-10 left-1/2 -translate-x-1/2 z-10 pointer-events-none w-[calc(100%-2rem)] max-w-xl">
+    <div
+      className="absolute top-10 left-1/2 -translate-x-1/2 z-10 pointer-events-none w-[calc(100%-2rem)] max-w-xl notranslate"
+      translate="no"
+    >
       <div className="bg-black/20 backdrop-blur-sm rounded-2xl px-3 sm:px-5 py-3 border border-white/30 shadow-2xl">
         <div className="flex items-center justify-between gap-2 sm:gap-4">
           <div className="flex-1 min-w-0 text-center">

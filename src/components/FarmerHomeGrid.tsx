@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense, lazy } from 'react';
 import './App.css';
 import { Header } from './HeaderFarm';
 import  SoilAnalysis  from './SoilAnalysis';
@@ -7,7 +7,7 @@ import CropHealthAnalysis from './CropHealthAnalysis';
 import FertilizerTable from './FertilizerTable';
 import IrrigationSchedule from './IrrigationSchedule';
 import WeatherForecast from './WeatherForecast';
-import Map from './Map';
+const CropEyeMap = lazy(() => import('./Map'));
 import SoilMoistureCard from './Irrigation/cards/SoilMoistureCard';
 
 function FarmerHomeGrid() {
@@ -92,13 +92,15 @@ function FarmerHomeGrid() {
           {/* Map + Irrigation / Soil Moisture / Field Score (side column) */}
           <section className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:items-stretch">
             <div className="lg:col-span-9 lg:h-[140vh] rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden">
-              <Map
-                onHealthDataChange={handleHealthDataChange}
-                onSoilDataChange={handleSoilDataChange}
-                onFieldAnalysisChange={handleFieldAnalysisChange}
-                onMoistGroundChange={handleMoistGroundChange}
-                onSplitScreen={() => setSplitScreen(true)}
-              />
+              <Suspense fallback={<div className="flex h-full items-center justify-center text-slate-600">Loading map…</div>}>
+                <CropEyeMap
+                  onHealthDataChange={handleHealthDataChange}
+                  onSoilDataChange={handleSoilDataChange}
+                  onFieldAnalysisChange={handleFieldAnalysisChange}
+                  onMoistGroundChange={handleMoistGroundChange}
+                  onSplitScreen={() => setSplitScreen(true)}
+                />
+              </Suspense>
             </div>
 
             <div className="lg:col-span-3 lg:h-[140vh] min-h-0 flex flex-col gap-4">
@@ -176,22 +178,26 @@ function FarmerHomeGrid() {
           <div className="splitscreen-panels">
             <div className="splitscreen-panel">
               <span className="splitscreen-panel-label">Panel 1</span>
-              <Map
-                onHealthDataChange={() => {}}
-                onSoilDataChange={() => {}}
-                onFieldAnalysisChange={() => {}}
-                onMoistGroundChange={() => {}}
-              />
+              <Suspense fallback={<div className="flex h-full items-center justify-center text-slate-600">Loading map…</div>}>
+                <CropEyeMap
+                  onHealthDataChange={() => {}}
+                  onSoilDataChange={() => {}}
+                  onFieldAnalysisChange={() => {}}
+                  onMoistGroundChange={() => {}}
+                />
+              </Suspense>
             </div>
             <div className="splitscreen-divider" />
             <div className="splitscreen-panel">
               <span className="splitscreen-panel-label">Panel 2</span>
-              <Map
-                onHealthDataChange={() => {}}
-                onSoilDataChange={() => {}}
-                onFieldAnalysisChange={() => {}}
-                onMoistGroundChange={() => {}}
-              />
+              <Suspense fallback={<div className="flex h-full items-center justify-center text-slate-600">Loading map…</div>}>
+                <CropEyeMap
+                  onHealthDataChange={() => {}}
+                  onSoilDataChange={() => {}}
+                  onFieldAnalysisChange={() => {}}
+                  onMoistGroundChange={() => {}}
+                />
+              </Suspense>
             </div>
           </div>
         </div>

@@ -30,6 +30,40 @@ export function getCache(key, maxAgeMs = 10 * 60 * 1000) {
   }
 }
 
+export function removeCache(key) {
+  try {
+    localStorage.removeItem(prefixedKey(key));
+  } catch (e) {
+    console.warn("Failed to remove cache key:", key, e);
+  }
+}
+
+/** Drop layer/growth caches for one plot so map picks up edited boundary. */
+export function removeCachesMatchingPlot(plotKey) {
+  if (!plotKey?.trim()) return;
+
+  const needle = String(plotKey).trim().toLowerCase().replace(/\//g, "_");
+  const keysToRemove = [];
+
+  try {
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (!key || !key.startsWith(CACHE_PREFIX)) continue;
+      const normalized = key.toLowerCase().replace(/\//g, "_");
+      if (
+        normalized.includes(needle) ||
+        normalized.includes(`_${needle}`) ||
+        normalized.includes(`${needle}_`)
+      ) {
+        keysToRemove.push(key);
+      }
+    }
+    keysToRemove.forEach((k) => localStorage.removeItem(k));
+  } catch (e) {
+    console.warn("Failed to clear plot caches:", plotKey, e);
+  }
+}
+
 /** Clear all app caches (call on logout - manual or automatic) */
 export function clearAllAppCache() {
   try {

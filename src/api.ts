@@ -17,9 +17,30 @@ import {
   parseTeamConnectHierarchy,
   personDisplayName,
 } from "./utils/teamConnectHarvest";
+import { getCache, setCache } from "./utils/cache";
 
 // Set base URL for backend (use .env VITE_API_BASE_URL or new Render backend)
 const DEFAULT_API_BASE_URL = "https://cropeye-backendd.up.railway.app/api";
+
+/** Shared TTL for field-officer / manager agroStats (login + harvest + agro dash). */
+const AGRO_STATS_CACHE_TTL_MS = 10 * 60 * 1000;
+
+/** In-flight dedupe so the same FO agroStats URL is never requested twice at once. */
+const fieldOfficerAgroStatsInFlight = new Map<string, Promise<any>>();
+const managerAgroStatsInFlight = new Map<string, Promise<Record<string, unknown>>>();
+
+export function fieldOfficerAgroStatsCacheKey(
+  fieldOfficerId: string | number,
+  endDate?: string,
+): string {
+  const date = endDate || "latest";
+  return `foAgroStats_${fieldOfficerId}_${date}`;
+}
+
+export function managerAgroStatsCacheKey(endDate?: string): string {
+  const date = endDate || "latest";
+  return `managerAgroStats_${date}`;
+}
 
 function resolveApiBaseUrl(): string {
   const fromEnv = String(import.meta.env.VITE_API_BASE_URL ?? "").trim();
@@ -1692,10 +1713,29 @@ export const getFieldOfficerAgroStats = async (
   fieldOfficerId: string | number,
   endDate?: string,
 ) => {
+  const cacheKey = fieldOfficerAgroStatsCacheKey(fieldOfficerId, endDate);
+  const cached = getCache(cacheKey, AGRO_STATS_CACHE_TTL_MS);
+  if (cached != null) return cached;
+
+  const existing = fieldOfficerAgroStatsInFlight.get(cacheKey);
+  if (existing) return existing;
+
   const dateParam = endDate ? `?end_date=${endDate}` : "";
   const url = `https://events-cropeye.up.railway.app/field-officers/${fieldOfficerId}/agroStats${dateParam}`;
-  const response = await eventsApi.get(url);
-  return response.data;
+
+  const pending = (async () => {
+    try {
+      const response = await eventsApi.get(url);
+      const data = response.data;
+      if (data != null) setCache(cacheKey, data);
+      return data;
+    } finally {
+      fieldOfficerAgroStatsInFlight.delete(cacheKey);
+    }
+  })();
+
+  fieldOfficerAgroStatsInFlight.set(cacheKey, pending);
+  return pending;
 };
 
 /** Field officers assigned to the current manager (or owner). */
@@ -1717,108 +1757,132 @@ export function mergeAgroStatsPlotData(
 
 /**
  * Manager dashboard: fetch agroStats for every field officer under this manager in parallel.
+ * Cached + deduped so login prefetch and Harvest/Agro dashboards share one network call per FO.
  */
 export const getManagerFieldOfficersAgroStats = async (
   endDate?: string,
 ): Promise<Record<string, unknown>> => {
-  const response = await getMyFieldOfficers();
-  const data = response?.data;
-  const officers: any[] = data?.field_officers ?? [];
-  const manager = data?.manager ?? null;
-  const managers = manager ? [manager] : [];
-
-  if (officers.length === 0) {
-    return {};
+  const mergedKey = managerAgroStatsCacheKey(endDate);
+  const cachedMerged = getCache(mergedKey, AGRO_STATS_CACHE_TTL_MS);
+  if (cachedMerged && typeof cachedMerged === "object") {
+    return cachedMerged as Record<string, unknown>;
   }
 
-  const results = await Promise.all(
-    officers.map(async (officer) => {
-      try {
-        const stats = await getFieldOfficerAgroStats(officer.id, endDate);
-        if (stats) {
-          const createdByRaw = officer?.created_by;
-          const createdByUsername =
-            typeof createdByRaw === "string"
-              ? createdByRaw.trim().match(/^(\S+)/)?.[1]?.toLowerCase()
-              : null;
-          const resolvedManager =
-            managers.find(
-              (m) =>
-                m?.id === officer?.created_by ||
-                m?.id === officer?.manager_id ||
-                String(m?.id) === String(officer?.manager_id) ||
-                (createdByUsername &&
-                  `${m?.username ?? ""}`.trim().toLowerCase() ===
-                    createdByUsername),
-            ) ?? manager;
+  const existingMerged = managerAgroStatsInFlight.get(mergedKey);
+  if (existingMerged) return existingMerged;
 
-          const managerName = resolvedManager
-            ? personDisplayName(resolvedManager)
-            : "";
+  const pending = (async (): Promise<Record<string, unknown>> => {
+    try {
+      const response = await getMyFieldOfficers();
+      const data = response?.data;
+      const officers: any[] = data?.field_officers ?? [];
+      const manager = data?.manager ?? null;
+      const managers = manager ? [manager] : [];
 
-          Object.values(stats).forEach((plot: any) => {
-            if (typeof plot === "object" && plot !== null) {
-              const foName = personDisplayName(officer);
-              const foRegion =
-                officer.taluka || officer.region || officer.district || "";
-
-              if (!plot.manager_name && managerName && managerName !== "Unknown") {
-                plot.manager_name = managerName;
-              }
-              if (
-                !plot.field_officer_name &&
-                foName &&
-                foName !== "Unknown"
-              ) {
-                plot.field_officer_name = foName;
-              }
-              if (officer?.id != null || officer?.user_id != null) {
-                plot.field_officer_id = officer.id ?? officer.user_id;
-              }
-              if (
-                resolvedManager?.id != null ||
-                resolvedManager?.user_id != null
-              ) {
-                plot.manager_id = resolvedManager.id ?? resolvedManager.user_id;
-              }
-              if (!plot.taluka && foRegion) {
-                plot.taluka = foRegion;
-              }
-              if (!plot.region && foRegion) {
-                plot.region = foRegion;
-              }
-              if (!plot.crop_variety && officer?.crop_variety) {
-                plot.crop_variety = officer.crop_variety;
-              }
-              if (
-                !plot.plantation_type &&
-                (officer?.variety_type || officer?.plantation_type)
-              ) {
-                plot.plantation_type =
-                  officer.variety_type || officer.plantation_type;
-              }
-              if (
-                !plot.plantation_type_display &&
-                officer?.plantation_type_display
-              ) {
-                plot.plantation_type_display =
-                  officer.plantation_type_display;
-              }
-            }
-          });
-        }
-        return stats;
-      } catch (err) {
-        console.error(
-          `Error fetching agroStats for field officer ${officer.id}:`,
-          err,
-        );
-        return null;
+      if (officers.length === 0) {
+        setCache(mergedKey, {});
+        return {};
       }
-    }),
-  );
 
-  return mergeAgroStatsPlotData(...results);
+      const results = await Promise.all(
+        officers.map(async (officer) => {
+          try {
+            const stats = await getFieldOfficerAgroStats(officer.id, endDate);
+            if (stats) {
+              const createdByRaw = officer?.created_by;
+              const createdByUsername =
+                typeof createdByRaw === "string"
+                  ? createdByRaw.trim().match(/^(\S+)/)?.[1]?.toLowerCase()
+                  : null;
+              const resolvedManager =
+                managers.find(
+                  (m) =>
+                    m?.id === officer?.created_by ||
+                    m?.id === officer?.manager_id ||
+                    String(m?.id) === String(officer?.manager_id) ||
+                    (createdByUsername &&
+                      `${m?.username ?? ""}`.trim().toLowerCase() ===
+                        createdByUsername),
+                ) ?? manager;
+
+              const managerName = resolvedManager
+                ? personDisplayName(resolvedManager)
+                : "";
+
+              Object.values(stats).forEach((plot: any) => {
+                if (typeof plot === "object" && plot !== null) {
+                  const foName = personDisplayName(officer);
+                  const foRegion =
+                    officer.taluka || officer.region || officer.district || "";
+
+                  if (
+                    !plot.manager_name &&
+                    managerName &&
+                    managerName !== "Unknown"
+                  ) {
+                    plot.manager_name = managerName;
+                  }
+                  if (
+                    !plot.field_officer_name &&
+                    foName &&
+                    foName !== "Unknown"
+                  ) {
+                    plot.field_officer_name = foName;
+                  }
+                  if (officer?.id != null || officer?.user_id != null) {
+                    plot.field_officer_id = officer.id ?? officer.user_id;
+                  }
+                  if (
+                    resolvedManager?.id != null ||
+                    resolvedManager?.user_id != null
+                  ) {
+                    plot.manager_id =
+                      resolvedManager.id ?? resolvedManager.user_id;
+                  }
+                  if (!plot.taluka && foRegion) {
+                    plot.taluka = foRegion;
+                  }
+                  if (!plot.region && foRegion) {
+                    plot.region = foRegion;
+                  }
+                  if (
+                    !plot.plantation_type &&
+                    (officer?.variety_type || officer?.plantation_type)
+                  ) {
+                    plot.plantation_type =
+                      officer.variety_type || officer.plantation_type;
+                  }
+                  if (
+                    !plot.plantation_type_display &&
+                    officer?.plantation_type_display
+                  ) {
+                    plot.plantation_type_display =
+                      officer.plantation_type_display;
+                  }
+                }
+              });
+            }
+            return stats;
+          } catch (err) {
+            console.error(
+              `Error fetching agroStats for field officer ${officer.id}:`,
+              err,
+            );
+            return null;
+          }
+        }),
+      );
+
+      const merged = mergeAgroStatsPlotData(...results);
+      setCache(mergedKey, merged);
+      return merged;
+    } finally {
+      managerAgroStatsInFlight.delete(mergedKey);
+    }
+  })();
+
+  managerAgroStatsInFlight.set(mergedKey, pending);
+  return pending;
 };
 
 /**
@@ -1903,9 +1967,6 @@ export const getOwnerFieldOfficersAgroStats = async (
               }
               if (!plot.region && foRegion) {
                 plot.region = foRegion;
-              }
-              if (!plot.crop_variety && officer?.crop_variety) {
-                plot.crop_variety = officer.crop_variety;
               }
               if (
                 !plot.plantation_type &&

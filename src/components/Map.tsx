@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo, useRef } from "react";
-import { MapContainer, TileLayer, Polygon, useMap, Circle } from "react-leaflet";
+import { MapContainer, TileLayer, Polygon, useMap, Circle, Pane } from "react-leaflet";
 import { LatLngTuple, LeafletMouseEvent, LatLngBounds } from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "./Map.css";
@@ -9,7 +9,7 @@ import { FaExpand, FaColumns } from 'react-icons/fa';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 import { AnalysisTimelineRibbon } from "./AnalysisTimelineRibbon";
 import { getOrFetchJson } from "../utils/requestCache";
-import { resolveApiPlotName } from "../utils/plotName";
+import { resolveApiPlotName, plotKeyFromRecord } from "../utils/plotName";
 import { getCache } from "../utils/cache";
 import {
   fetchAnalysisTimeline,
@@ -23,6 +23,13 @@ import {
   calculateAreaMetricsFromGeometry,
   type GeoJsonPolygon,
 } from "../utils/plotGeometry";
+import {
+  PLOT_BOUNDARY_UPDATED_EVENT,
+  boundariesMatch,
+  readLocalPlotBoundaryForPlot,
+  resolveSavedPlotBoundaryFeature,
+  type PlotBoundaryUpdatedDetail,
+} from "../utils/plotBoundarySync";
 
 const ACRES_PER_HECTARE = 2.47105381;
 
@@ -44,18 +51,6 @@ function normalizePlotKey(value: unknown): string {
     .replace(/\//g, "_")
     .replace(/ /g, "_")
     .toLowerCase();
-}
-
-export function plotKeyFromRecord(plot: any): string {
-  const fastapi = plot?.fastapi_plot_id != null ? String(plot.fastapi_plot_id).trim() : "";
-  if (fastapi) return fastapi;
-
-  const gat = plot?.gat_number != null ? String(plot.gat_number).trim() : "";
-  const num = plot?.plot_number != null ? String(plot.plot_number).trim() : "";
-  if (gat && num) return `${gat}_${num}`;
-  if (gat) return gat;
-  if (num) return num;
-  return "";
 }
 
 function plotKeysForRecord(plot: any): string[] {
@@ -462,7 +457,8 @@ const CustomTileLayer: React.FC<{
   url: string;
   opacity?: number;
   tileKey?: string;
-}> = ({ url, opacity = 0.7, tileKey }) => {
+  pane?: string;
+}> = ({ url, opacity = 0.7, tileKey, pane }) => {
   // console.log('CustomTileLayer URL:', url);
 
   if (!url) {
@@ -478,12 +474,141 @@ const CustomTileLayer: React.FC<{
       maxZoom={22}
       minZoom={10}
       tileSize={256}
+      pane={pane}
       eventHandlers={{
         tileerror: (e: any) => console.error('Tile loading error:', e),
       }}
     />
   );
 };
+
+/**
+ * Clip a leaflet pane to the plot boundary polygon so the analysis (Growth/Water/
+ * Soil/Pest) raster only shows inside the edited yellow boundary.
+ *
+ * CSS clip-path is in the pane's local pixel space (relative to the map viewport).
+ * Leaflet layer points are in CRS/layer space — we convert via containerPointToLayerPoint
+ * so the mask lines up with the yellow Polygon border.
+ */
+const ClipPaneToBoundary: React.FC<{
+  paneName: string;
+  ring: number[][] | null;
+}> = ({ paneName, ring }) => {
+  const map = useMap();
+
+  useEffect(() => {
+    let cancelled = false;
+    let tries = 0;
+
+    const clear = (pane: HTMLElement) => {
+      pane.style.clipPath = "";
+      (pane.style as any).webkitClipPath = "";
+      pane.style.overflow = "";
+    };
+
+    const applyClip = (pane: HTMLElement) => {
+      if (!ring || ring.length < 3) {
+        clear(pane);
+        return;
+      }
+
+      // Layer-space point of the viewport's top-left → convert ring into pane-local px
+      const topLeft = map.containerPointToLayerPoint([0, 0]);
+      const points = ring
+        .map((coord) => {
+          const layerPt = map.latLngToLayerPoint([coord[1], coord[0]]);
+          return `${Math.round(layerPt.x - topLeft.x)}px ${Math.round(layerPt.y - topLeft.y)}px`;
+        })
+        .join(", ");
+
+      const clip = `polygon(${points})`;
+      pane.style.overflow = "hidden";
+      pane.style.clipPath = clip;
+      (pane.style as any).webkitClipPath = clip;
+    };
+
+    const bind = (pane: HTMLElement) => {
+      const update = () => {
+        if (!cancelled) applyClip(pane);
+      };
+      update();
+      map.on("zoom move zoomend moveend viewreset resize", update);
+      return () => {
+        map.off("zoom move zoomend moveend viewreset resize", update);
+        clear(pane);
+      };
+    };
+
+    // Pane may mount one frame after this effect (react-leaflet Pane)
+    let unbind: (() => void) | undefined;
+    const tryAttach = () => {
+      if (cancelled) return;
+      const pane = map.getPane(paneName);
+      if (!pane) {
+        if (tries++ < 40) {
+          window.setTimeout(tryAttach, 50);
+        }
+        return;
+      }
+      unbind = bind(pane);
+    };
+
+    tryAttach();
+
+    return () => {
+      cancelled = true;
+      unbind?.();
+    };
+  }, [map, paneName, ring]);
+
+  return null;
+};
+
+/** Recompute tile layout when Home becomes visible again (e.g. My Profile → Home). */
+const MapResizeWhenVisible: React.FC = () => {
+  const map = useMap();
+
+  useEffect(() => {
+    const container = map.getContainer();
+    let frame = 0;
+
+    const refresh = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        map.invalidateSize({ animate: false });
+      });
+    };
+
+    const observer =
+      typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(refresh)
+        : null;
+    observer?.observe(container);
+
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer?.disconnect();
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [map]);
+
+  return null;
+};
+
+function preserveLayerTilesOnFetchError<T>(prev: T | null): T | null {
+  if (prev == null) return null;
+  const tileUrl = (prev as { features?: Array<{ properties?: { tile_url?: string } }> })
+    ?.features?.[0]?.properties?.tile_url;
+  return tileUrl ? prev : null;
+}
+
+type LayerTileResponse = {
+  features?: Array<{ properties?: { tile_url?: string } }>;
+} | null;
 
 const CropEyeMap: React.FC<MapProps> = ({
   onHealthDataChange,
@@ -493,7 +618,7 @@ const CropEyeMap: React.FC<MapProps> = ({
   onPestDataChange,
   onSplitScreen,
 }) => {
-  const { profile, loading: profileLoading } = useFarmerProfile();
+  const { profile, loading: profileLoading, refreshMyProfile } = useFarmerProfile();
   const { t } = useI18nLite();
   const { getCached, setCached } = useAppContext();
   const plotNameForApi = (plotKey: string) =>
@@ -504,7 +629,11 @@ const CropEyeMap: React.FC<MapProps> = ({
   const layerTilesCacheRef = useRef<Map<string, unknown>>(new Map());
 
   const [plotData, setPlotData] = useState<any>(null);
-  const [plotBoundary, setPlotBoundary] = useState<any>(null); // Separate state for plot boundary that persists
+  const [plotBoundary, setPlotBoundary] = useState<any>(null); // Analysis API boundary (fallback)
+  const [profileBoundaryRevision, setProfileBoundaryRevision] = useState(0);
+  const [optimisticProfileBoundary, setOptimisticProfileBoundary] =
+    useState<GeoJsonPolygon | null>(null);
+  const skipAnalysisBoundaryRef = useRef(false);
   const [loading, setLoading] = useState(false);
   const [dateNavigationLoading, setDateNavigationLoading] = useState(false); // Loading state for date navigation
   const [fetchRotationIndex, setFetchRotationIndex] = useState(0);
@@ -608,7 +737,8 @@ const CropEyeMap: React.FC<MapProps> = ({
 
     // Ensure plotBoundary is preserved when switching layers
     // Try to extract from current layer data if plotBoundary is missing
-    if (!plotBoundary && selectedPlotName) {
+    // Do not restore Growth/analysis geometry when farmer saved a custom boundary.
+    if (!skipAnalysisBoundaryRef.current && !plotBoundary && selectedPlotName) {
       if (activeLayer === "Growth" && growthData?.features?.[0]) {
         setPlotBoundary(growthData.features[0]);
       } else if (activeLayer === "Water Uptake" && waterUptakeData?.features?.[0]) {
@@ -686,15 +816,104 @@ const CropEyeMap: React.FC<MapProps> = ({
         ?.map((plot) => plotKeyFromRecord(plot))
         .filter((name) => name.trim() !== "") || [];
     const savedPlot = typeof window !== 'undefined' ? localStorage.getItem('selectedPlot') : null;
-    const savedIsValid = savedPlot && plotNames.includes(savedPlot);
-    const plotToUse = savedIsValid ? savedPlot : (plotNames.length > 0 ? plotNames[0] : null);
+    const savedIsValid = Boolean(
+      savedPlot &&
+        plotNames.some(
+          (name) => normalizePlotKey(name) === normalizePlotKey(savedPlot),
+        ),
+    );
+    const plotToUse = savedIsValid
+      ? (plotNames.find(
+          (name) => normalizePlotKey(name) === normalizePlotKey(savedPlot!),
+        ) ?? savedPlot)
+      : plotNames.length > 0
+        ? plotNames[0]
+        : null;
 
-    if (plotToUse && plotToUse !== selectedPlotName) {
+    if (plotToUse && normalizePlotKey(plotToUse) !== normalizePlotKey(selectedPlotName)) {
+      const switchingPlot =
+        Boolean(selectedPlotName?.trim()) &&
+        normalizePlotKey(plotToUse) !== normalizePlotKey(selectedPlotName);
       setSelectedPlotName(plotToUse);
       if (!savedIsValid) localStorage.setItem('selectedPlot', plotToUse);
-      if (!savedIsValid) setPlotBoundary(null);
+      if (switchingPlot) {
+        setPlotBoundary(null);
+        setOptimisticProfileBoundary(null);
+      }
     }
   }, [profile, profileLoading]);
+
+  // Hydrate yellow border from sessionStorage when Home Map mounts / plot changes
+  // (covers My Profile → Home even if the CustomEvent was missed while remounting).
+  useEffect(() => {
+    if (!selectedPlotName?.trim()) return;
+    const local = readLocalPlotBoundaryForPlot(selectedPlotName, profile?.plots);
+    if (!local) return;
+    setOptimisticProfileBoundary((prev) => {
+      if (prev && boundariesMatch(prev, local)) return prev;
+      return local;
+    });
+    setPlotBoundary(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPlotName, profile?.plots]);
+
+  // After My Profile boundary save: drop stale analysis geometry and reload profile.
+  useEffect(() => {
+    const onBoundaryUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<PlotBoundaryUpdatedDetail>).detail;
+      setPlotBoundary(null);
+      setOptimisticProfileBoundary(detail?.boundary ?? null);
+      setProfileBoundaryRevision((value) => value + 1);
+      void refreshMyProfile();
+
+      const updatedPlot = detail?.plotKey?.trim();
+      const updatedId = detail?.plotId?.trim();
+      if (!selectedPlotName) return;
+
+      const samePlot =
+        (updatedPlot &&
+          normalizePlotKey(updatedPlot) ===
+            normalizePlotKey(selectedPlotName)) ||
+        (updatedId &&
+          normalizePlotKey(updatedId) === normalizePlotKey(selectedPlotName)) ||
+        (updatedPlot &&
+          profile?.plots?.some((plot) => {
+            const keys = [
+              plotKeyFromRecord(plot),
+              plot?.fastapi_plot_id,
+              plot?.gat_number != null && plot?.plot_number != null
+                ? `${plot.gat_number}/${plot.plot_number}`
+                : "",
+              plot?.id != null ? String(plot.id) : "",
+            ];
+            return keys.some(
+              (key) =>
+                key &&
+                (normalizePlotKey(key) === normalizePlotKey(updatedPlot) ||
+                  (updatedId &&
+                    normalizePlotKey(key) === normalizePlotKey(updatedId))),
+            );
+          }));
+      if (!samePlot) return;
+
+      initialFetchDoneRef.current = false;
+      void Promise.all([
+        fetchGrowthData(selectedPlotName),
+        fetchWaterUptakeData(selectedPlotName),
+        fetchSoilMoistureData(selectedPlotName),
+        fetchPestData(selectedPlotName),
+        fetchPlotData(selectedPlotName),
+      ]).catch((err) => {
+        console.warn("[Map] Layer refresh after boundary edit failed:", err);
+      });
+    };
+
+    window.addEventListener(PLOT_BOUNDARY_UPDATED_EVENT, onBoundaryUpdated);
+    return () => {
+      window.removeEventListener(PLOT_BOUNDARY_UPDATED_EVENT, onBoundaryUpdated);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPlotName, refreshMyProfile]);
 
   // Separate useEffect to fetch all 4 APIs on initial plot selection (after functions are defined)
   // This runs once when selectedPlotName is first set (on login)
@@ -804,7 +1023,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     if (layerTilesCacheRef.current.has(memKey)) {
       const hit = layerTilesCacheRef.current.get(memKey) as any;
       setGrowthData(hit ?? null);
-      if (!plotBoundary && hit?.features?.[0]?.geometry) {
+      if (!skipAnalysisBoundaryRef.current && !plotBoundary && hit?.features?.[0]?.geometry) {
         setPlotBoundary(hit.features[0]);
       }
       return;
@@ -818,7 +1037,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     if (sharedCached) {
       layerTilesCacheRef.current.set(memKey, sharedCached);
       setGrowthData(sharedCached);
-      if (!plotBoundary && sharedCached?.features?.[0]?.geometry) {
+      if (!skipAnalysisBoundaryRef.current && !plotBoundary && sharedCached?.features?.[0]?.geometry) {
         setPlotBoundary(sharedCached.features[0]);
       }
       return;
@@ -829,7 +1048,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       if (cachedData) {
         layerTilesCacheRef.current.set(memKey, cachedData);
         setGrowthData(cachedData);
-        if (!plotBoundary && cachedData?.features?.[0]?.geometry) {
+        if (!skipAnalysisBoundaryRef.current && !plotBoundary && cachedData?.features?.[0]?.geometry) {
           setPlotBoundary(cachedData.features[0]);
         }
         return;
@@ -869,7 +1088,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       }
       
       // Preserve plot boundary from growth data if not already set
-      if (!plotBoundary && data?.features?.[0]?.geometry) {
+      if (!skipAnalysisBoundaryRef.current && !plotBoundary && data?.features?.[0]?.geometry) {
         setPlotBoundary(data.features[0]);
       }
     } catch (err: any) {
@@ -884,7 +1103,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         endDate: currentEndDate,
         apiEndDate,
       });
-      setGrowthData(null);
+      setGrowthData((prev: LayerTileResponse) => preserveLayerTilesOnFetchError(prev));
       
       // Provide more specific error messages
       let errorMessage = "Failed to fetch growth data";
@@ -911,7 +1130,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     if (layerTilesCacheRef.current.has(memKey)) {
       const hit = layerTilesCacheRef.current.get(memKey) as any;
       setWaterUptakeData(hit ?? null);
-      if (!plotBoundary && hit?.features?.[0]?.geometry) {
+      if (!skipAnalysisBoundaryRef.current && !plotBoundary && hit?.features?.[0]?.geometry) {
         setPlotBoundary(hit.features[0]);
       }
       return;
@@ -925,7 +1144,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     if (sharedCached) {
       layerTilesCacheRef.current.set(memKey, sharedCached);
       setWaterUptakeData(sharedCached);
-      if (!plotBoundary && sharedCached?.features?.[0]?.geometry) {
+      if (!skipAnalysisBoundaryRef.current && !plotBoundary && sharedCached?.features?.[0]?.geometry) {
         setPlotBoundary(sharedCached.features[0]);
       }
       return;
@@ -936,7 +1155,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       if (cachedData) {
         layerTilesCacheRef.current.set(memKey, cachedData);
         setWaterUptakeData(cachedData);
-        if (!plotBoundary && cachedData?.features?.[0]?.geometry) {
+        if (!skipAnalysisBoundaryRef.current && !plotBoundary && cachedData?.features?.[0]?.geometry) {
           setPlotBoundary(cachedData.features[0]);
         }
         return;
@@ -976,7 +1195,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       }
       
       // Preserve plot boundary from water uptake data if not already set
-      if (!plotBoundary && data?.features?.[0]?.geometry) {
+      if (!skipAnalysisBoundaryRef.current && !plotBoundary && data?.features?.[0]?.geometry) {
         setPlotBoundary(data.features[0]);
       }
     } catch (err: any) {
@@ -991,7 +1210,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         endDate: currentEndDate,
         apiEndDate,
       });
-      setWaterUptakeData(null);
+      setWaterUptakeData((prev: LayerTileResponse) => preserveLayerTilesOnFetchError(prev));
       
       // Provide more specific error messages
       let errorMessage = "Failed to fetch water uptake data";
@@ -1018,7 +1237,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     if (layerTilesCacheRef.current.has(memKey)) {
       const hit = layerTilesCacheRef.current.get(memKey) as any;
       setSoilMoistureData(hit ?? null);
-      if (!plotBoundary && hit?.features?.[0]?.geometry) {
+      if (!skipAnalysisBoundaryRef.current && !plotBoundary && hit?.features?.[0]?.geometry) {
         setPlotBoundary(hit.features[0]);
       }
       return;
@@ -1032,7 +1251,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     if (sharedCached) {
       layerTilesCacheRef.current.set(memKey, sharedCached);
       setSoilMoistureData(sharedCached);
-      if (!plotBoundary && sharedCached?.features?.[0]?.geometry) {
+      if (!skipAnalysisBoundaryRef.current && !plotBoundary && sharedCached?.features?.[0]?.geometry) {
         setPlotBoundary(sharedCached.features[0]);
       }
       return;
@@ -1043,7 +1262,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       if (cachedData) {
         layerTilesCacheRef.current.set(memKey, cachedData);
         setSoilMoistureData(cachedData);
-        if (!plotBoundary && cachedData?.features?.[0]?.geometry) {
+        if (!skipAnalysisBoundaryRef.current && !plotBoundary && cachedData?.features?.[0]?.geometry) {
           setPlotBoundary(cachedData.features[0]);
         }
         return;
@@ -1082,7 +1301,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       }
       
       // Preserve plot boundary from soil moisture data if not already set
-      if (!plotBoundary && data?.features?.[0]?.geometry) {
+      if (!skipAnalysisBoundaryRef.current && !plotBoundary && data?.features?.[0]?.geometry) {
         setPlotBoundary(data.features[0]);
       }
     } catch (err: any) {
@@ -1097,7 +1316,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         endDate: currentEndDate,
         apiEndDate,
       });
-      setSoilMoistureData(null);
+      setSoilMoistureData((prev: LayerTileResponse) => preserveLayerTilesOnFetchError(prev));
       
       // Provide more specific error messages
       let errorMessage = "Failed to fetch soil moisture data";
@@ -1155,7 +1374,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       setPlotData(data);
       
       // Preserve plot boundary separately so it persists across layer changes
-      if (data?.features?.[0]?.geometry) {
+      if (!skipAnalysisBoundaryRef.current && data?.features?.[0]?.geometry) {
         setPlotBoundary(data.features[0]);
       }
     } catch (err: any) {
@@ -1184,7 +1403,10 @@ const CropEyeMap: React.FC<MapProps> = ({
       setError(errorMessage);
       // Don't clear plotData or plotBoundary on error - keep existing plot visible
       // Only clear if this is a new plot selection
-      if (!plotBoundary || plotBoundary.properties?.plot_name !== plotName) {
+      if (
+        !skipAnalysisBoundaryRef.current &&
+        (!plotBoundary || plotBoundary.properties?.plot_name !== plotName)
+      ) {
         setPlotData(null);
         setPlotBoundary(null);
       }
@@ -1263,7 +1485,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     if (layerTilesCacheRef.current.has(memKey)) {
       const hit = layerTilesCacheRef.current.get(memKey) as any;
       setPestData(hit ?? null);
-      if (!plotBoundary && hit?.features?.[0]?.geometry) {
+      if (!skipAnalysisBoundaryRef.current && !plotBoundary && hit?.features?.[0]?.geometry) {
         setPlotBoundary(hit.features[0]);
       }
       if (hit?.pixel_summary && onPestDataChange) {
@@ -1301,7 +1523,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     if (sharedCached) {
       layerTilesCacheRef.current.set(memKey, sharedCached);
       setPestData(sharedCached);
-      if (!plotBoundary && sharedCached?.features?.[0]?.geometry) {
+      if (!skipAnalysisBoundaryRef.current && !plotBoundary && sharedCached?.features?.[0]?.geometry) {
         setPlotBoundary(sharedCached.features[0]);
       }
       return;
@@ -1347,7 +1569,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       }
       
       // Preserve plot boundary from pest data if not already set
-      if (!plotBoundary && data?.features?.[0]?.geometry) {
+      if (!skipAnalysisBoundaryRef.current && !plotBoundary && data?.features?.[0]?.geometry) {
         setPlotBoundary(data.features[0]);
       }
 
@@ -1386,7 +1608,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         endDate: currentEndDate,
         apiEndDate,
       });
-      setPestData(null);
+      setPestData((prev: LayerTileResponse) => preserveLayerTilesOnFetchError(prev));
       
       // Provide more specific error messages
       let errorMessage = "Failed to fetch pest data";
@@ -1457,13 +1679,84 @@ const CropEyeMap: React.FC<MapProps> = ({
   // Memoize active URL to track changes
   const activeUrl = useMemo(() => getActiveLayerUrl(), [activeLayer, pestData, growthData, waterUptakeData, soilMoistureData]);
 
-  // Use plotBoundary if available (persists across layer changes), otherwise fall back to plotData
-  const currentPlotFeature = plotBoundary || plotData?.features?.[0];
+  // Prefer saved/my-profile boundary; fall back to analysis API geometry.
+  const profileBoundaryFeature = useMemo(() => {
+    const feature = resolveSavedPlotBoundaryFeature(
+      profile,
+      selectedPlotName,
+      optimisticProfileBoundary,
+    );
+    skipAnalysisBoundaryRef.current = !!feature?.geometry;
+    return feature;
+  }, [
+    profile,
+    selectedPlotName,
+    profileBoundaryRevision,
+    optimisticProfileBoundary,
+  ]);
+
+  useEffect(() => {
+    if (profileBoundaryFeature?.geometry) {
+      setPlotBoundary(null);
+    }
+  }, [profileBoundaryFeature, selectedPlotName]);
+
+  useEffect(() => {
+    if (!optimisticProfileBoundary) return;
+    const fromProfile = resolveSavedPlotBoundaryFeature(
+      profile,
+      selectedPlotName,
+    );
+    if (
+      fromProfile?.geometry &&
+      boundariesMatch(optimisticProfileBoundary, fromProfile.geometry)
+    ) {
+      setOptimisticProfileBoundary(null);
+    }
+  }, [profile, selectedPlotName, optimisticProfileBoundary, profileBoundaryRevision]);
+
+  const currentPlotFeature =
+    profileBoundaryFeature ?? plotBoundary ?? plotData?.features?.[0];
+
+  // Analysis API geometry (Growth/etc.) still reflects the *pre-edit* plot shape until
+  // SEF regenerates tiles. We always show those tiles when we have a URL.
+  const analysisFeature =
+    plotBoundary ??
+    plotData?.features?.[0] ??
+    growthData?.features?.[0] ??
+    waterUptakeData?.features?.[0] ??
+    soilMoistureData?.features?.[0] ??
+    pestData?.features?.[0] ??
+    null;
+  const shouldShowAnalysisOverlay = Boolean(activeUrl);
+
+  const savedBoundaryGeometry = profileBoundaryFeature?.geometry ?? null;
+  const analysisGeometry = analysisFeature?.geometry ?? null;
+  const analysisMatchesSavedBoundary =
+    !savedBoundaryGeometry ||
+    !analysisGeometry ||
+    boundariesMatch(savedBoundaryGeometry, analysisGeometry);
+
+  // Ring [[lng,lat],...] of the boundary used to clip the analysis raster overlay.
+  const analysisClipRing = useMemo(() => {
+    // After a boundary edit, tiles still match the old shape. Clipping to the new
+    // saved boundary hides the layer — skip clip until shapes match again.
+    if (!analysisMatchesSavedBoundary) return null;
+
+    const geom = savedBoundaryGeometry ?? analysisGeometry;
+    const ring = geom?.coordinates?.[0];
+    if (!Array.isArray(ring) || ring.length < 3) return null;
+    return ring as number[][];
+  }, [
+    savedBoundaryGeometry,
+    analysisGeometry,
+    analysisMatchesSavedBoundary,
+  ]);
 
   const displayAreaAcres = useMemo(
     () =>
       resolveDisplayAreaAcres({
-        plotBoundary,
+        plotBoundary: profileBoundaryFeature ?? plotBoundary,
         plotData,
         plotAreaAcres,
         profile,
@@ -1471,6 +1764,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         apiFallbackAreaAcres,
       }),
     [
+      profileBoundaryFeature,
       plotBoundary,
       plotData,
       plotAreaAcres,
@@ -1954,8 +2248,8 @@ const CropEyeMap: React.FC<MapProps> = ({
   };
 
   const renderPlotBorder = () => {
-    // Always prioritize plotBoundary (persists across layer changes)
-    let featureToUse = plotBoundary || currentPlotFeature;
+    let featureToUse =
+      profileBoundaryFeature ?? plotBoundary ?? currentPlotFeature;
     
     // If still no feature, try to get from active layer data as fallback (read-only)
     if (!featureToUse) {
@@ -1984,7 +2278,7 @@ const CropEyeMap: React.FC<MapProps> = ({
 
     return (
       <Polygon
-        key={`plot-border-${selectedPlotName}-${plotBoundary ? 'persistent' : 'temp'}`}
+        key={`plot-border-${selectedPlotName}-${profileBoundaryFeature ? "profile" : plotBoundary ? "persistent" : "temp"}`}
         positions={coords}
         pathOptions={{
           fillOpacity: 0,
@@ -2406,22 +2700,30 @@ const CropEyeMap: React.FC<MapProps> = ({
             attribution="© Google"
             maxZoom={22}
           />
+          <MapResizeWhenVisible />
 
-          {(plotBoundary || currentPlotFeature)?.geometry?.coordinates?.[0] &&
-            Array.isArray((plotBoundary || currentPlotFeature).geometry.coordinates[0]) && (
+          {(profileBoundaryFeature ?? currentPlotFeature)?.geometry?.coordinates?.[0] &&
+            Array.isArray((profileBoundaryFeature ?? currentPlotFeature).geometry.coordinates[0]) && (
             <SetPlotOverviewZoom
-              coordinates={(plotBoundary || currentPlotFeature).geometry.coordinates[0]}
+              coordinates={(profileBoundaryFeature ?? currentPlotFeature).geometry.coordinates[0]}
               refitKey={currentEndDate}
             />
           )}
 
-          {activeUrl && (
-            <CustomTileLayer
-              key={`${activeLayer}-layer-${layerChangeKey}`}
-              url={activeUrl}
-              opacity={0.7}
-              tileKey={`${activeLayer}-layer-${layerChangeKey}`}
-            />
+          {shouldShowAnalysisOverlay && (
+            <Pane name="analysisOverlay" style={{ zIndex: 350 }}>
+              <CustomTileLayer
+                key={`${activeLayer}-layer-${layerChangeKey}`}
+                url={activeUrl ?? ""}
+                opacity={0.7}
+                tileKey={`${activeLayer}-layer-${layerChangeKey}`}
+                pane="analysisOverlay"
+              />
+              <ClipPaneToBoundary
+                paneName="analysisOverlay"
+                ring={analysisClipRing}
+              />
+            </Pane>
           )}
 
           {selectedLegendClass && renderFilteredPixels()}

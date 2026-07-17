@@ -324,21 +324,20 @@ const IrrigationSchedule: React.FC = () => {
   const fetchForecastRainfall = async (lat: number, lon: number) => {
     try {
       const forecastData = await fetchWeatherForecast(lat, lon);
+      // Keep full 7-day series aligned by index with schedule days (day 0 = today).
+      // Forecast API already returns today as the first entry.
       const rainfallValues = (forecastData.data || []).map((d: any) =>
         Number(extractNumericValue(d.precipitation ?? 0))
       );
 
-      // console.log("📊 Forecast API rainfall data:", rainfallValues);
-
       const arr: number[] = [];
-      for (let i = 0; i < 6; i++) {
+      for (let i = 0; i < 7; i++) {
         arr.push(rainfallValues[i] ?? 0);
       }
       setForecastRainfall(arr);
-      // console.log("📊 Stored forecast for next 6 days:", arr);
     } catch (e) {
       // console.error("fetchForecastRainfall failed", e);
-      setForecastRainfall([0, 0, 0, 0, 0, 0]);
+      setForecastRainfall([0, 0, 0, 0, 0, 0, 0]);
     }
   };
 
@@ -439,7 +438,13 @@ const IrrigationSchedule: React.FC = () => {
 
       const isToday = i === 0;
       const etForDay = isToday ? etValue : next6Et[i - 1];
-      const rainfall = isToday ? rainfallMm : (forecastRainfall[i - 1] ?? 0);
+      // Use forecast by same day index (API day[0] = today). Prefer current-weather
+      // for today only when forecast for today is missing.
+      const forecastRain = forecastRainfall[i];
+      const rainfall =
+        isToday && (forecastRain == null || !Number.isFinite(forecastRain))
+          ? rainfallMm
+          : (forecastRain ?? 0);
 
       if (i <= 2) {
         // console.log(`Day ${i} (${date.toLocaleDateString("en-GB", { day: "numeric", month: "short" })}): ET = ${etForDay}, rainfall = ${rainfall}, range = ${getETRange(etForDay)}`);

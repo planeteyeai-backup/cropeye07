@@ -1,5 +1,10 @@
 import { getCache, setCache } from './cache';
-import { normalizePlotKey } from './plotName';
+import {
+  getPlotNameCandidates,
+  normalizePlotKey,
+  sanitizePlotName,
+  type PlotRef,
+} from './plotName';
 
 export const SAR_API_BASE_URL = 'https://admin-cropeye.up.railway.app';
 export const WATER_STRESS_TIMEOUT_MS = 180_000;
@@ -124,25 +129,39 @@ function formatPlantationDate(raw: unknown): string | undefined {
   return parsed.toISOString().slice(0, 10);
 }
 
-export async function fetchWaterStressAnalysis(
+/** Prefer slash plot names — SAR water-stress often 500s on underscore ids (64_1 vs 64/1). */
+function orderWaterStressCandidates(candidates: string[]): string[] {
+  const slashFirst = [...candidates].sort((a, b) => {
+    const aSlash = a.includes('/') ? 0 : 1;
+    const bSlash = b.includes('/') ? 0 : 1;
+    if (aSlash !== bSlash) return aSlash - bSlash;
+    return a.length - b.length;
+  });
+  const seen = new Set<string>();
+  return slashFirst.filter((name) => {
+    const key = normalizePlotKey(name);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function fetchWaterStressOnce(
   plotName: string,
-  options: { plantationDate?: unknown; endDate?: string } = {},
+  endDate: string,
+  plantationDate?: string,
 ): Promise<WaterStressResponse | null> {
-  const trimmedPlot = plotName?.trim();
-  if (!trimmedPlot) return null;
+  const cleanPlot = sanitizePlotName(plotName);
+  if (!cleanPlot) return null;
 
-  const endDate =
-    options.endDate ?? new Date().toISOString().slice(0, 10);
-  const plantationDate = formatPlantationDate(options.plantationDate);
-  const cacheKey = waterStressCacheKey(trimmedPlot, endDate, plantationDate);
-
+  const cacheKey = waterStressCacheKey(cleanPlot, endDate, plantationDate);
   const cached = getCache(cacheKey) as WaterStressResponse | null;
-  if (cached?.cci != null || cached?.stress_events != null) {
+  if (cached?.cci != null || cached?.average_cci != null || cached?.stress_events != null) {
     return cached;
   }
 
   const params = new URLSearchParams();
-  params.set('plot_name', trimmedPlot);
+  params.set('plot_name', cleanPlot);
   params.set('end_date', endDate);
   if (plantationDate) params.set('plantation_date', plantationDate);
 
@@ -165,13 +184,57 @@ export async function fetchWaterStressAnalysis(
     if (!response.ok) return null;
 
     const data = (await response.json()) as WaterStressResponse;
-    setCache(cacheKey, data);
-    return data;
+    if (data?.cci != null || data?.average_cci != null || data?.stress_events != null) {
+      setCache(cacheKey, data);
+      return data;
+    }
+    return null;
   } catch {
     return null;
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+function hasWaterStressPayload(data: WaterStressResponse | null): boolean {
+  if (!data) return false;
+  const cci = data.cci?.value ?? data.average_cci?.value;
+  return cci != null && Number.isFinite(Number(cci));
+}
+
+export async function fetchWaterStressAnalysis(
+  plotName: string,
+  options: {
+    plantationDate?: unknown;
+    endDate?: string;
+    plots?: PlotRef[] | null;
+  } = {},
+): Promise<WaterStressResponse | null> {
+  const trimmedPlot = sanitizePlotName(plotName ?? '');
+  if (!trimmedPlot) return null;
+
+  const endDate =
+    options.endDate ?? new Date().toISOString().slice(0, 10);
+  const plantationDate = formatPlantationDate(options.plantationDate);
+  const candidates = orderWaterStressCandidates(
+    getPlotNameCandidates(trimmedPlot, options.plots),
+  );
+
+  for (const candidate of candidates) {
+    if (plantationDate) {
+      const withPlant = await fetchWaterStressOnce(
+        candidate,
+        endDate,
+        plantationDate,
+      );
+      if (hasWaterStressPayload(withPlant)) return withPlant;
+    }
+
+    const withoutPlant = await fetchWaterStressOnce(candidate, endDate);
+    if (hasWaterStressPayload(withoutPlant)) return withoutPlant;
+  }
+
+  return null;
 }
 
 export function parseWaterStressMetrics(data: WaterStressResponse | null): {
@@ -189,7 +252,7 @@ export function parseWaterStressMetrics(data: WaterStressResponse | null): {
     };
   }
 
-  const cciValue = data.cci?.value;
+  const cciValue = data.cci?.value ?? data.average_cci?.value;
   const hasCci = cciValue != null && Number.isFinite(Number(cciValue));
 
   return {

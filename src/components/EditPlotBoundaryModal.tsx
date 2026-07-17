@@ -1,12 +1,15 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { MapContainer, TileLayer, FeatureGroup, useMap, Polygon, Marker } from "react-leaflet";
+import { MapContainer, TileLayer, FeatureGroup, useMap, Marker } from "react-leaflet";
 import { EditControl } from "react-leaflet-draw";
 import { AlertCircle, Loader2, MapPin, Save, Trash2, X } from "lucide-react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "leaflet-draw/dist/leaflet.draw.css";
 import { refreshApiEndpoints, updatePlotBoundary } from "../api";
+import {
+  notifyPlotBoundaryUpdated,
+} from "../utils/plotBoundarySync";
 import {
   boundaryToLeafletCoords,
   calculateAreaMetricsFromGeometry,
@@ -64,11 +67,61 @@ function MapPanTo({ center, zoom }: { center: [number, number]; zoom: number }) 
   return null;
 }
 
+/** Keep React state in sync while the user drags edit handles (before leaflet-draw Save). */
+function MapDrawSync({
+  onBoundaryChange,
+}: {
+  onBoundaryChange: (geometry: GeoJsonPolygon) => void;
+}) {
+  const map = useMap();
+
+  useEffect(() => {
+    const syncLayers = (event: L.LeafletEvent) => {
+      const layers = (event as { layers?: L.LayerGroup }).layers;
+      layers?.eachLayer((layer: L.Layer) => {
+        const geoJson = (layer as L.Polygon).toGeoJSON?.();
+        if (geoJson?.geometry?.type === "Polygon") {
+          onBoundaryChange(geoJson.geometry as GeoJsonPolygon);
+        }
+      });
+    };
+
+    map.on("draw:editvertex" as any, syncLayers);
+    map.on("draw:editmove" as any, syncLayers);
+    return () => {
+      map.off("draw:editvertex" as any, syncLayers);
+      map.off("draw:editmove" as any, syncLayers);
+    };
+  }, [map, onBoundaryChange]);
+
+  return null;
+}
+
+function polygonFromLayer(layer: L.Polygon): GeoJsonPolygon | null {
+  const geoJson = layer.toGeoJSON();
+  if (geoJson.geometry?.type === "Polygon") {
+    return geoJson.geometry as GeoJsonPolygon;
+  }
+  return null;
+}
+
+function commitPendingLayerEdits(group: L.FeatureGroup | null) {
+  if (!group) return;
+  group.eachLayer((layer) => {
+    const editing = (layer as L.Polygon & { editing?: { enabled?: () => boolean; disable?: () => void } }).editing;
+    if (editing?.enabled?.()) {
+      editing.disable?.();
+    }
+  });
+}
+
 export interface EditPlotBoundaryModalProps {
   open: boolean;
   onClose: () => void;
   plotId: number | string;
   plotLabel?: string;
+  /** Extra plot name variants (fastapi id, gat_plot, etc.) so Home Map can find the saved boundary. */
+  plotKeys?: string[];
   initialBoundary?: GeoJsonPolygon | null;
   initialLocation?: GeoJsonPoint | null;
   onSaved?: (boundary: GeoJsonPolygon | null, location: GeoJsonPoint | null) => void;
@@ -79,6 +132,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
   onClose,
   plotId,
   plotLabel,
+  plotKeys = [],
   initialBoundary,
   initialLocation,
   onSaved,
@@ -101,7 +155,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
 
   const displayBoundary = currentBoundary ?? initialBoundary ?? null;
   const leafletCoords = boundaryToLeafletCoords(displayBoundary);
-  const boundsCoords = boundaryToLeafletCoords(initialBoundary ?? currentBoundary);
+  const boundsCoords = boundaryToLeafletCoords(initialBoundary);
   const savedLocationLatLng = pointToLeafletLatLng(initialLocation ?? null);
   const markerLatLng = (() => {
     const lat = Number(latInput);
@@ -158,7 +212,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
       group.clearLayers();
       polygonLayerRef.current = null;
 
-      const boundary = initialBoundary ?? currentBoundary;
+      const boundary = initialBoundary;
       const coords = boundaryToLeafletCoords(boundary);
       if (coords.length >= 3) {
         const polygon = L.polygon(coords, {
@@ -191,9 +245,9 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [open, mapReady, initialBoundary, currentBoundary]);
+  }, [open, mapReady, initialBoundary]);
 
-  const applyGeometry = (geometry: GeoJsonPolygon) => {
+  const applyGeometry = useCallback((geometry: GeoJsonPolygon) => {
     const metrics = calculateAreaMetricsFromGeometry(geometry);
     if (!metrics) {
       setError("Could not calculate area for this shape. Please redraw.");
@@ -202,7 +256,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
     setError(null);
     setCurrentBoundary(geometry);
     setAreaAcres(metrics.acres);
-  };
+  }, []);
 
   const handleDrawCreated = (event: any) => {
     const layer = event.layer as L.Polygon;
@@ -235,21 +289,19 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
   };
 
   const resolveBoundaryFromMap = (): GeoJsonPolygon | null => {
+    commitPendingLayerEdits(featureGroupRef.current);
+
     const layer = polygonLayerRef.current;
     if (layer) {
-      const geoJson = layer.toGeoJSON();
-      if (geoJson.geometry?.type === "Polygon") {
-        return geoJson.geometry as GeoJsonPolygon;
-      }
+      const fromLayer = polygonFromLayer(layer);
+      if (fromLayer) return fromLayer;
     }
 
     if (featureGroupRef.current) {
       let fromGroup: GeoJsonPolygon | null = null;
-      featureGroupRef.current.eachLayer((layer) => {
-        const geoJson = (layer as any).toGeoJSON?.();
-        if (geoJson?.geometry?.type === "Polygon") {
-          fromGroup = geoJson.geometry as GeoJsonPolygon;
-        }
+      featureGroupRef.current.eachLayer((mapLayer) => {
+        const fromLayer = polygonFromLayer(mapLayer as L.Polygon);
+        if (fromLayer) fromGroup = fromLayer;
       });
       if (fromGroup) return fromGroup;
     }
@@ -345,6 +397,13 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
       const locationToSave = resolveLocationForSave(boundaryToSave);
       await syncPlotBoundary(boundaryToSave, locationToSave);
 
+      notifyPlotBoundaryUpdated({
+        plotKey: plotLabel || String(plotId),
+        plotId: String(plotId),
+        boundary: boundaryToSave,
+        extraPlotKeys: plotKeys,
+      });
+
       onSaved?.(boundaryToSave, locationToSave);
       onClose();
     } catch (e: any) {
@@ -367,6 +426,13 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
       setError(null);
 
       await syncPlotBoundary(null, null);
+
+      notifyPlotBoundaryUpdated({
+        plotKey: plotLabel || String(plotId),
+        plotId: String(plotId),
+        boundary: null,
+        extraPlotKeys: plotKeys,
+      });
 
       onSaved?.(null, null);
       onClose();
@@ -407,8 +473,8 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
             {hasExistingBoundary ? (
               <p>
                 <strong>How to edit:</strong> Click the <strong>square edit tool</strong> (top-right),
-                drag corners, then click the <strong>checkmark</strong> on the map toolbar.
-                Update lat/long below if needed, then click <strong>Save Boundary</strong>.
+                drag corners to resize, then click <strong>Save Boundary</strong> below (you do not need
+                the map toolbar checkmark). Update lat/long if needed.
               </p>
             ) : (
               <ol className="list-decimal space-y-1 pl-4">
@@ -488,17 +554,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
 
               {markerLatLng && <Marker position={markerLatLng} />}
 
-              {boundsCoords.length >= 3 && (
-                <Polygon
-                  positions={boundsCoords}
-                  pathOptions={{
-                    color: "#059669",
-                    weight: 3,
-                    fillOpacity: 0.2,
-                    fillColor: "#10b981",
-                  }}
-                />
-              )}
+              <MapDrawSync onBoundaryChange={applyGeometry} />
 
               <FeatureGroup ref={featureGroupRef}>
                 <EditControl

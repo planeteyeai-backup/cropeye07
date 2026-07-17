@@ -9,6 +9,11 @@ import type { GeoJsonPolygon, GeoJsonPoint } from "../utils/plotGeometry";
 import {
   resolveGeoJsonPoint,
 } from "../utils/plotGeometry";
+import { plotKeyFromRecord } from "../utils/plotName";
+import {
+  mergeBoundaryIntoProfilePayload,
+} from "../utils/plotBoundarySync";
+import { getCache, setCache } from "../utils/cache";
 
 /** Normalize boundary from API (handles nested shapes and JSON strings). */
 function normalizeBoundary(raw: any): GeoJsonPolygon | null {
@@ -182,9 +187,10 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
   const [plotBoundaryMeta, setPlotBoundaryMeta] = useState<{
     plotId: number | string | null;
     plotLabel: string;
+    plotKeys: string[];
     boundary: GeoJsonPolygon | null;
     location: GeoJsonPoint | null;
-  }>({ plotId: null, plotLabel: "", boundary: null, location: null });
+  }>({ plotId: null, plotLabel: "", plotKeys: [], boundary: null, location: null });
   const [showBoundaryEditor, setShowBoundaryEditor] = useState(false);
   const [boundaryMsg, setBoundaryMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
@@ -218,9 +224,23 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
         const plotId = nestedPlot?.id ?? null;
         const gat = nestedPlot?.gat_number ?? "";
         const plotNum = nestedPlot?.plot_number ?? "";
+        const gatPlot = gat && plotNum ? `${gat}/${plotNum}` : gat || plotNum || "";
+        const fastapi =
+          nestedPlot?.fastapi_plot_id != null
+            ? String(nestedPlot.fastapi_plot_id).trim()
+            : "";
+        const primaryKey = plotKeyFromRecord(nestedPlot) || gatPlot || String(plotId ?? "");
+        const plotKeys = [
+          primaryKey,
+          fastapi,
+          gatPlot,
+          gat && plotNum ? `${gat}_${plotNum}` : "",
+          plotId != null ? String(plotId) : "",
+        ].filter(Boolean);
         setPlotBoundaryMeta({
           plotId,
-          plotLabel: gat && plotNum ? `${gat}/${plotNum}` : gat || plotNum || "",
+          plotLabel: primaryKey || gatPlot,
+          plotKeys,
           boundary: resolvePlotBoundary(nestedPlot),
           location: resolveGeoJsonPoint(nestedPlot),
         });
@@ -565,6 +585,7 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
             onClose={() => setShowBoundaryEditor(false)}
             plotId={plotBoundaryMeta.plotId}
             plotLabel={plotBoundaryMeta.plotLabel}
+            plotKeys={plotBoundaryMeta.plotKeys}
             initialBoundary={plotBoundaryMeta.boundary}
             initialLocation={plotBoundaryMeta.location}
             onSaved={(boundary, location) => {
@@ -584,20 +605,30 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
                   },
                 };
 
+                let next: any;
                 if (Array.isArray(prev?.plots) && prev.plots.length > 0) {
                   const plots = [...prev.plots];
                   plots[0] = updatedPlot;
-                  return { ...prev, plots };
-                }
-
-                if (prev?.farm?.plot) {
-                  return {
+                  next = { ...prev, plots };
+                } else if (prev?.farm?.plot) {
+                  next = {
                     ...prev,
                     farm: { ...prev.farm, plot: updatedPlot },
                   };
+                } else {
+                  next = { ...prev, plot: updatedPlot };
                 }
 
-                return { ...prev, plot: updatedPlot };
+                // Keep Home Map's shared farmerProfile cache in sync immediately.
+                const cached = getCache("farmerProfile");
+                const merged = mergeBoundaryIntoProfilePayload(
+                  cached ?? next,
+                  plotBoundaryMeta.plotLabel || String(plotBoundaryMeta.plotId ?? ""),
+                  boundary,
+                );
+                setCache("farmerProfile", merged);
+
+                return next;
               });
               setBoundaryMsg({
                 type: "success",
