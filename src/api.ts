@@ -28,6 +28,20 @@ const AGRO_STATS_CACHE_TTL_MS = 10 * 60 * 1000;
 /** In-flight dedupe so the same FO agroStats URL is never requested twice at once. */
 const fieldOfficerAgroStatsInFlight = new Map<string, Promise<any>>();
 const managerAgroStatsInFlight = new Map<string, Promise<Record<string, unknown>>>();
+const ownerAgroStatsInFlight = new Map<string, Promise<Record<string, unknown>>>();
+
+/** Short-lived cache + in-flight dedupe for /users/me/ and team-connect
+ *  so the owner dashboard + agroStats helper share one network request each. */
+const USER_TEAM_CACHE_TTL_MS = 5 * 60 * 1000;
+let currentUserInFlight: Promise<any> | null = null;
+let currentUserCache: { res: any; ts: number } | null = null;
+const teamConnectInFlight = new Map<string, Promise<any>>();
+const teamConnectCache = new Map<string, { res: any; ts: number }>();
+
+export function ownerAgroStatsCacheKey(endDate?: string): string {
+  const date = endDate || "latest";
+  return `ownerAgroStats_${date}`;
+}
 
 export function fieldOfficerAgroStatsCacheKey(
   fieldOfficerId: string | number,
@@ -734,7 +748,22 @@ export const registerUser = (data: {
 // };
 
 export const getCurrentUser = () => {
-  return api.get("/users/me/");
+  const now = Date.now();
+  if (currentUserCache && now - currentUserCache.ts < USER_TEAM_CACHE_TTL_MS) {
+    return Promise.resolve(currentUserCache.res);
+  }
+  if (currentUserInFlight) return currentUserInFlight;
+
+  currentUserInFlight = api
+    .get("/users/me/")
+    .then((res) => {
+      currentUserCache = { res, ts: Date.now() };
+      return res;
+    })
+    .finally(() => {
+      currentUserInFlight = null;
+    });
+  return currentUserInFlight;
 };
 
 export const getUserById = (id: string | number) => {
@@ -855,11 +884,30 @@ export const getTotalCounts = () => {
 };
 
 // Get team connect data (owners, field officers, farmers)
+// Cached + deduped: dashboard and agroStats helper share one network hit per industry.
 export const getTeamConnect = (industryId?: number | string) => {
+  const key = industryId != null ? String(industryId) : "__none__";
+  const cached = teamConnectCache.get(key);
+  if (cached && Date.now() - cached.ts < USER_TEAM_CACHE_TTL_MS) {
+    return Promise.resolve(cached.res);
+  }
+  const existing = teamConnectInFlight.get(key);
+  if (existing) return existing;
+
   const url = industryId
     ? `/users/team-connect/?industry_id=${industryId}`
     : `/users/team-connect/`;
-  return api.get(url);
+  const pending = api
+    .get(url)
+    .then((res) => {
+      teamConnectCache.set(key, { res, ts: Date.now() });
+      return res;
+    })
+    .finally(() => {
+      teamConnectInFlight.delete(key);
+    });
+  teamConnectInFlight.set(key, pending);
+  return pending;
 };
 
 // Messaging API functions
@@ -1640,39 +1688,69 @@ const convertToAllInOneFormat = (formData: any, plots: any[]) => {
 // ==================== SYSTEM/UTILITY API ====================
 
 /**
- * Refreshes various microservice endpoints after a new farm/plot registration.
- * This ensures that other services are aware of the newly created data.
- *
- * It calls multiple endpoints in parallel and returns the results.
+ * Refreshes various microservice endpoints after a new farm/plot registration
+ * or plot boundary edit so Growth/Water/Soil/Pest can pick up the new geometry.
  */
-export const refreshApiEndpoints = async () => {
+export const refreshApiEndpoints = async (opts?: {
+  plotName?: string;
+  plotId?: string | number;
+}) => {
   const refreshEndpoints = [
     "https://admin-cropeye.up.railway.app/refresh-from-django",
     "https://main-cropeye.up.railway.app/refresh-from-django",
     "https://events-cropeye.up.railway.app/refresh-from-django",
     "https://sef-cropeye.up.railway.app/refresh-from-django",
     "https://cropeye-database-production.up.railway.app/refresh-from-django",
-    "https://incredible-magic-production-bd49.up.railway.app/trigger-new-plot"
+    "https://incredible-magic-production-bd49.up.railway.app/trigger-new-plot",
   ];
 
-  const refreshPromises = refreshEndpoints.map((endpoint) =>
-    api.post(endpoint, {}).then(
-      (response) => {
-        return { endpoint, status: "success", ok: true, response };
-      },
-      (error) => {
+  const body: Record<string, string> = {};
+  if (opts?.plotName?.trim()) body.plot_name = opts.plotName.trim();
+  if (opts?.plotId != null && `${opts.plotId}`.trim()) {
+    body.plot_id = String(opts.plotId).trim();
+  }
+
+  const refreshPromises = refreshEndpoints.map(async (endpoint) => {
+    try {
+      // Use plain fetch (not Django `api`) — these hosts are separate services.
+      const response = await fetch(endpoint, {
+        method: "POST",
+        mode: "cors",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "");
         return {
           endpoint,
           status: "failed",
           ok: false,
-          error: error.response?.data || error.message,
+          error: errorText || `HTTP ${response.status}`,
         };
-      },
-    ),
-  );
+      }
+      return { endpoint, status: "success", ok: true, response };
+    } catch (error: any) {
+      return {
+        endpoint,
+        status: "failed",
+        ok: false,
+        error: error?.message || String(error),
+      };
+    }
+  });
 
-  // Use Promise.allSettled to ensure all promises complete, regardless of success or failure
   const results = await Promise.allSettled(refreshPromises);
+  if (import.meta.env.DEV) {
+    console.log(
+      "[refresh-from-django]",
+      results.map((r) =>
+        r.status === "fulfilled" ? r.value : { status: "rejected", error: r.reason },
+      ),
+    );
+  }
   return results;
 };
 
@@ -1890,6 +1968,36 @@ export const getManagerFieldOfficersAgroStats = async (
  * Fetches field officers from team-connect and then hits events-cropeye for each.
  */
 export const getOwnerFieldOfficersAgroStats = async (
+  endDate?: string,
+): Promise<Record<string, unknown>> => {
+  const mergedKey = ownerAgroStatsCacheKey(endDate);
+
+  const cached = getCache(mergedKey, AGRO_STATS_CACHE_TTL_MS) as
+    | Record<string, unknown>
+    | null;
+  if (cached && Object.keys(cached).length > 0) {
+    return cached;
+  }
+
+  const inFlight = ownerAgroStatsInFlight.get(mergedKey);
+  if (inFlight) return inFlight;
+
+  const pending = fetchOwnerFieldOfficersAgroStats(endDate)
+    .then((merged) => {
+      if (merged && Object.keys(merged).length > 0) {
+        setCache(mergedKey, merged);
+      }
+      return merged;
+    })
+    .finally(() => {
+      ownerAgroStatsInFlight.delete(mergedKey);
+    });
+
+  ownerAgroStatsInFlight.set(mergedKey, pending);
+  return pending;
+};
+
+const fetchOwnerFieldOfficersAgroStats = async (
   endDate?: string,
 ): Promise<Record<string, unknown>> => {
   const meRes = await getCurrentUser();

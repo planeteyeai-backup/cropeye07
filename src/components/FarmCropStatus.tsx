@@ -292,6 +292,17 @@ const OfficerDashboard: React.FC = () => {
       } else {
         setPlotCoordinates([]);
       }
+    } else if (plot?.geometry?.coordinates) {
+      const geom = (plot.geometry.coordinates as [number, number][][])[0];
+      if (geom) {
+        const coords = geom.map(([lng, lat]: [number, number]) => [lat, lng]) as [number, number][];
+        setPlotCoordinates(coords);
+        const center = calculateCenter(coords);
+        setMapCenter(center);
+        setMapKey((prev) => prev + 1);
+      } else {
+        setPlotCoordinates([]);
+      }
     } else {
       setPlotCoordinates([]);
     }

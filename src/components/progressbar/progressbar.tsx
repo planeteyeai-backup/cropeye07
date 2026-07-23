@@ -1,10 +1,20 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
-import { Check, X, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Check, X, ChevronLeft, ChevronRight, TrendingUp } from 'lucide-react';
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 import {
   createFarmerNote,
   getFarmerNotes,
   type FarmerNote,
 } from '../../api';
+import { sanitizeYieldReadings } from './yieldReadingUtils';
 import { isPlanetEyeDemoUser } from '../../utils/auth';
 import type { FactoryId } from './factoryProgressTypes';
 import type { FarmerProgressConfig } from './progressData';
@@ -568,6 +578,152 @@ const ProgressDot: React.FC<{
   );
 };
 
+const FarmerYieldChartModal: React.FC<{
+  farmerName: string;
+  readings: { yield: number; date: string }[];
+  onClose: () => void;
+}> = ({ farmerName, readings, onClose }) => {
+  const data = useMemo(
+    () =>
+      sanitizeYieldReadings(readings).map((reading) => {
+        const parsed = new Date(reading.date);
+        return {
+          date: parsed.toLocaleDateString('en-IN', {
+            day: '2-digit',
+            month: 'short',
+          }),
+          fullDate: parsed.toLocaleDateString('en-IN', {
+            day: '2-digit',
+            month: 'short',
+            year: 'numeric',
+          }),
+          yield: Number(reading.yield),
+        };
+      }),
+    [readings],
+  );
+
+  const latestYield =
+    data.length > 0 ? data[data.length - 1].yield.toFixed(1) : null;
+
+  return (
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/45 p-3 sm:p-6"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+    >
+      <div
+        className="flex max-h-[92vh] w-full max-w-5xl flex-col rounded-2xl bg-white p-4 shadow-2xl sm:p-6"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h3
+              className="truncate text-base font-semibold sm:text-lg"
+              style={{ color: T.text }}
+            >
+              {farmerName}
+            </h3>
+            <p className="mt-0.5 text-sm text-slate-500">
+              Yield history (T/acre)
+              {latestYield != null && (
+                <span className="ml-2 font-semibold" style={{ color: T.active }}>
+                  Latest: {latestYield} T/acre
+                </span>
+              )}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="shrink-0 rounded-md p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+            aria-label="Close chart"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        {data.length === 0 ? (
+          <div className="flex h-[420px] items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 text-center">
+            <p className="text-sm text-slate-500">
+              No yield history for this farmer yet.
+            </p>
+          </div>
+        ) : (
+          <div className="min-h-0 w-full flex-1">
+            <ResponsiveContainer width="100%" height={440}>
+              <LineChart
+                data={data}
+                margin={{ top: 16, right: 28, left: 8, bottom: 24 }}
+              >
+                <CartesianGrid
+                  strokeDasharray="3 3"
+                  stroke="#e2e8f0"
+                  vertical={false}
+                />
+                <XAxis
+                  dataKey="date"
+                  tick={{ fontSize: 12, fill: '#475569' }}
+                  tickLine={false}
+                  axisLine={{ stroke: '#cbd5e1' }}
+                  interval="preserveStartEnd"
+                  minTickGap={28}
+                />
+                <YAxis
+                  tick={{ fontSize: 12, fill: '#475569' }}
+                  tickLine={false}
+                  axisLine={{ stroke: '#cbd5e1' }}
+                  width={52}
+                  domain={['auto', 'auto']}
+                  label={{
+                    value: 'Yield (T/acre)',
+                    angle: -90,
+                    position: 'insideLeft',
+                    offset: 0,
+                    style: {
+                      fontSize: 13,
+                      fill: '#475569',
+                      fontWeight: 600,
+                      textAnchor: 'middle',
+                    },
+                  }}
+                />
+                <Tooltip
+                  formatter={(value: number) => [
+                    `${Number(value).toFixed(1)} T/acre`,
+                    'Yield',
+                  ]}
+                  labelFormatter={(_label, payload) =>
+                    (payload?.[0]?.payload as { fullDate?: string })?.fullDate ??
+                    ''
+                  }
+                  contentStyle={{
+                    borderRadius: 10,
+                    border: '1px solid #e2e8f0',
+                    fontSize: 13,
+                    padding: '10px 12px',
+                  }}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="yield"
+                  name="Yield"
+                  stroke={T.active}
+                  strokeWidth={3}
+                  dot={{ r: 5, fill: T.active, strokeWidth: 2, stroke: '#fff' }}
+                  activeDot={{ r: 7, strokeWidth: 2, stroke: '#fff' }}
+                  isAnimationActive={false}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const FarmerRow: React.FC<{
   farmer: FarmerTimeline;
   visibleNodes: TimelineNode[];
@@ -594,6 +750,7 @@ const FarmerRow: React.FC<{
   canGoNextSection: boolean;
   onPrevSection: () => void;
   onNextSection: () => void;
+  onOpenChart?: (farmerId: string) => void;
 }> = ({
   farmer,
   visibleNodes,
@@ -615,6 +772,7 @@ const FarmerRow: React.FC<{
   canGoNextSection,
   onPrevSection,
   onNextSection,
+  onOpenChart,
 }) => {
   const getActionForNode = (nodeKey: string) => actions[nodeKey] ?? null;
 
@@ -688,6 +846,18 @@ const FarmerRow: React.FC<{
         <p className="min-w-0 truncate text-xs font-semibold sm:text-sm" style={{ color: T.text }}>
           {farmer.farmerName}
         </p>
+        {onOpenChart && (
+          <button
+            type="button"
+            onClick={() => onOpenChart(farmer.farmerId)}
+            className="ml-auto flex shrink-0 items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[10px] font-semibold text-slate-600 transition hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700 sm:text-xs"
+            title="View yield line chart"
+            aria-label={`View yield chart for ${farmer.farmerName}`}
+          >
+            <TrendingUp className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Graph</span>
+          </button>
+        )}
       </div>
 
       <div className="flex items-center gap-1 sm:gap-1.5">
@@ -841,6 +1011,7 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     Record<string, MonthSectionLabel>
   >({});
   const [viewMode, setViewMode] = useState<ProgressViewMode>('live');
+  const [chartFarmerId, setChartFarmerId] = useState<string | null>(null);
 
   const applyLatestSections = () => {
     setFarmerSections(() => {
@@ -1084,11 +1255,7 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
                 key={farmer.farmerId}
                 farmer={farmer}
                 visibleNodes={visibleNodes}
-                columnCount={
-                  viewMode === 'history'
-                    ? WEEKS_PER_SECTION
-                    : Math.max(visibleNodes.length, 1)
-                }
+                columnCount={Math.max(visibleNodes.length, 1)}
                 activeNode={activeNode}
                 noteOpenKey={noteOpenKey}
                 notes={notes}
@@ -1130,6 +1297,7 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
                     MONTH_SECTIONS[farmerSectionIndex + 1].label,
                   );
                 }}
+                onOpenChart={setChartFarmerId}
               />
               );
             })
@@ -1194,6 +1362,19 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
           {/* Select a month → 10 weekly dots · click dot for Yes/No action */}
         </span>
       </div>
+
+      {chartFarmerId && (
+        <FarmerYieldChartModal
+          farmerName={
+            displayFarmers.find((f) => f.farmerId === chartFarmerId)
+              ?.farmerName ??
+            configByFarmerId.get(chartFarmerId)?.farmerName ??
+            'Farmer'
+          }
+          readings={configByFarmerId.get(chartFarmerId)?.yieldReadings ?? []}
+          onClose={() => setChartFarmerId(null)}
+        />
+      )}
     </div>
   );
 };

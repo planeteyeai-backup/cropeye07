@@ -4,6 +4,15 @@ export type PlotRef = {
   plot_number?: string;
   plot_name?: string;
   id?: string | number;
+  /** Optional GeoJSON-style boundary when API/profile includes it. */
+  boundary?: {
+    type?: string;
+    coordinates?: [number, number][][] | number[][][];
+  } | null;
+  geometry?: {
+    type?: string;
+    coordinates?: [number, number][][] | number[][][];
+  } | null;
 };
 
 /** Normalize plot identifiers for comparison (slashes/spaces → underscore, lowercase). */

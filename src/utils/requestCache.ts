@@ -1,4 +1,4 @@
-import { getCache, setCache } from "./cache";
+import { getCache, setCache, removeCache } from "./cache";
 
 type Jsonish = any;
 
@@ -11,6 +11,8 @@ export type GetOrFetchJsonOptions = {
   fetchInit?: RequestInit;
   /** LocalStorage TTL. If omitted, no localStorage read/write is performed. */
   ttlMs?: number;
+  /** Skip localStorage + in-flight reuse (use after plot boundary edit). */
+  forceRefresh?: boolean;
 };
 
 /**
@@ -24,13 +26,17 @@ export async function getOrFetchJson({
   url,
   fetchInit,
   ttlMs,
+  forceRefresh = false,
 }: GetOrFetchJsonOptions): Promise<Jsonish> {
-  if (ttlMs != null) {
+  if (forceRefresh) {
+    removeCache(key);
+    inFlight.delete(key);
+  } else if (ttlMs != null) {
     const cached = getCache(key, ttlMs);
     if (cached != null) return cached;
   }
 
-  const existing = inFlight.get(key);
+  const existing = !forceRefresh ? inFlight.get(key) : undefined;
   if (existing) return existing;
 
   const p = (async () => {
@@ -52,5 +58,10 @@ export async function getOrFetchJson({
 
   inFlight.set(key, p);
   return p;
+}
+
+/** Drop an in-flight layer request so the next call hits the network. */
+export function cancelInFlightRequest(key: string): void {
+  inFlight.delete(key);
 }
 

@@ -1,7 +1,13 @@
 import type { IndustrialYieldFarmer, IndustrialYieldFactory } from './industrialYieldTypes';
 import type { PublicFactory, PublicFactoryFarmer } from './factoryProgressTypes';
 import type { FarmerProgressConfig } from './progressData';
-import { weeksDoneFromPlantation, weeksDoneFromYieldReadings, pickChartFarmers } from './mapFactoryFarmers';
+import {
+  weeksDoneFromPlantation,
+  weeksDoneFromYieldReadings,
+  pickChartFarmers,
+  readFarmerVariety,
+  readFarmerBudMethod,
+} from './mapFactoryFarmers';
 import {
   pickChartYieldReading,
   pickLatestYieldReading,
@@ -30,6 +36,8 @@ export function mapIndustrialFarmerToProgressConfig(
     yieldDate: latest?.date ?? null,
     hasYieldData: sortedYields.length > 0,
     phoneNumber: farmer.phone_number ?? null,
+    variety: readFarmerVariety(farmer),
+    budMethod: readFarmerBudMethod(farmer),
     weeksDonePerSection:
       sortedYields.length > 0
         ? weeksDoneFromYieldReadings(sortedYields)
@@ -98,6 +106,8 @@ export function mergePublicFarmerWithIndustrialYield(
     yieldDate: latest.date,
     hasYieldData: true,
     phoneNumber: config.phoneNumber ?? industrial?.phone_number ?? null,
+    variety: config.variety ?? readFarmerVariety(industrial),
+    budMethod: config.budMethod ?? readFarmerBudMethod(industrial),
     weeksDonePerSection: weeksDoneFromYieldReadings(sortedYields),
   };
 }
@@ -112,6 +122,9 @@ export function industrialFarmerToPublicFarmer(
     farmer_name: farmer.farmer_name,
     phone_number: farmer.phone_number,
     plantation_date: farmer.plantation_date,
+    crop_variety: farmer.crop_variety ?? null,
+    planting_method: farmer.planting_method ?? null,
+    plantation_type: farmer.plantation_type ?? null,
     yield: latest?.yield ?? null,
     date: latest?.date ?? null,
   };

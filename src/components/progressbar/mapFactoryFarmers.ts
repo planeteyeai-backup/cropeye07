@@ -13,6 +13,45 @@ function parseYieldNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function firstNonEmptyString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim() !== '') return value.trim();
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  }
+  return null;
+}
+
+/** Crop variety from a raw farmer/plot object — backend field names vary. */
+export function readFarmerVariety(farmer: unknown): string | null {
+  const f = (farmer ?? {}) as Record<string, unknown>;
+  const cropType =
+    f.crop_type && typeof f.crop_type === 'object'
+      ? (f.crop_type as Record<string, unknown>)
+      : null;
+  return firstNonEmptyString(
+    f.crop_variety,
+    f.variety,
+    f.cane_variety,
+    f.sugarcane_variety,
+    cropType?.crop_variety,
+    cropType?.variety,
+  );
+}
+
+/** Planting method (bud) — prefer planting_method over plantation_type (season). */
+export function readFarmerBudMethod(farmer: unknown): string | null {
+  const f = (farmer ?? {}) as Record<string, unknown>;
+  return firstNonEmptyString(
+    f.planting_method,
+    f.plantation_method,
+    f.bud_method,
+    f.bud,
+    f.plantation_type_display,
+    // plantation_type is often season (Adsali) — use only if no planting_method.
+    f.plantation_type,
+  );
+}
+
 function normalizeYieldTons(value: number | null | undefined): number {
   const parsed = parseYieldNumber(value);
   if (parsed == null) return 0;
@@ -92,6 +131,8 @@ export function mapPublicFarmerBaseConfig(
     yieldReadings: undefined,
     yieldDate: null,
     phoneNumber: farmer.phone_number ?? null,
+    variety: readFarmerVariety(farmer),
+    budMethod: readFarmerBudMethod(farmer),
   };
 }
 
@@ -123,6 +164,8 @@ export function mapApiFarmerToProgressConfig(
     yieldReadings,
     yieldDate: farmer.date ?? farmer.plantation_date ?? null,
     phoneNumber: farmer.phone_number ?? null,
+    variety: readFarmerVariety(farmer),
+    budMethod: readFarmerBudMethod(farmer),
   };
 }
 

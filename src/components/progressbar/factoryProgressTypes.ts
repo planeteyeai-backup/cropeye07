@@ -3,6 +3,12 @@ export interface PublicFactoryFarmer {
   farmer_name: string;
   phone_number: string;
   plantation_date: string | null;
+  /** Sugarcane variety — from local/public-factory-farmers when available. */
+  crop_variety?: string | null;
+  /** Bud / planting method e.g. "3 Bud Method". */
+  planting_method?: string | null;
+  /** Season type e.g. Adsali / Pre-Seasonal (not the bud method). */
+  plantation_type?: string | null;
   yield: number | null;
   date: string | null;
 }

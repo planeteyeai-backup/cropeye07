@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useMemo, useRef } from "react";
 import { MapContainer, TileLayer, Polygon, useMap, Circle, Pane } from "react-leaflet";
-import { LatLngTuple, LeafletMouseEvent, LatLngBounds } from "leaflet";
+import { LatLngTuple, LatLngBounds } from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "./Map.css";
 import { useFarmerProfile } from "../hooks/useFarmerProfile";
@@ -10,7 +10,7 @@ import { ArrowLeft, Loader2 } from 'lucide-react';
 import { AnalysisTimelineRibbon } from "./AnalysisTimelineRibbon";
 import { getOrFetchJson } from "../utils/requestCache";
 import { resolveApiPlotName, plotKeyFromRecord } from "../utils/plotName";
-import { getCache } from "../utils/cache";
+import { getCache, removeCache, removeCachesMatchingPlot } from "../utils/cache";
 import {
   fetchAnalysisTimeline,
   sortedRebinDatesForLayer,
@@ -395,13 +395,13 @@ function layerApiEndDate(uiDateIso: string): string {
   return `${y}-${mo}-${d}`;
 }
 
-/** Overview framing: wider context like satellite overview (~zoom ≤16); refit when date changes. */
-const PLOT_VIEW_MAX_ZOOM = 16;
-const PLOT_FIT_PADDING_PX = 56;
+/** Overview framing: zoom in enough to see analysis tiles inside the yellow border. */
+const PLOT_VIEW_MAX_ZOOM = 18;
+const PLOT_FIT_PADDING_PX = 48;
 
 const SetPlotOverviewZoom: React.FC<{
   coordinates: number[][];
-  /** Bumps effect when user picks another date so the map re-frames even if boundary coords match. */
+  /** Bumps effect when user picks another date / plot / layer so the map re-frames. */
   refitKey?: string;
 }> = ({ coordinates, refitKey }) => {
   const map = useMap();
@@ -417,31 +417,28 @@ const SetPlotOverviewZoom: React.FC<{
     if (!latlngs.length) return;
 
     const bounds = new LatLngBounds(latlngs as LatLngTuple[]);
-    map.fitBounds(bounds, {
-      padding: [PLOT_FIT_PADDING_PX, PLOT_FIT_PADDING_PX],
-      maxZoom: PLOT_VIEW_MAX_ZOOM,
-      animate: true,
-    });
+    if (!bounds.isValid()) return;
+
+    const fit = () => {
+      map.invalidateSize({ animate: false });
+      map.fitBounds(bounds, {
+        padding: [PLOT_FIT_PADDING_PX, PLOT_FIT_PADDING_PX],
+        maxZoom: PLOT_VIEW_MAX_ZOOM,
+        animate: false,
+      });
+    };
+
+    // Fit immediately and again after layout settles (My Plot split column can start 0-height).
+    fit();
+    const t1 = window.setTimeout(fit, 120);
+    const t2 = window.setTimeout(fit, 400);
+    return () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+    };
   }, [coordinates, map, refitKey]);
 
   return null;
-};
-
-// Function to check if a point is inside polygon
-const isPointInPolygon = (point: [number, number], polygon: [number, number][]): boolean => {
-  const [x, y] = point;
-  let inside = false;
-
-  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-    const [xi, yi] = polygon[i];
-    const [xj, yj] = polygon[j];
-
-    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
-      inside = !inside;
-    }
-  }
-
-  return inside;
 };
 
 interface MapProps {
@@ -472,7 +469,7 @@ const CustomTileLayer: React.FC<{
       url={url}
       opacity={opacity}
       maxZoom={22}
-      minZoom={10}
+      minZoom={1}
       tileSize={256}
       pane={pane}
       eventHandlers={{
@@ -611,10 +608,7 @@ type LayerTileResponse = {
 } | null;
 
 const CropEyeMap: React.FC<MapProps> = ({
-  onHealthDataChange,
-  onSoilDataChange,
   onFieldAnalysisChange,
-  onMoistGroundChange,
   onPestDataChange,
   onSplitScreen,
 }) => {
@@ -648,8 +642,6 @@ const CropEyeMap: React.FC<MapProps> = ({
   const [soilMoistureData, setSoilMoistureData] = useState<any>(null);
   const [pestData, setPestData] = useState<any>(null);
 
-  const [hoveredPlotInfo, setHoveredPlotInfo] = useState<any>(null);
-  const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [selectedLegendClass, setSelectedLegendClass] = useState<string | null>(null);
   const [layerChangeKey, setLayerChangeKey] = useState(0);
   const [pixelTooltip, setPixelTooltip] = useState<{layers: Array<{layer: string, label: string, description: string, percentage: number}>, x: number, y: number} | null>(null);
@@ -896,16 +888,56 @@ const CropEyeMap: React.FC<MapProps> = ({
           }));
       if (!samePlot) return;
 
+      // Drop old Growth/Water/Soil/Pest tiles immediately so the previous
+      // green analysis shape cannot sit under the new yellow border.
+      const apiPlot = plotNameForApi(selectedPlotName);
+      removeCachesMatchingPlot(selectedPlotName);
+      removeCachesMatchingPlot(apiPlot);
+      if (detail?.plotKey) removeCachesMatchingPlot(detail.plotKey);
+      if (detail?.plotId) removeCachesMatchingPlot(detail.plotId);
+      [
+        `layer:growth:${apiPlot}:${currentEndDate}`,
+        `layer:water:${apiPlot}:${currentEndDate}`,
+        `layer:soil:${apiPlot}:${currentEndDate}`,
+        `layer:pest:${apiPlot}:${currentEndDate}`,
+        `growthData_${apiPlot}`,
+        `waterUptakeData_${apiPlot}`,
+        `soilMoistureData_${apiPlot}`,
+        `pestData_${apiPlot}`,
+      ].forEach((key) => removeCache(key));
+
+      layerTilesCacheRef.current.clear();
+      // Keep current layer payloads until force refresh returns — avoids a blank map.
+      // Clip uses the new yellow border so the old triangle cannot spill outside it.
+      skipAnalysisBoundaryRef.current = true;
+      setLayerChangeKey((key) => key + 1);
       initialFetchDoneRef.current = false;
-      void Promise.all([
-        fetchGrowthData(selectedPlotName),
-        fetchWaterUptakeData(selectedPlotName),
-        fetchSoilMoistureData(selectedPlotName),
-        fetchPestData(selectedPlotName),
-        fetchPlotData(selectedPlotName),
-      ]).catch((err) => {
-        console.warn("[Map] Layer refresh after boundary edit failed:", err);
-      });
+
+      const forceReloadLayers = async () => {
+        await Promise.all([
+          fetchGrowthData(selectedPlotName, { forceRefresh: true }),
+          fetchWaterUptakeData(selectedPlotName, { forceRefresh: true }),
+          fetchSoilMoistureData(selectedPlotName, { forceRefresh: true }),
+          fetchPestData(selectedPlotName, { forceRefresh: true }),
+          fetchPlotData(selectedPlotName),
+        ]);
+      };
+
+      // Reload immediately so Growth/etc. stay visible; retry after Admin refresh.
+      void (async () => {
+        try {
+          await forceReloadLayers();
+          skipAnalysisBoundaryRef.current = false;
+          await new Promise((r) => setTimeout(r, 5000));
+          await forceReloadLayers();
+          await new Promise((r) => setTimeout(r, 15000));
+          await forceReloadLayers();
+        } catch (err) {
+          console.warn("[Map] Layer refresh after boundary edit failed:", err);
+        } finally {
+          skipAnalysisBoundaryRef.current = false;
+        }
+      })();
     };
 
     window.addEventListener(PLOT_BOUNDARY_UPDATED_EVENT, onBoundaryUpdated);
@@ -1014,44 +1046,52 @@ const CropEyeMap: React.FC<MapProps> = ({
     }
   };
 
-  const fetchGrowthData = async (plotName: string) => {
+  const fetchGrowthData = async (
+    plotName: string,
+    options?: { forceRefresh?: boolean },
+  ) => {
     if (!plotName) return;
     const apiPlot = plotNameForApi(plotName);
+    const forceRefresh = Boolean(options?.forceRefresh);
 
     const apiEndDate = layerApiEndDate(currentEndDate);
     const memKey = `growth:${apiPlot}:${currentEndDate}`;
-    if (layerTilesCacheRef.current.has(memKey)) {
+    const today = new Date().toISOString().split("T")[0];
+    const sharedKey = `layer:growth:${apiPlot}:${currentEndDate}`;
+    const sharedTtlMs =
+      currentEndDate === today ? 10 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+
+    if (forceRefresh) {
+      layerTilesCacheRef.current.delete(memKey);
+      removeCache(sharedKey);
+      removeCache(`growthData_${apiPlot}`);
+    } else if (layerTilesCacheRef.current.has(memKey)) {
       const hit = layerTilesCacheRef.current.get(memKey) as any;
       setGrowthData(hit ?? null);
       if (!skipAnalysisBoundaryRef.current && !plotBoundary && hit?.features?.[0]?.geometry) {
         setPlotBoundary(hit.features[0]);
       }
       return;
-    }
-
-    // Check cache first (only for today's date to ensure freshness)
-    const today = new Date().toISOString().split('T')[0];
-    const sharedKey = `layer:growth:${apiPlot}:${currentEndDate}`;
-    const sharedTtlMs = currentEndDate === today ? 10 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
-    const sharedCached = getCache(sharedKey, sharedTtlMs);
-    if (sharedCached) {
-      layerTilesCacheRef.current.set(memKey, sharedCached);
-      setGrowthData(sharedCached);
-      if (!skipAnalysisBoundaryRef.current && !plotBoundary && sharedCached?.features?.[0]?.geometry) {
-        setPlotBoundary(sharedCached.features[0]);
-      }
-      return;
-    }
-    // Back-compat: older cache key used by prefetch/login
-    if (currentEndDate === today) {
-      const cachedData = getCached(`growthData_${apiPlot}`);
-      if (cachedData) {
-        layerTilesCacheRef.current.set(memKey, cachedData);
-        setGrowthData(cachedData);
-        if (!skipAnalysisBoundaryRef.current && !plotBoundary && cachedData?.features?.[0]?.geometry) {
-          setPlotBoundary(cachedData.features[0]);
+    } else {
+      const sharedCached = getCache(sharedKey, sharedTtlMs);
+      if (sharedCached) {
+        layerTilesCacheRef.current.set(memKey, sharedCached);
+        setGrowthData(sharedCached);
+        if (!skipAnalysisBoundaryRef.current && !plotBoundary && sharedCached?.features?.[0]?.geometry) {
+          setPlotBoundary(sharedCached.features[0]);
         }
         return;
+      }
+      if (currentEndDate === today) {
+        const cachedData = getCached(`growthData_${apiPlot}`);
+        if (cachedData) {
+          layerTilesCacheRef.current.set(memKey, cachedData);
+          setGrowthData(cachedData);
+          if (!skipAnalysisBoundaryRef.current && !plotBoundary && cachedData?.features?.[0]?.geometry) {
+            setPlotBoundary(cachedData.features[0]);
+          }
+          return;
+        }
       }
     }
 
@@ -1069,6 +1109,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         key: sharedKey,
         url,
         ttlMs: sharedTtlMs,
+        forceRefresh,
         fetchInit: {
           method: "POST",
           mode: "cors",
@@ -1121,13 +1162,26 @@ const CropEyeMap: React.FC<MapProps> = ({
     }
   };
 
-  const fetchWaterUptakeData = async (plotName: string) => {
+  const fetchWaterUptakeData = async (
+    plotName: string,
+    options?: { forceRefresh?: boolean },
+  ) => {
     if (!plotName) return;
     const apiPlot = plotNameForApi(plotName);
+    const forceRefresh = Boolean(options?.forceRefresh);
 
     const apiEndDate = layerApiEndDate(currentEndDate);
     const memKey = `water:${apiPlot}:${currentEndDate}`;
-    if (layerTilesCacheRef.current.has(memKey)) {
+    const today = new Date().toISOString().split("T")[0];
+    const sharedKey = `layer:water:${apiPlot}:${currentEndDate}`;
+    const sharedTtlMs =
+      currentEndDate === today ? 10 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+
+    if (forceRefresh) {
+      layerTilesCacheRef.current.delete(memKey);
+      removeCache(sharedKey);
+      removeCache(`waterUptakeData_${apiPlot}`);
+    } else if (layerTilesCacheRef.current.has(memKey)) {
       const hit = layerTilesCacheRef.current.get(memKey) as any;
       setWaterUptakeData(hit ?? null);
       if (!skipAnalysisBoundaryRef.current && !plotBoundary && hit?.features?.[0]?.geometry) {
@@ -1137,9 +1191,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     }
 
     // Check cache first (only for today's date to ensure freshness)
-    const today = new Date().toISOString().split('T')[0];
-    const sharedKey = `layer:water:${apiPlot}:${currentEndDate}`;
-    const sharedTtlMs = currentEndDate === today ? 10 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+    if (!forceRefresh) {
     const sharedCached = getCache(sharedKey, sharedTtlMs);
     if (sharedCached) {
       layerTilesCacheRef.current.set(memKey, sharedCached);
@@ -1161,6 +1213,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         return;
       }
     }
+    }
 
     // Use direct backend URL in production (proxy only works in dev)
     // const baseUrl = import.meta.env.DEV 
@@ -1176,6 +1229,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         key: sharedKey,
         url,
         ttlMs: sharedTtlMs,
+        forceRefresh,
         fetchInit: {
           method: "POST",
           mode: "cors",
@@ -1228,13 +1282,21 @@ const CropEyeMap: React.FC<MapProps> = ({
     }
   };
 
-  const fetchSoilMoistureData = async (plotName: string) => {
+  const fetchSoilMoistureData = async (
+    plotName: string,
+    options?: { forceRefresh?: boolean },
+  ) => {
     if (!plotName) return;
     const apiPlot = plotNameForApi(plotName);
+    const forceRefresh = Boolean(options?.forceRefresh);
 
     const apiEndDate = layerApiEndDate(currentEndDate);
     const memKey = `soil:${apiPlot}:${currentEndDate}`;
-    if (layerTilesCacheRef.current.has(memKey)) {
+    if (forceRefresh) {
+      removeCache(`layer:soil:${apiPlot}:${currentEndDate}`);
+      removeCache(`soilMoistureData_${apiPlot}`);
+      layerTilesCacheRef.current.delete(memKey);
+    } else if (layerTilesCacheRef.current.has(memKey)) {
       const hit = layerTilesCacheRef.current.get(memKey) as any;
       setSoilMoistureData(hit ?? null);
       if (!skipAnalysisBoundaryRef.current && !plotBoundary && hit?.features?.[0]?.geometry) {
@@ -1247,6 +1309,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     const today = new Date().toISOString().split('T')[0];
     const sharedKey = `layer:soil:${apiPlot}:${currentEndDate}`;
     const sharedTtlMs = currentEndDate === today ? 10 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+    if (!forceRefresh) {
     const sharedCached = getCache(sharedKey, sharedTtlMs);
     if (sharedCached) {
       layerTilesCacheRef.current.set(memKey, sharedCached);
@@ -1268,6 +1331,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         return;
       }
     }
+    }
 
     // Use direct backend URL in production (proxy only works in dev)
     // const baseUrl = import.meta.env.DEV 
@@ -1282,6 +1346,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         key: sharedKey,
         url,
         ttlMs: sharedTtlMs,
+        forceRefresh,
         fetchInit: {
           method: "POST",
           mode: "cors",
@@ -1474,15 +1539,25 @@ const CropEyeMap: React.FC<MapProps> = ({
     }
   };
 
-  const fetchPestData = async (plotName: string) => {
+  const fetchPestData = async (
+    plotName: string,
+    options?: { forceRefresh?: boolean },
+  ) => {
+    const forceRefresh = Boolean(options?.forceRefresh);
     if (!plotName) {
       setPestData(null);
       return;
     }
 
+    const apiPlot = plotNameForApi(plotName);
     const apiEndDate = layerApiEndDate(currentEndDate);
-    const memKey = `pest:${plotName}:${currentEndDate}`;
-    if (layerTilesCacheRef.current.has(memKey)) {
+    const memKey = `pest:${apiPlot}:${currentEndDate}`;
+    if (forceRefresh) {
+      removeCache(`layer:pest:${apiPlot}:${currentEndDate}`);
+      removeCache(`pestData_${apiPlot}`);
+      removeCache(`pestData_${plotName}`);
+      layerTilesCacheRef.current.delete(memKey);
+    } else if (layerTilesCacheRef.current.has(memKey)) {
       const hit = layerTilesCacheRef.current.get(memKey) as any;
       setPestData(hit ?? null);
       if (!skipAnalysisBoundaryRef.current && !plotBoundary && hit?.features?.[0]?.geometry) {
@@ -1517,8 +1592,9 @@ const CropEyeMap: React.FC<MapProps> = ({
 
     // Check cache first (only for today's date to ensure freshness)
     const today = new Date().toISOString().split('T')[0];
-    const sharedKey = `layer:pest:${plotName}:${currentEndDate}`;
+    const sharedKey = `layer:pest:${apiPlot}:${currentEndDate}`;
     const sharedTtlMs = currentEndDate === today ? 10 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+    if (!forceRefresh) {
     const sharedCached = getCache(sharedKey, sharedTtlMs);
     if (sharedCached) {
       layerTilesCacheRef.current.set(memKey, sharedCached);
@@ -1530,12 +1606,14 @@ const CropEyeMap: React.FC<MapProps> = ({
     }
     // Back-compat: older cache key used by prefetch/login
     if (currentEndDate === today) {
-      const cachedData = getCached(`pestData_${plotName}`);
+      const cachedData =
+        getCached(`pestData_${apiPlot}`) || getCached(`pestData_${plotName}`);
       if (cachedData) {
         layerTilesCacheRef.current.set(memKey, cachedData);
         setPestData(cachedData);
         return;
       }
+    }
     }
 
     // Use direct backend URL in production (proxy only works in dev)
@@ -1543,13 +1621,14 @@ const CropEyeMap: React.FC<MapProps> = ({
     //   ? '/api/dev-plot' 
     //   : 'https://admin-cropeye.up.railway.app';
     const baseUrl = 'https://admin-cropeye.up.railway.app';
-    const url = `${baseUrl}/pest-detection?plot_name=${plotName}&end_date=${apiEndDate}&days_back=7`;
+    const url = `${baseUrl}/pest-detection?plot_name=${encodeURIComponent(apiPlot)}&end_date=${apiEndDate}&days_back=7`;
 
     try {
       const data = await getOrFetchJson({
         key: sharedKey,
         url,
         ttlMs: sharedTtlMs,
+        forceRefresh,
         fetchInit: {
           method: "POST",
           mode: "cors",
@@ -1565,7 +1644,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       
       // Cache the data if it's for today's date
       if (currentEndDate === today) {
-        setCached(`pestData_${plotName}`, data);
+        setCached(`pestData_${apiPlot}`, data);
       }
       
       // Preserve plot boundary from pest data if not already set
@@ -1718,9 +1797,19 @@ const CropEyeMap: React.FC<MapProps> = ({
   const currentPlotFeature =
     profileBoundaryFeature ?? plotBoundary ?? plotData?.features?.[0];
 
-  // Analysis API geometry (Growth/etc.) still reflects the *pre-edit* plot shape until
-  // SEF regenerates tiles. We always show those tiles when we have a URL.
+  // Analysis API tiles may still follow the *pre-edit* shape until Admin regenerates.
+  // Always show the layer when we have a tile URL; clip to the *active layer* geometry
+  // (the shape the Earth Engine tiles were generated for) so Growth/Water/Soil/Pest stay visible.
+  const activeLayerFeature = useMemo(() => {
+    if (activeLayer === "Growth") return growthData?.features?.[0] ?? null;
+    if (activeLayer === "Water Uptake") return waterUptakeData?.features?.[0] ?? null;
+    if (activeLayer === "Soil Moisture") return soilMoistureData?.features?.[0] ?? null;
+    if (activeLayer === "PEST") return pestData?.features?.[0] ?? null;
+    return null;
+  }, [activeLayer, growthData, waterUptakeData, soilMoistureData, pestData]);
+
   const analysisFeature =
+    activeLayerFeature ??
     plotBoundary ??
     plotData?.features?.[0] ??
     growthData?.features?.[0] ??
@@ -1728,30 +1817,40 @@ const CropEyeMap: React.FC<MapProps> = ({
     soilMoistureData?.features?.[0] ??
     pestData?.features?.[0] ??
     null;
-  const shouldShowAnalysisOverlay = Boolean(activeUrl);
 
   const savedBoundaryGeometry = profileBoundaryFeature?.geometry ?? null;
   const analysisGeometry = analysisFeature?.geometry ?? null;
-  const analysisMatchesSavedBoundary =
-    !savedBoundaryGeometry ||
-    !analysisGeometry ||
-    boundariesMatch(savedBoundaryGeometry, analysisGeometry);
 
-  // Ring [[lng,lat],...] of the boundary used to clip the analysis raster overlay.
+  const shouldShowAnalysisOverlay = Boolean(activeUrl);
+
+  // Prefer active-layer analysis geometry for clipping. Fall back to saved yellow border.
+  // If neither ring is usable, skip clipping so tiles still render (better than blank overlay).
   const analysisClipRing = useMemo(() => {
-    // After a boundary edit, tiles still match the old shape. Clipping to the new
-    // saved boundary hides the layer — skip clip until shapes match again.
-    if (!analysisMatchesSavedBoundary) return null;
-
-    const geom = savedBoundaryGeometry ?? analysisGeometry;
+    const geom = analysisGeometry ?? savedBoundaryGeometry;
     const ring = geom?.coordinates?.[0];
     if (!Array.isArray(ring) || ring.length < 3) return null;
+    // GeoJSON positions must be [lng, lat]
+    const valid = ring.every(
+      (c) =>
+        Array.isArray(c) &&
+        c.length >= 2 &&
+        Number.isFinite(Number(c[0])) &&
+        Number.isFinite(Number(c[1])),
+    );
+    if (!valid) return null;
     return ring as number[][];
-  }, [
-    savedBoundaryGeometry,
-    analysisGeometry,
-    analysisMatchesSavedBoundary,
-  ]);
+  }, [savedBoundaryGeometry, analysisGeometry]);
+
+  const plotFitCoordinates = useMemo(() => {
+    const ring =
+      (profileBoundaryFeature ?? currentPlotFeature)?.geometry?.coordinates?.[0] ??
+      analysisGeometry?.coordinates?.[0] ??
+      null;
+    if (!Array.isArray(ring) || ring.length < 3) return null;
+    return ring as number[][];
+  }, [profileBoundaryFeature, currentPlotFeature, analysisGeometry]);
+
+  const plotFitKey = `${selectedPlotName}|${currentEndDate}|${activeLayer}|${activeUrl ? "1" : "0"}`;
 
   const displayAreaAcres = useMemo(
     () =>
@@ -2702,27 +2801,28 @@ const CropEyeMap: React.FC<MapProps> = ({
           />
           <MapResizeWhenVisible />
 
-          {(profileBoundaryFeature ?? currentPlotFeature)?.geometry?.coordinates?.[0] &&
-            Array.isArray((profileBoundaryFeature ?? currentPlotFeature).geometry.coordinates[0]) && (
+          {plotFitCoordinates && (
             <SetPlotOverviewZoom
-              coordinates={(profileBoundaryFeature ?? currentPlotFeature).geometry.coordinates[0]}
-              refitKey={currentEndDate}
+              coordinates={plotFitCoordinates}
+              refitKey={plotFitKey}
             />
           )}
 
           {shouldShowAnalysisOverlay && (
             <Pane name="analysisOverlay" style={{ zIndex: 350 }}>
               <CustomTileLayer
-                key={`${activeLayer}-layer-${layerChangeKey}`}
+                key={`${activeLayer}-layer-${layerChangeKey}-${selectedPlotName}-${currentEndDate}`}
                 url={activeUrl ?? ""}
-                opacity={0.7}
-                tileKey={`${activeLayer}-layer-${layerChangeKey}`}
+                opacity={0.75}
+                tileKey={`${activeLayer}-layer-${layerChangeKey}-${selectedPlotName}-${currentEndDate}`}
                 pane="analysisOverlay"
               />
-              <ClipPaneToBoundary
-                paneName="analysisOverlay"
-                ring={analysisClipRing}
-              />
+              {analysisClipRing && (
+                <ClipPaneToBoundary
+                  paneName="analysisOverlay"
+                  ring={analysisClipRing}
+                />
+              )}
             </Pane>
           )}
 

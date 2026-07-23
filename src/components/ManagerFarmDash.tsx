@@ -1643,14 +1643,18 @@ const ManagerFarmDash: React.FC = () => {
           <div className="flex items-center gap-3">
             <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center w-full lg:w-auto">
               {/* Filters */}
-              <div className="flex flex-col sm:flex-row gap-4 w-full sm:w-auto">
+              <div
+                className="flex flex-col sm:flex-row gap-4 w-full sm:w-auto notranslate"
+                translate="no"
+              >
                 <div className="flex flex-col flex-1 sm:flex-none">
                   <label className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
                     <Users className="w-4 h-4" />
                     Field Officer ({fieldOfficers.length})
                   </label>
                   <select
-                    className="px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200 bg-white shadow-sm w-full sm:w-64"
+                    className="px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200 bg-white shadow-sm w-full sm:w-64 notranslate"
+                    translate="no"
                     value={selectedFieldOfficerId}
                     onChange={(e) => setSelectedFieldOfficerId(e.target.value)}
                     disabled={loadingFarmers}
@@ -1685,7 +1689,8 @@ const ManagerFarmDash: React.FC = () => {
                     {farmersForSelectedOfficer.length})
                   </label>
                   <select
-                    className="px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200 bg-white shadow-sm w-full sm:w-64"
+                    className="px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200 bg-white shadow-sm w-full sm:w-64 notranslate"
+                    translate="no"
                     value={selectedFarmerId}
                     onChange={(e) => {
                       dashboardLoadedForPlotRef.current = "";
@@ -1736,7 +1741,8 @@ const ManagerFarmDash: React.FC = () => {
                     Plots ({plots.length})
                   </label>
                   <select
-                    className="px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200 bg-white shadow-sm w-full sm:w-64"
+                    className="px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200 bg-white shadow-sm w-full sm:w-64 notranslate"
+                    translate="no"
                     value={selectedPlotId}
                     onChange={(e) => {
                       const newPlotId = e.target.value;

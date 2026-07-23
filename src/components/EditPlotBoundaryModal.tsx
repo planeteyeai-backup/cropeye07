@@ -349,7 +349,10 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
     });
 
     try {
-      await refreshApiEndpoints();
+      await refreshApiEndpoints({
+        plotId,
+        plotName: plotLabel || String(plotId),
+      });
     } catch {
       // PATCH succeeded; refresh is best-effort
     }

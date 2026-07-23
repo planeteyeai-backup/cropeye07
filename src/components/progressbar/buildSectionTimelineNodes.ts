@@ -130,9 +130,9 @@ function buildAllWeeklyTimelineNodes(
 }
 
 /**
- * History view: always 10 weekly dots for the selected month slot.
- * API readings are placed on the matching week only — no "latest yield" highlight
- * (that belongs in Live view).
+ * History view: only weeks that have a real API yield reading get a circle.
+ * Empty weeks are omitted — no grey placeholder dots.
+ * (Latest-yield highlight belongs in Live view.)
  */
 export function buildSectionTimelineNodes(
   farmerId: string,
@@ -148,8 +148,9 @@ export function buildSectionTimelineNodes(
   const plantation = parsePlantationDate(plantationDate, yieldReadings);
 
   const sortedAll = sanitizeYieldReadings(yieldReadings);
+  const nodes: SectionTimelineNode[] = [];
 
-  return Array.from({ length: sectionWeekCount }, (_, localIndex) => {
+  for (let localIndex = 0; localIndex < sectionWeekCount; localIndex++) {
     const globalWeek = sectionStartWeek + localIndex;
     const weekStart = new Date(plantation);
     weekStart.setDate(plantation.getDate() + globalWeek * 7);
@@ -158,36 +159,28 @@ export function buildSectionTimelineNodes(
     weekEnd.setDate(weekStart.getDate() + 6);
     weekEnd.setHours(23, 59, 59, 999);
 
-    const readingInWeek = sortedAll.find((reading) => {
+    // All readings that fall in this week (not just the first).
+    const readingsInWeek = sortedAll.filter((reading) => {
       const readingDate = new Date(reading.date);
       if (Number.isNaN(readingDate.getTime())) return false;
       return readingDate >= weekStart && readingDate <= weekEnd;
     });
 
-    if (readingInWeek) {
-      return readingToNode(
-        farmerId,
-        sectionStartWeek,
-        readingInWeek,
-        localIndex,
-        plantation,
-        false,
+    readingsInWeek.forEach((reading, readingIndex) => {
+      nodes.push(
+        readingToNode(
+          farmerId,
+          sectionStartWeek,
+          reading,
+          localIndex * 100 + readingIndex,
+          plantation,
+          false,
+        ),
       );
-    }
+    });
+  }
 
-    // No API reading for this week — keep the slot on the timeline but do not invent yield.
-    return {
-      id: `${farmerId}-w${globalWeek + 1}`,
-      day: getLocalWeekNumber(globalWeek),
-      date: formatTimelineDate(weekStart),
-      monthRange: getMonthRangeForWeek(globalWeek),
-      yield: '',
-      callStatus: 'pending' as const,
-      note: '',
-      isFromApi: false,
-      isLatest: false,
-    };
-  });
+  return nodes;
 }
 
 export function sectionUsesApiReadings(nodes: SectionTimelineNode[]): boolean {

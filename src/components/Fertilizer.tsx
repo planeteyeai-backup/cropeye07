@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
-import { Download } from "lucide-react";
+//import { Download } from "lucide-react";
 import "./App.css";
 import { useAppContext } from "../context/AppContext";
 import FertilizerTable from "./FertilizerTable";

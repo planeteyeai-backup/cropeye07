@@ -13,6 +13,7 @@ import {
 } from 'recharts';
 import type { FarmerProgressConfig } from './progressData';
 import { YIELD_TARGET_TON } from './progressData';
+import { daysSincePlantation, resolveGrowthStage } from './growthStage';
 import { downloadYieldRangeFarmersExcel } from './exportUnderTargetExcel';
 import { requestProgressDashboardNav } from './progressNavigation';
 import { DEFAULT_MONTH_SECTION } from './progressConstants';
@@ -77,6 +78,11 @@ interface RangeFarmerRow {
   farmerId: string;
   name: string;
   phone: string;
+  stage: string;
+  variety: string;
+  bud: string;
+  /** Days from plantation date to today. */
+  plantationDays: string;
   tons: number;
   yieldDate: string;
   hasYieldData: boolean;
@@ -221,7 +227,12 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
       .sort((a, b) => a.tons - b.tons || a.farmerName.localeCompare(b.farmerName))
       .map((farmer) => {
         const cfg = farmerInputs.find((item) => item.farmerId === farmer.farmerId)?.cfg;
-        const rawDate = cfg?.yieldDate ?? cfg?.yieldReadings?.at(-1)?.date;
+        const readings = cfg?.yieldReadings;
+        const rawDate =
+          cfg?.yieldDate ??
+          (readings && readings.length > 0
+            ? readings[readings.length - 1].date
+            : undefined);
         let yieldDate = '-';
         if (rawDate) {
           const parsed = new Date(rawDate);
@@ -234,10 +245,16 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
               });
         }
 
+        const days = daysSincePlantation(cfg?.plantationDate);
+
         return {
           farmerId: farmer.farmerId,
           name: farmer.farmerName,
           phone: cfg?.phoneNumber?.trim() || '-',
+          stage: resolveGrowthStage(cfg?.plantationDate, cfg?.budMethod),
+          variety: cfg?.variety?.trim() || '-',
+          bud: cfg?.budMethod?.trim() || '-',
+          plantationDays: days != null ? String(days) : '-',
           tons: farmer.tons,
           yieldDate,
           hasYieldData: farmer.hasYieldData,
@@ -526,6 +543,10 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
                   <col />
                   <col className="w-24 sm:w-28" />
                   <col className="w-24 sm:w-28" />
+                  <col className="w-20 sm:w-24" />
+                  <col className="w-16 sm:w-20" />
+                  <col className="w-16 sm:w-20" />
+                  <col className="w-24 sm:w-28" />
                   <col className="w-16 sm:w-20" />
                 </colgroup>
                 <thead>
@@ -536,6 +557,12 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
                     <th className="px-2 py-2">No</th>
                     <th className="px-2 py-2">Name</th>
                     <th className="px-2 py-2">Phone</th>
+                    <th className="px-2 py-2">Stage</th>
+                    <th className="px-2 py-2">Variety</th>
+                    <th className="px-2 py-2">Bud</th>
+                    <th className="px-2 py-2" title="Days from plantation date to today">
+                      Days
+                    </th>
                     <th className="px-2 py-2">Yield date</th>
                     <th className="px-2 py-2 text-right">Yield (ton)</th>
                   </tr>
@@ -550,6 +577,10 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
                     <col className="w-10 sm:w-12" />
                     <col />
                     <col className="w-24 sm:w-28" />
+                    <col className="w-24 sm:w-28" />
+                    <col className="w-20 sm:w-24" />
+                    <col className="w-16 sm:w-20" />
+                    <col className="w-16 sm:w-20" />
                     <col className="w-24 sm:w-28" />
                     <col className="w-16 sm:w-20" />
                   </colgroup>
@@ -572,6 +603,18 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
                         </td>
                         <td className="whitespace-nowrap px-2 py-1.5" style={{ color: C.textMuted }}>
                           {farmer.phone}
+                        </td>
+                        <td className="truncate px-2 py-1.5" style={{ color: C.text }}>
+                          {farmer.stage}
+                        </td>
+                        <td className="truncate px-2 py-1.5" style={{ color: C.textMuted }}>
+                          {farmer.variety}
+                        </td>
+                        <td className="truncate px-2 py-1.5" style={{ color: C.textMuted }}>
+                          {farmer.bud}
+                        </td>
+                        <td className="whitespace-nowrap px-2 py-1.5 font-medium" style={{ color: C.text }}>
+                          {farmer.plantationDays}
                         </td>
                         <td className="whitespace-nowrap px-2 py-1.5" style={{ color: C.textMuted }}>
                           {farmer.yieldDate}

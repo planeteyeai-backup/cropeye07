@@ -87,6 +87,10 @@ export async function downloadUnderTargetFarmersExcel(
 export interface YieldRangeExportRow {
   name: string;
   phone: string;
+  stage?: string;
+  variety?: string;
+  bud?: string;
+  plantationDays?: string;
   yieldDate: string;
   tons: number;
   hasYieldData: boolean;
@@ -106,16 +110,34 @@ export async function downloadYieldRangeFarmersExcel(
     No: index + 1,
     Name: farmer.name,
     'Phone No': farmer.phone || '-',
+    Stage: farmer.stage?.trim() || '-',
+    Variety: farmer.variety?.trim() || '-',
+    Bud: farmer.bud?.trim() || '-',
+    'Plantation days': farmer.plantationDays?.trim() || '-',
     'Yield date': farmer.yieldDate === '-' ? '-' : farmer.yieldDate,
     'Yield (ton)': farmer.hasYieldData ? formatYieldTon(farmer.tons) : '-',
   }));
 
   const worksheet = XLSX.utils.json_to_sheet(rows, {
-    header: ['No', 'Name', 'Phone No', 'Yield date', 'Yield (ton)'],
+    header: [
+      'No',
+      'Name',
+      'Phone No',
+      'Stage',
+      'Variety',
+      'Bud',
+      'Plantation days',
+      'Yield date',
+      'Yield (ton)',
+    ],
   });
   worksheet['!cols'] = [
     { wch: 6 },
     { wch: 38 },
+    { wch: 14 },
+    { wch: 18 },
+    { wch: 16 },
+    { wch: 12 },
     { wch: 14 },
     { wch: 16 },
     { wch: 12 },

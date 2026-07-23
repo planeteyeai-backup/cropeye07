@@ -608,15 +608,24 @@ function readSugarcaneType(
 
 /** Crop variety name — only real crop_variety fields (no plantation-type fallbacks). */
 function readVariety(farm: any, plot: any, farmer?: any, agro?: any): string {
-  const farmCrop = farm?.crop_type;
+  const farmCrop =
+    farm?.crop_type && typeof farm.crop_type === "object" ? farm.crop_type : null;
   const plotFarm =
     Array.isArray(plot?.farms) && plot.farms.length > 0 ? plot.farms[0] : null;
-  const plotFarmCrop = plotFarm?.crop_type;
+  const plotFarmCrop =
+    plotFarm?.crop_type && typeof plotFarm.crop_type === "object"
+      ? plotFarm.crop_type
+      : null;
   const farmerFarm =
     Array.isArray(farmer?.farms) && farmer.farms.length > 0
       ? farmer.farms[0]
       : null;
-  const farmerFarmCrop = farmerFarm?.crop_type;
+  const farmerFarmCrop =
+    farmerFarm?.crop_type && typeof farmerFarm.crop_type === "object"
+      ? farmerFarm.crop_type
+      : null;
+  const plotCrop =
+    plot?.crop_type && typeof plot.crop_type === "object" ? plot.crop_type : null;
 
   return firstNonEmpty(
     farm?.crop_variety,
@@ -624,13 +633,83 @@ function readVariety(farm: any, plot: any, farmer?: any, agro?: any): string {
     plotFarm?.crop_variety,
     plotFarmCrop?.crop_variety,
     plot?.crop_variety,
-    plot?.crop_type?.crop_variety,
+    plotCrop?.crop_variety,
     farmerFarm?.crop_variety,
     farmerFarmCrop?.crop_variety,
     farmer?.crop_variety,
     agro?.crop_variety,
     agro?.properties?.crop_variety,
     agro?.features?.[0]?.properties?.crop_variety,
+  );
+}
+
+/** Index /farms/ crop_variety by every known plot key (owner harvest often misses hierarchy match). */
+export function buildCropVarietyIndexFromFarmRows(
+  farmRows: any[] | null | undefined,
+): Map<string, string> {
+  const index = new Map<string, string>();
+  if (!farmRows?.length) return index;
+
+  for (const farm of farmRows) {
+    const variety = firstNonEmpty(
+      farm?.crop_variety,
+      typeof farm?.crop_type === "object" ? farm.crop_type?.crop_variety : null,
+      farm?.farmer?.crop_variety,
+    );
+    if (!variety) continue;
+
+    for (const key of farmRowPlotKeys(farm)) {
+      if (!index.has(key)) index.set(key, variety);
+    }
+  }
+  return index;
+}
+
+function lookupVarietyInIndex(
+  index: Map<string, string>,
+  ...candidates: unknown[]
+): string {
+  if (!index.size) return "";
+  for (const candidate of candidates) {
+    if (candidate == null || `${candidate}`.trim() === "") continue;
+    const key = normalizePlotKey(String(candidate));
+    const hit = index.get(key);
+    if (hit) return hit;
+  }
+  return "";
+}
+
+function resolveRowVariety(
+  farm: any,
+  plot: any,
+  farmer: any,
+  agro: any,
+  varietyIndex?: Map<string, string> | null,
+  extraKeys: unknown[] = [],
+): string {
+  const fromRecords = readVariety(farm, plot, farmer, agro);
+  if (fromRecords) return fromRecords;
+  if (!varietyIndex?.size) return "";
+
+  return lookupVarietyInIndex(
+    varietyIndex,
+    ...extraKeys,
+    plotKeyFromRecord(plot),
+    plot?.fastapi_plot_id,
+    plot?.plot_id,
+    plot?.plot_name,
+    farm?.fastapi_plot_id,
+    farm?.plot_id,
+    farm?.plot_name,
+    agro?.plot_id,
+    agro?.plot_name,
+    agro?.fastapi_plot_id,
+    plot?.gat_number != null && plot?.plot_number != null
+      ? `${plot.gat_number}_${plot.plot_number}`
+      : null,
+    farm?.gat_number != null && farm?.plot_number != null
+      ? `${farm.gat_number}_${farm.plot_number}`
+      : null,
   );
 }
 
@@ -1718,6 +1797,7 @@ function buildRowFromContext(
   agro: any | null,
   plotKey: string,
   factoryCenter?: { lat: number; lng: number } | null,
+  varietyIndex?: Map<string, string> | null,
 ): TeamConnectHarvestRow | null {
   const { plot, farm, farmer, managerName, managerId, representative } = ctx;
   const center = resolveCenter(agro, plot, farm, farmer, ctx.fo);
@@ -1783,7 +1863,11 @@ function buildRowFromContext(
     managerId,
     fieldOfficerId: fieldOfficerId(ctx.fo),
     "Sugarcane Type": readSugarcaneType(farm, plot, farmer, agro),
-    Variety: readVariety(farm, plot, farmer, agro),
+    Variety: resolveRowVariety(farm, plot, farmer, agro, varietyIndex, [
+      plotKey,
+      plotId,
+      ...ctx.plotKeys,
+    ]),
     representative: resolvedRepresentative,
     boundaryCoordinates: center.boundary,
   };
@@ -1808,6 +1892,7 @@ function enrichRowFromContext(
   ctx: PlotContext,
   agro?: any,
   factoryCenter?: { lat: number; lng: number } | null,
+  varietyIndex?: Map<string, string> | null,
 ): TeamConnectHarvestRow {
   const regionFromContext = readRegion(ctx.plot, ctx.farmer, ctx.fo, agro);
   const contextRegionKeys = collectLocationKeys(
@@ -1817,7 +1902,14 @@ function enrichRowFromContext(
     ctx.fo,
     agro,
   );
-  const varietyFromContext = readVariety(ctx.farm, ctx.plot, ctx.farmer, agro);
+  const varietyFromContext = resolveRowVariety(
+    ctx.farm,
+    ctx.plot,
+    ctx.farmer,
+    agro,
+    varietyIndex,
+    [row.id, row["Plot No"], ...ctx.plotKeys],
+  );
   const distanceFromContext = readDistanceKm(
     row.Latitude,
     row.Longitude,
@@ -1863,6 +1955,7 @@ function buildRowFromAgroOnly(
   agro: any,
   hierarchy: TeamConnectHierarchy,
   factoryCenter?: { lat: number; lng: number } | null,
+  varietyIndex?: Map<string, string> | null,
 ): TeamConnectHarvestRow | null {
   const center = resolveCenter(agro, null, null, null, null);
   if (!center) return null;
@@ -1973,7 +2066,13 @@ function buildRowFromAgroOnly(
       (agro?.manager_id != null ? String(agro.manager_id) : undefined),
     fieldOfficerId: resolvedFoId || undefined,
     "Sugarcane Type": readSugarcaneType(null, null, null, agro),
-    Variety: readVariety(null, null, null, agro),
+    Variety: resolveRowVariety(null, null, null, agro, varietyIndex, [
+      plotKey,
+      cleanPlotKey,
+      agro?.plot_number,
+      agro?.plot_id,
+      agro?.fastapi_plot_id,
+    ]),
     representative: resolvePersonLabel(representative, agro?.field_officer_name),
     boundaryCoordinates: center.boundary,
   };
@@ -1981,6 +2080,8 @@ function buildRowFromAgroOnly(
 
 export type BuildOwnerHarvestRowsOptions = {
   factoryCenter?: { lat: number; lng: number } | null;
+  /** /farms/?include_farmer=true rows — used to fill Variety when hierarchy has null crop_variety. */
+  farmRows?: any[] | null;
 };
 
 /** Build harvest rows: team-connect metadata + agroStats geometry/metrics. */
@@ -1990,6 +2091,7 @@ export function buildOwnerHarvestRows(
   options?: BuildOwnerHarvestRowsOptions,
 ): TeamConnectHarvestRow[] {
   const factoryCenter = options?.factoryCenter ?? null;
+  const varietyIndex = buildCropVarietyIndexFromFarmRows(options?.farmRows);
   const contextMap = buildPlotContextMap(hierarchy);
   const rows: TeamConnectHarvestRow[] = [];
   const seenPlotKeys = new Set<string>();
@@ -2013,11 +2115,23 @@ export function buildOwnerHarvestRows(
     }
     if (!agroPlot) agroPlot = lookupAgroPlot(agro, key);
 
-    const row = buildRowFromContext(ctx, agroPlot, key, factoryCenter);
+    const row = buildRowFromContext(
+      ctx,
+      agroPlot,
+      key,
+      factoryCenter,
+      varietyIndex,
+    );
     if (!row) continue;
     if (row.id && seenRowIds.has(row.id)) continue;
 
-    const enrichedRow = enrichRowFromContext(row, ctx, agroPlot, factoryCenter);
+    const enrichedRow = enrichRowFromContext(
+      row,
+      ctx,
+      agroPlot,
+      factoryCenter,
+      varietyIndex,
+    );
     rows.push(enrichedRow);
     if (enrichedRow.id) seenRowIds.add(enrichedRow.id);
     ctx.plotKeys.forEach((plotKey) => seenPlotKeys.add(normalizePlotKey(plotKey)));
@@ -2029,12 +2143,34 @@ export function buildOwnerHarvestRows(
     const normalized = normalizePlotKey(plotKey);
     if (seenPlotKeys.has(normalized)) continue;
 
-    let row = buildRowFromAgroOnly(plotKey, plotData, hierarchy, factoryCenter);
+    let row = buildRowFromAgroOnly(
+      plotKey,
+      plotData,
+      hierarchy,
+      factoryCenter,
+      varietyIndex,
+    );
     if (!row) continue;
 
     const ctx = findContextForPlotKey(contextMap, plotKey);
     if (ctx) {
-      row = enrichRowFromContext(row, ctx, plotData, factoryCenter);
+      row = enrichRowFromContext(
+        row,
+        ctx,
+        plotData,
+        factoryCenter,
+        varietyIndex,
+      );
+    }
+
+    if (!row.Variety?.trim() && varietyIndex.size) {
+      const fromFarms = lookupVarietyInIndex(
+        varietyIndex,
+        plotKey,
+        row.id,
+        row["Plot No"],
+      );
+      if (fromFarms) row = { ...row, Variety: fromFarms };
     }
 
     if (row.id && seenRowIds.has(row.id)) continue;
@@ -2044,7 +2180,15 @@ export function buildOwnerHarvestRows(
     seenPlotKeys.add(normalized);
   }
 
-  return backfillHarvestRowIds(rows, hierarchy);
+  return backfillHarvestRowIds(rows, hierarchy).map((row) => {
+    if (row.Variety?.trim() || !varietyIndex.size) return row;
+    const fromFarms = lookupVarietyInIndex(
+      varietyIndex,
+      row.id,
+      row["Plot No"],
+    );
+    return fromFarms ? { ...row, Variety: fromFarms } : row;
+  });
 }
 
 function backfillHarvestRowIds(

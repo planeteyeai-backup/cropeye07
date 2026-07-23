@@ -497,6 +497,8 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
   ]);
   const [loading, setLoading] = useState<boolean>(true);
   const [dropdownsLoading, setDropdownsLoading] = useState<boolean>(true);
+  const [loadElapsedSec, setLoadElapsedSec] = useState(0);
+  const loadStartedAtRef = useRef<number | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [rawData, setRawData] = useState<TeamConnectHarvestRow[]>([]);
   const [hierarchyMeta, setHierarchyMeta] = useState<TeamConnectHierarchy>({
@@ -536,10 +538,45 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
   const debouncedSugarcaneType = useDebouncedValue(filters.sugarcaneType, 300);
   const debouncedVariety = useDebouncedValue(filters.variety, 300);
 
+  const isLoadingHarvest = loading || dropdownsLoading;
+
+  useEffect(() => {
+    if (!isLoadingHarvest) {
+      loadStartedAtRef.current = null;
+      setLoadElapsedSec(0);
+      return;
+    }
+
+    if (loadStartedAtRef.current == null) {
+      loadStartedAtRef.current = Date.now();
+      setLoadElapsedSec(0);
+    }
+
+    const timerId = window.setInterval(() => {
+      if (loadStartedAtRef.current == null) return;
+      setLoadElapsedSec(
+        Math.floor((Date.now() - loadStartedAtRef.current) / 1000),
+      );
+    }, 1000);
+
+    return () => window.clearInterval(timerId);
+  }, [isLoadingHarvest]);
+
+  const harvestLoadHint = isManagerMode
+    ? "Manager harvest usually loads in 10–30 seconds ."
+    : "Owner harvest may take 20–45 seconds for large industries.";
+
+  const harvestLoadingLabel =
+    loadElapsedSec > 0
+      ? `Loading data… ${loadElapsedSec}s`
+      : "Loading data…";
+
   useEffect(() => {
     async function fetchData() {
       setLoading(true);
       setDropdownsLoading(true);
+      loadStartedAtRef.current = Date.now();
+      setLoadElapsedSec(0);
       setFetchError(null);
 
       try {
@@ -575,7 +612,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
               console.warn("[Harvest] manager agroStats failed:", err);
             }
           }
-        } else {
+        } else { 
           const industryId =
             me?.industry_id ??
             me?.industry?.id ??
@@ -651,7 +688,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
         const allData = buildOwnerHarvestRows(
           hierarchy,
           agroStats as Record<string, any>,
-          { factoryCenter },
+          { factoryCenter, farmRows },
         );
         // Filter options only from harvest rows that have real values (not hierarchy guesses).
         const options = collectHarvestFilterOptions(allData);
@@ -662,12 +699,26 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
           );
           console.log("rows", allData.length);
           console.log("farmRows enriched", farmRows.length);
+          console.log(
+            "farmRows with crop_variety",
+            farmRows.filter(
+              (f) =>
+                f?.crop_variety ||
+                (typeof f?.crop_type === "object" && f?.crop_type?.crop_variety),
+            ).length,
+          );
           console.log("factoryCenter", factoryCenter);
           console.log("managers", options.managers);
           console.log("representatives", options.representatives);
           console.log("regions", options.regions);
           console.log("sugarcaneTypes", options.sugarcaneTypes);
           console.log("varieties", options.varieties);
+          console.log(
+            "rowsWithVariety",
+            allData.filter((row) => row.Variety?.trim()).length,
+            "/",
+            allData.length,
+          );
           console.log(
             "sample",
             allData.slice(0, 5).map((row) => ({
@@ -1215,9 +1266,14 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
               <div className="text-lg font-semibold text-gray-900">
                 Harvest Dashboard
               </div>
-              <div className="flex items-center gap-2 text-sm text-gray-600">
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Loading data…
+              <div className="flex flex-col items-end gap-1 text-sm text-gray-600">
+                <div className="flex items-center gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  {harvestLoadingLabel}
+                </div>
+                <p className="max-w-md text-right text-xs text-gray-500">
+                  {harvestLoadHint}
+                </p>
               </div>
             </div>
 
@@ -1322,9 +1378,14 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
               <div className="flex items-center gap-2 mb-4 pb-3 border-b border-gray-100">
                 <span className="text-sm font-semibold text-gray-700">Filters</span>
                 {dropdownsLoading && (
-                  <span className="flex items-center gap-1 text-xs text-blue-500">
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                    Loading data…
+                  <span className="flex flex-col items-end gap-0.5 text-xs text-blue-500">
+                    <span className="flex items-center gap-1">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      {harvestLoadingLabel}
+                    </span>
+                    <span className="text-[11px] text-blue-400/90">
+                      {harvestLoadHint}
+                    </span>
                   </span>
                 )}
               </div>

@@ -114,7 +114,7 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
   const [stocks, setStocks] = useState<any[]>([]);
   const [bookings, setBookings] = useState<any[]>([]);
   const [selectedPlotName, setSelectedPlotName] = useState<string | null>(null);
-  const [soilData, setSoilData] = useState({
+  const [, setSoilData] = useState({
     phValue: null as number | null,
     nitrogenValue: null as number | null,
     fertilityStatus: "Moderate",

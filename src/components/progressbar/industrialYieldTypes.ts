@@ -8,6 +8,9 @@ export interface IndustrialYieldFarmer {
   farmer_name: string;
   phone_number: string;
   plantation_date: string | null;
+  crop_variety?: string | null;
+  planting_method?: string | null;
+  plantation_type?: string | null;
   yields: YieldReading[];
 }
 

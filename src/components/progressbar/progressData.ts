@@ -18,6 +18,10 @@ export interface FarmerProgressConfig {
   /** False when API has no yield reading (shown at 0 on chart). */
   hasYieldData?: boolean;
   phoneNumber?: string | null;
+  /** Sugarcane crop variety (from backend farmer/plot record when available). */
+  variety?: string | null;
+  /** Planting method — 1-bud / 2-bud / 3-bud (drives bud.json stage schedule). */
+  budMethod?: string | null;
   /** Action-recorded weeks per month section (max 10 each). */
   weeksDonePerSection: [number, number, number, number];
   /** Global 0-based week indices where action was "no". */
