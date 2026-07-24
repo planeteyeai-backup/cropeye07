@@ -12,6 +12,11 @@
   overflow-y: hidden !important;
 }
 
+/* Analysis raster (Growth/Water/Soil/Pest) above base satellite tiles */
+.leaflet-analysisOverlay-pane {
+  z-index: 450 !important;
+}
+
 .controls-header {
   display: flex;
   justify-content: space-between;
@@ -464,6 +469,11 @@
 .splitscreen-overlay .leaflet-popup-pane,
 .splitscreen-overlay .leaflet-control {
   z-index: 1000 !important;
+}
+
+/* Keep Growth/Water/Soil/Pest tiles above satellite in split-screen too */
+.splitscreen-overlay .leaflet-analysisOverlay-pane {
+  z-index: 1450 !important;
 }
 
 /* Custom zoom controls */
@@ -1022,6 +1032,12 @@
   .leaflet-tooltip-pane,
   .leaflet-popup-pane {
     z-index: 100 !important;
+  }
+
+  /* Growth/Water/Soil/Pest tiles — must sit ABOVE satellite tile-pane (also forced to 100).
+     Without this, backend tile_url loads but the colored layer is hidden under Google imagery. */
+  .leaflet-analysisOverlay-pane {
+    z-index: 450 !important;
   }
   
   /* Ensure circles and polygons stay below controls */

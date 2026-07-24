@@ -450,16 +450,40 @@ interface MapProps {
   onSplitScreen?: () => void;
 }
 
+/** Clear leftover CSS clip-path / overflow that can hide tiles after boundary edits or HMR. */
+const EnsureAnalysisPaneVisible: React.FC<{ paneName: string }> = ({ paneName }) => {
+  const map = useMap();
+
+  useEffect(() => {
+    let tries = 0;
+    const apply = () => {
+      const pane = map.getPane(paneName);
+      if (!pane) {
+        if (tries++ < 40) window.setTimeout(apply, 50);
+        return;
+      }
+      pane.style.clipPath = "";
+      (pane.style as any).webkitClipPath = "";
+      pane.style.overflow = "visible";
+      pane.style.display = "block";
+      pane.style.visibility = "visible";
+      pane.style.opacity = "1";
+      pane.style.zIndex = "450";
+      pane.style.pointerEvents = "none";
+    };
+    apply();
+  }, [map, paneName]);
+
+  return null;
+};
+
 const CustomTileLayer: React.FC<{
   url: string;
   opacity?: number;
   tileKey?: string;
   pane?: string;
 }> = ({ url, opacity = 0.7, tileKey, pane }) => {
-  // console.log('CustomTileLayer URL:', url);
-
   if (!url) {
-    // console.log('No URL provided to CustomTileLayer');
     return null;
   }
 
@@ -472,93 +496,16 @@ const CustomTileLayer: React.FC<{
       minZoom={1}
       tileSize={256}
       pane={pane}
+      zIndex={450}
       eventHandlers={{
-        tileerror: (e: any) => console.error('Tile loading error:', e),
+        tileerror: (e: any) => console.error("[Map] Analysis tile load error:", e?.tile?.src || e),
+        load: () => {
+          // Useful when backend tile_url is OK but overlay still looks blank
+          // console.debug("[Map] Analysis tile layer loaded:", url);
+        },
       }}
     />
   );
-};
-
-/**
- * Clip a leaflet pane to the plot boundary polygon so the analysis (Growth/Water/
- * Soil/Pest) raster only shows inside the edited yellow boundary.
- *
- * CSS clip-path is in the pane's local pixel space (relative to the map viewport).
- * Leaflet layer points are in CRS/layer space — we convert via containerPointToLayerPoint
- * so the mask lines up with the yellow Polygon border.
- */
-const ClipPaneToBoundary: React.FC<{
-  paneName: string;
-  ring: number[][] | null;
-}> = ({ paneName, ring }) => {
-  const map = useMap();
-
-  useEffect(() => {
-    let cancelled = false;
-    let tries = 0;
-
-    const clear = (pane: HTMLElement) => {
-      pane.style.clipPath = "";
-      (pane.style as any).webkitClipPath = "";
-      pane.style.overflow = "";
-    };
-
-    const applyClip = (pane: HTMLElement) => {
-      if (!ring || ring.length < 3) {
-        clear(pane);
-        return;
-      }
-
-      // Layer-space point of the viewport's top-left → convert ring into pane-local px
-      const topLeft = map.containerPointToLayerPoint([0, 0]);
-      const points = ring
-        .map((coord) => {
-          const layerPt = map.latLngToLayerPoint([coord[1], coord[0]]);
-          return `${Math.round(layerPt.x - topLeft.x)}px ${Math.round(layerPt.y - topLeft.y)}px`;
-        })
-        .join(", ");
-
-      const clip = `polygon(${points})`;
-      pane.style.overflow = "hidden";
-      pane.style.clipPath = clip;
-      (pane.style as any).webkitClipPath = clip;
-    };
-
-    const bind = (pane: HTMLElement) => {
-      const update = () => {
-        if (!cancelled) applyClip(pane);
-      };
-      update();
-      map.on("zoom move zoomend moveend viewreset resize", update);
-      return () => {
-        map.off("zoom move zoomend moveend viewreset resize", update);
-        clear(pane);
-      };
-    };
-
-    // Pane may mount one frame after this effect (react-leaflet Pane)
-    let unbind: (() => void) | undefined;
-    const tryAttach = () => {
-      if (cancelled) return;
-      const pane = map.getPane(paneName);
-      if (!pane) {
-        if (tries++ < 40) {
-          window.setTimeout(tryAttach, 50);
-        }
-        return;
-      }
-      unbind = bind(pane);
-    };
-
-    tryAttach();
-
-    return () => {
-      cancelled = true;
-      unbind?.();
-    };
-  }, [map, paneName, ring]);
-
-  return null;
 };
 
 /** Recompute tile layout when Home becomes visible again (e.g. My Profile → Home). */
@@ -1059,7 +1006,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     const today = new Date().toISOString().split("T")[0];
     const sharedKey = `layer:growth:${apiPlot}:${currentEndDate}`;
     const sharedTtlMs =
-      currentEndDate === today ? 10 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+      currentEndDate === today ? 10 * 60 * 1000 : 30 * 60 * 1000;
 
     if (forceRefresh) {
       layerTilesCacheRef.current.delete(memKey);
@@ -1175,7 +1122,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     const today = new Date().toISOString().split("T")[0];
     const sharedKey = `layer:water:${apiPlot}:${currentEndDate}`;
     const sharedTtlMs =
-      currentEndDate === today ? 10 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+      currentEndDate === today ? 10 * 60 * 1000 : 30 * 60 * 1000;
 
     if (forceRefresh) {
       layerTilesCacheRef.current.delete(memKey);
@@ -1822,24 +1769,6 @@ const CropEyeMap: React.FC<MapProps> = ({
   const analysisGeometry = analysisFeature?.geometry ?? null;
 
   const shouldShowAnalysisOverlay = Boolean(activeUrl);
-
-  // Prefer active-layer analysis geometry for clipping. Fall back to saved yellow border.
-  // If neither ring is usable, skip clipping so tiles still render (better than blank overlay).
-  const analysisClipRing = useMemo(() => {
-    const geom = analysisGeometry ?? savedBoundaryGeometry;
-    const ring = geom?.coordinates?.[0];
-    if (!Array.isArray(ring) || ring.length < 3) return null;
-    // GeoJSON positions must be [lng, lat]
-    const valid = ring.every(
-      (c) =>
-        Array.isArray(c) &&
-        c.length >= 2 &&
-        Number.isFinite(Number(c[0])) &&
-        Number.isFinite(Number(c[1])),
-    );
-    if (!valid) return null;
-    return ring as number[][];
-  }, [savedBoundaryGeometry, analysisGeometry]);
 
   const plotFitCoordinates = useMemo(() => {
     const ring =
@@ -2809,20 +2738,15 @@ const CropEyeMap: React.FC<MapProps> = ({
           )}
 
           {shouldShowAnalysisOverlay && (
-            <Pane name="analysisOverlay" style={{ zIndex: 350 }}>
+            <Pane name="analysisOverlay" style={{ zIndex: 450 }}>
+              <EnsureAnalysisPaneVisible paneName="analysisOverlay" />
               <CustomTileLayer
                 key={`${activeLayer}-layer-${layerChangeKey}-${selectedPlotName}-${currentEndDate}`}
                 url={activeUrl ?? ""}
-                opacity={0.75}
+                opacity={0.85}
                 tileKey={`${activeLayer}-layer-${layerChangeKey}-${selectedPlotName}-${currentEndDate}`}
                 pane="analysisOverlay"
               />
-              {analysisClipRing && (
-                <ClipPaneToBoundary
-                  paneName="analysisOverlay"
-                  ring={analysisClipRing}
-                />
-              )}
             </Pane>
           )}
 
