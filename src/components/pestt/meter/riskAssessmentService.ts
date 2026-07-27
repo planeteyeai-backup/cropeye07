@@ -2,6 +2,11 @@ import { pestsData } from './pestsData';
 import { diseasesData } from './diseasesData';
 import { getFarmerMyProfile } from '../../../api';
 import { getCache, setCache } from '../../../components/utils/cache';
+import {
+  fetchAnalysisTimeline,
+  latestRebinDateForLayer,
+} from '../../../services/analysisTimeline';
+import { resolveApiPlotName } from '../../../utils/plotName';
 
 /** Get farmer profile - uses cache first (from login prefetch) to avoid duplicate my-profile/ requests */
 async function getProfileData(): Promise<any> {
@@ -292,8 +297,17 @@ export async function fetchPestDetectionData(plotId?: string): Promise<PestDetec
       selectedPlot = profileData.plots[0];
     }
 
-    const plotName = selectedPlot.plot_name || selectedPlot.fastapi_plot_id || `${selectedPlot.gat_number}_${selectedPlot.plot_number}`;
-    const currentDate = new Date().toISOString().split('T')[0];
+    const plotName =
+      resolveApiPlotName(
+        plotId ||
+          selectedPlot.fastapi_plot_id ||
+          selectedPlot.plot_name ||
+          `${selectedPlot.gat_number}_${selectedPlot.plot_number}`,
+        profileData.plots,
+      ) ||
+      selectedPlot.fastapi_plot_id ||
+      selectedPlot.plot_name ||
+      `${selectedPlot.gat_number}_${selectedPlot.plot_number}`;
 
     // Cache-first: prefetch + Map store pestData_${plotName}
     const cacheKey = `pestData_${plotName}`;
@@ -307,12 +321,32 @@ export async function fetchPestDetectionData(plotId?: string): Promise<PestDetec
         SoilBorn_affected_pixel_percentage: ps.SoilBorn_affected_pixel_percentage || 0,
       };
     }
+
+    // Always use latest pest image date — today has no Sentinel imagery (404).
+    let endDate = "";
+    try {
+      const timeline = await fetchAnalysisTimeline(plotName);
+      endDate = latestRebinDateForLayer(timeline?.timeline, "PEST");
+    } catch {
+      endDate = "";
+    }
+    if (!endDate) {
+      console.warn(
+        `No pest image dates in timeline for plot ${plotName}; skipping pest-detection API`,
+      );
+      return {
+        fungi_affected_pixel_percentage: 0,
+        chewing_affected_pixel_percentage: 0,
+        sucking_affected_pixel_percentage: 0,
+        SoilBorn_affected_pixel_percentage: 0,
+      };
+    }
     
     // Use proxy in development to avoid CORS issues, direct URL in production
     const baseUrl = import.meta.env.DEV 
       ? '/api/dev-plot' 
       : 'https://admin-cropeye.up.railway.app';
-    const url = `${baseUrl}/pest-detection?plot_name=${plotName}&end_date=${currentDate}&days_back=7`;
+    const url = `${baseUrl}/pest-detection?plot_name=${encodeURIComponent(plotName)}&end_date=${endDate}&days_back=15`;
     
     // Add timeout to prevent hanging on 503 errors
     const controller = new AbortController();

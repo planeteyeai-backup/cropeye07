@@ -35,12 +35,19 @@ export function getAnalysisTimelineBaseUrl(): string {
   return "https://cropeye-database-production.up.railway.app";
 }
 
-export async function fetchAnalysisTimeline(
+/** Try slash and underscore forms — timeline DB keys differ per plot (`8/1A` vs `597_45`). */
+export function analysisTimelinePlotCandidates(plotName: string): string[] {
+  const raw = String(plotName ?? "").trim();
+  if (!raw) return [];
+  const slash = raw.replace(/_/g, "/");
+  const underscore = raw.replace(/\//g, "_");
+  return [...new Set([raw, slash, underscore].filter(Boolean))];
+}
+
+async function fetchAnalysisTimelineOnce(
   plotName: string,
 ): Promise<AnalysisTimelineResponse | null> {
-  const trimmed = plotName?.trim();
-  if (!trimmed) return null;
-  const url = `${getAnalysisTimelineBaseUrl()}${TIMELINE_PATH}?plot_name=${encodeURIComponent(trimmed)}`;
+  const url = `${getAnalysisTimelineBaseUrl()}${TIMELINE_PATH}?plot_name=${encodeURIComponent(plotName)}`;
   try {
     const res = await fetch(url, {
       method: "GET",
@@ -48,9 +55,7 @@ export async function fetchAnalysisTimeline(
     });
     if (!res.ok) return null;
     const ct = res.headers.get("content-type") || "";
-    // If production routing returns the SPA HTML (index.html), don't treat it as a valid timeline.
     if (!ct.toLowerCase().includes("application/json")) {
-      // Read a small snippet to help debugging in the UI error state.
       const snippet = await res.text().catch(() => "");
       throw new Error(
         `Timeline endpoint returned non-JSON (content-type: ${ct || "unknown"}). ` +
@@ -62,9 +67,31 @@ export async function fetchAnalysisTimeline(
     const data = (await res.json()) as AnalysisTimelineResponse;
     if (data?.timeline && Array.isArray(data.timeline)) return data;
     return null;
-  } catch {
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("non-JSON")) throw err;
     return null;
   }
+}
+
+export async function fetchAnalysisTimeline(
+  plotName: string,
+): Promise<AnalysisTimelineResponse | null> {
+  const trimmed = plotName?.trim();
+  if (!trimmed) return null;
+
+  let lastHtmlError: Error | null = null;
+  for (const candidate of analysisTimelinePlotCandidates(trimmed)) {
+    try {
+      const data = await fetchAnalysisTimelineOnce(candidate);
+      if (data?.timeline?.length) return data;
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("non-JSON")) {
+        lastHtmlError = err;
+      }
+    }
+  }
+  if (lastHtmlError) throw lastHtmlError;
+  return null;
 }
 
 function collectDatesForLayer(
@@ -95,6 +122,15 @@ export function sortedRebinDatesForLayer(
   return [...set].sort();
 }
 
+/** Latest image date for one layer (Growth / Water / Soil / Pest). */
+export function latestRebinDateForLayer(
+  timeline: TimelineBucket[] | undefined,
+  layer: MapAnalysisLayer,
+): string {
+  const dates = sortedRebinDatesForLayer(timeline, layer);
+  return dates[dates.length - 1] ?? "";
+}
+
 /** Latest calendar date that appears in any layer’s rebin lists (for a single shared map `end_date` on load). */
 export function latestRebinDateAcrossAllLayers(
   timeline: TimelineBucket[] | undefined,
@@ -103,9 +139,33 @@ export function latestRebinDateAcrossAllLayers(
   let best = "";
   const layers: MapAnalysisLayer[] = ["Growth", "Water Uptake", "Soil Moisture", "PEST"];
   for (const layer of layers) {
-    const dates = sortedRebinDatesForLayer(timeline, layer);
-    const last = dates[dates.length - 1];
+    const last = latestRebinDateForLayer(timeline, layer);
     if (last && last > best) best = last;
   }
   return best;
+}
+
+/**
+ * Pick the end_date to send for a layer API:
+ * - Prefer the UI/rebin date when that layer has imagery on/before it
+ * - Never pass a date after that layer’s latest image (avoids 404 "No … images found")
+ */
+export function resolveLayerImageEndDate(
+  timeline: TimelineBucket[] | undefined,
+  layer: MapAnalysisLayer,
+  uiDateIso: string,
+): string {
+  const ui = (uiDateIso || "").trim().split("T")[0];
+  const dates = sortedRebinDatesForLayer(timeline, layer);
+  const layerLatest = dates[dates.length - 1] ?? "";
+  if (!layerLatest) {
+    // No imagery recorded for this layer — caller should skip the API call.
+    return "";
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ui) || ui > layerLatest) {
+    return layerLatest;
+  }
+  if (dates.includes(ui)) return ui;
+  const floor = [...dates].reverse().find((d) => d <= ui);
+  return floor || layerLatest;
 }

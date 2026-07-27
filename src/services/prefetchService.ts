@@ -13,6 +13,10 @@ import { getFastApiToken } from '../utils/auth';
 import { getCache, setCache } from '../utils/cache';
 import { getCache as getContextCache } from '../components/utils/cache';
 import { getOrFetchJson } from "../utils/requestCache";
+import {
+  fetchAnalysisTimeline,
+  latestRebinDateForLayer,
+} from "./analysisTimeline";
 
 // Base URLs for external APIs
 const BASE_URL = 'https://admin-cropeye.up.railway.app';
@@ -229,12 +233,25 @@ export const prefetchAllData = async (
       };
     }
 
-    // 4. Fetch all map layer data in parallel (Growth, Water Uptake, Soil Moisture, Pest)
-    const mapDataPromises = [
-      // Growth data
+    // 4. Fetch map layers using each layer's latest image date (never calendar today)
+    let timeline = null as Awaited<ReturnType<typeof fetchAnalysisTimeline>>;
+    try {
+      timeline = await fetchAnalysisTimeline(plotName);
+    } catch {
+      timeline = null;
+    }
+    const growthEnd = latestRebinDateForLayer(timeline?.timeline, "Growth");
+    const waterEnd = latestRebinDateForLayer(timeline?.timeline, "Water Uptake");
+    const soilEnd = latestRebinDateForLayer(timeline?.timeline, "Soil Moisture");
+    const pestEnd = latestRebinDateForLayer(timeline?.timeline, "PEST");
+
+    const mapDataPromises: Promise<any>[] = [];
+
+    if (growthEnd) {
+      mapDataPromises.push(
       getOrFetchJson({
-        key: `layer:growth:${plotName}:${today}`,
-        url: `${BASE_URL}/analyze_Growth?plot_name=${plotName}&end_date=${today}&days_back=7`,
+        key: `layer:growth:${plotName}:${growthEnd}`,
+        url: `${BASE_URL}/analyze_Growth?plot_name=${plotName}&end_date=${growthEnd}&days_back=15`,
         ttlMs: 10 * 60 * 1000,
         fetchInit: {
           method: "POST",
@@ -253,11 +270,14 @@ export const prefetchAllData = async (
           errors.push(`Growth: ${err.message}`);
           return null;
         }),
+      );
+    }
 
-      // Water Uptake data
+    if (waterEnd) {
+      mapDataPromises.push(
       getOrFetchJson({
-        key: `layer:water:${plotName}:${today}`,
-        url: `${BASE_URL}/wateruptake?plot_name=${plotName}&end_date=${today}&days_back=7`,
+        key: `layer:water:${plotName}:${waterEnd}`,
+        url: `${BASE_URL}/wateruptake?plot_name=${plotName}&end_date=${waterEnd}&days_back=15`,
         ttlMs: 10 * 60 * 1000,
         fetchInit: {
           method: "POST",
@@ -276,11 +296,14 @@ export const prefetchAllData = async (
           errors.push(`Water Uptake: ${err.message}`);
           return null;
         }),
+      );
+    }
 
-      // Soil Moisture data
+    if (soilEnd) {
+      mapDataPromises.push(
       getOrFetchJson({
-        key: `layer:soil:${plotName}:${today}`,
-        url: `${BASE_URL}/SoilMoisture?plot_name=${plotName}&end_date=${today}&days_back=7`,
+        key: `layer:soil:${plotName}:${soilEnd}`,
+        url: `${BASE_URL}/SoilMoisture?plot_name=${plotName}&end_date=${soilEnd}&days_back=15`,
         ttlMs: 10 * 60 * 1000,
         fetchInit: {
           method: "POST",
@@ -299,11 +322,14 @@ export const prefetchAllData = async (
           errors.push(`Soil Moisture: ${err.message}`);
           return null;
         }),
+      );
+    }
 
-      // Pest detection data
+    if (pestEnd) {
+      mapDataPromises.push(
       getOrFetchJson({
-        key: `layer:pest:${plotName}:${today}`,
-        url: `${BASE_URL}/pest-detection?plot_name=${plotName}&end_date=${today}&days_back=7`,
+        key: `layer:pest:${plotName}:${pestEnd}`,
+        url: `${BASE_URL}/pest-detection?plot_name=${plotName}&end_date=${pestEnd}&days_back=15`,
         ttlMs: 10 * 60 * 1000,
         fetchInit: {
           method: "POST",
@@ -322,7 +348,8 @@ export const prefetchAllData = async (
           errors.push(`Pest: ${err.message}`);
           return null;
         }),
-    ];
+      );
+    }
 
     // 5. Fetch weather data if plot has coordinates
     let weatherPromise: Promise<any> | null = null;

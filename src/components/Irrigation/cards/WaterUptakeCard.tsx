@@ -50,9 +50,22 @@ const WaterUptakeCard: React.FC = () => {
         setLoading(true);
         setError(null);
         
-        const currentEndDate = new Date().toISOString().split('T')[0];
+        let endDate = "";
+        try {
+          const { fetchAnalysisTimeline, latestRebinDateForLayer } =
+            await import("../../../services/analysisTimeline");
+          const timeline = await fetchAnalysisTimeline(plotName);
+          endDate = latestRebinDateForLayer(timeline?.timeline, "Water Uptake");
+        } catch {
+          /* no timeline */
+        }
+        if (!endDate) {
+          setEfficiency(null);
+          setLoading(false);
+          return;
+        }
         const baseUrl = 'https://admin-cropeye.up.railway.app';
-        const url = `${baseUrl}/wateruptake?plot_name=${plotName}&end_date=${currentEndDate}&days_back=7`;
+        const url = `${baseUrl}/wateruptake?plot_name=${plotName}&end_date=${endDate}&days_back=15`;
         
         const response = await fetch(url, {
           method: "POST",

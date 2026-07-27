@@ -15,6 +15,7 @@ import {
   fetchAnalysisTimeline,
   sortedRebinDatesForLayer,
   latestRebinDateAcrossAllLayers,
+  latestRebinDateForLayer,
   type AnalysisTimelineResponse,
 } from "../services/analysisTimeline";
 import { getSinglePlotAgroStats } from "../api";
@@ -380,19 +381,18 @@ function waterUptakeVeryHealthyCoordinates(pixelSummary: Record<string, unknown>
 }
 
 /**
- * Layer APIs use `end_date` = calendar day after the date shown in the rebin ribbon / arrows
- * (e.g. UI 2025-04-08 → request end_date=2025-04-09).
+ * Layer APIs always use that layer's latest image date from the analysis timeline.
+ * Never pass calendar today or an older UI/rebin navigation date.
  */
-function layerApiEndDate(uiDateIso: string): string {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(uiDateIso.trim());
-  if (!m) return uiDateIso;
-  const dt = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-  if (Number.isNaN(dt.getTime())) return uiDateIso;
-  dt.setDate(dt.getDate() + 1);
-  const y = dt.getFullYear();
-  const mo = String(dt.getMonth() + 1).padStart(2, "0");
-  const d = String(dt.getDate()).padStart(2, "0");
-  return `${y}-${mo}-${d}`;
+
+function isNoImageryError(message: string | undefined): boolean {
+  if (!message) return false;
+  const m = message.toLowerCase();
+  return (
+    m.includes("no sentinel") ||
+    m.includes("no images found") ||
+    m.includes("http 404")
+  );
 }
 
 /** Overview framing: zoom in enough to see analysis tiles inside the yellow border. */
@@ -694,36 +694,44 @@ const CropEyeMap: React.FC<MapProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeLayer, selectedPlotName]);
 
-  // Fetch data when currentEndDate changes for ALL 4 layers (Growth, Water Uptake, Soil Moisture, and PEST)
-  // This ensures all layers are updated when date navigation buttons are clicked, keeping dates synchronized
-  // Works regardless of which layer is currently active - all 4 layers always use the same date
+  // Fetch Growth / Water / Soil / Pest once per plot using each layer's latest image date.
+  // Left/right date navigation does not change API end_date (always latest image).
   useEffect(() => {
-    if (selectedPlotName) {
-      const fetchKey = `${selectedPlotName}|${currentEndDate}`;
-      if (layerFetchInFlightRef.current.has(fetchKey)) return;
-      layerFetchInFlightRef.current.add(fetchKey);
-      setDateNavigationLoading(true);
-      const fetchAllLayerData = async () => {
-        try {
-          // Fetch all 4 layers simultaneously in parallel to keep dates synchronized
-          await Promise.all([
-            fetchGrowthData(selectedPlotName),
-            fetchWaterUptakeData(selectedPlotName),
-            fetchSoilMoistureData(selectedPlotName),
-            fetchPestData(selectedPlotName)
-          ]);
-          console.log('✅ Map: All 4 layer APIs (Growth, Water Uptake, Soil Moisture, Pest) fetched successfully for date:', currentEndDate);
-        } catch (err) {
-          console.error('❌ Map: Some layer APIs failed to fetch for date:', currentEndDate, err);
-        } finally {
-          setDateNavigationLoading(false);
-          layerFetchInFlightRef.current.delete(fetchKey);
-        }
-      };
-      fetchAllLayerData();
-    }
+    if (!selectedPlotName) return;
+    if (timelineLoading) return;
+    if (!latestRebinOverall) return;
+
+    const fetchKey = `${selectedPlotName}|latest|${latestRebinOverall}`;
+    if (layerFetchInFlightRef.current.has(fetchKey)) return;
+    layerFetchInFlightRef.current.add(fetchKey);
+    setDateNavigationLoading(true);
+    setError(null);
+    const fetchAllLayerData = async () => {
+      try {
+        await Promise.all([
+          fetchGrowthData(selectedPlotName),
+          fetchWaterUptakeData(selectedPlotName),
+          fetchSoilMoistureData(selectedPlotName),
+          fetchPestData(selectedPlotName),
+        ]);
+        console.log(
+          "✅ Map: All 4 layer APIs fetched with each layer's latest image end_date for plot:",
+          selectedPlotName,
+        );
+      } catch (err) {
+        console.error(
+          "❌ Map: Some layer APIs failed for plot:",
+          selectedPlotName,
+          err,
+        );
+      } finally {
+        setDateNavigationLoading(false);
+        layerFetchInFlightRef.current.delete(fetchKey);
+      }
+    };
+    fetchAllLayerData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentEndDate, selectedPlotName]);
+  }, [selectedPlotName, timelineLoading, latestRebinOverall]);
 
   useEffect(() => {
     if (!dateNavigationLoading) {
@@ -900,12 +908,10 @@ const CropEyeMap: React.FC<MapProps> = ({
     if (!selectedPlotName || initialFetchDoneRef.current || profileLoading) {
       return;
     }
+    if (timelineLoading || !latestRebinOverall) return;
 
-    // Mark that we're doing the initial fetch to prevent duplicate calls
     initialFetchDoneRef.current = true;
     
-    // Initial plot fetch: only non-layer APIs here.
-    // The 4 layer APIs are already fetched by the [currentEndDate, selectedPlotName] effect above.
     console.log('🔄 Map: Fetching plot + field analysis on login for plot:', selectedPlotName);
     Promise.all([fetchPlotData(selectedPlotName), fetchFieldAnalysis(selectedPlotName)])
       .then(() => {
@@ -915,7 +921,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         console.error('❌ Map: Plot/analysis fetch failed:', err);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPlotName, profileLoading]);
+  }, [selectedPlotName, profileLoading, timelineLoading, latestRebinOverall]);
 
   // Removed fetchAllLayerData - date-dependent layers are now fetched by useEffect
 
@@ -985,10 +991,12 @@ const CropEyeMap: React.FC<MapProps> = ({
     if (currentDate < todayDate) {
       const nextDate = new Date(currentEndDate);
       nextDate.setDate(nextDate.getDate() + DAYS_STEP);
-      if (nextDate <= todayDate) {
+      const cap = latestRebinOverall || today;
+      const nextIso = `${nextDate.getFullYear()}-${String(nextDate.getMonth() + 1).padStart(2, "0")}-${String(nextDate.getDate()).padStart(2, "0")}`;
+      if (nextIso <= cap) {
         adjustDate(DAYS_STEP);
       } else {
-        setCurrentEndDate(today);
+        setCurrentEndDate(cap);
       }
     }
   };
@@ -1001,12 +1009,17 @@ const CropEyeMap: React.FC<MapProps> = ({
     const apiPlot = plotNameForApi(plotName);
     const forceRefresh = Boolean(options?.forceRefresh);
 
-    const apiEndDate = layerApiEndDate(currentEndDate);
-    const memKey = `growth:${apiPlot}:${currentEndDate}`;
+    const apiEndDate = latestRebinDateForLayer(
+      timelinePayload?.timeline,
+      "Growth",
+    );
+    if (!apiEndDate) return;
+
+    const memKey = `growth:${apiPlot}:${apiEndDate}`;
     const today = new Date().toISOString().split("T")[0];
-    const sharedKey = `layer:growth:${apiPlot}:${currentEndDate}`;
+    const sharedKey = `layer:growth:${apiPlot}:${apiEndDate}`;
     const sharedTtlMs =
-      currentEndDate === today ? 10 * 60 * 1000 : 30 * 60 * 1000;
+      apiEndDate === today ? 10 * 60 * 1000 : 30 * 60 * 1000;
 
     if (forceRefresh) {
       layerTilesCacheRef.current.delete(memKey);
@@ -1029,7 +1042,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         }
         return;
       }
-      if (currentEndDate === today) {
+      if (apiEndDate === today) {
         const cachedData = getCached(`growthData_${apiPlot}`);
         if (cachedData) {
           layerTilesCacheRef.current.set(memKey, cachedData);
@@ -1071,7 +1084,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       setGrowthData(data);
       
       // Cache the data if it's for today's date
-      if (currentEndDate === today) {
+      if (apiEndDate === today) {
         setCached(`growthData_${apiPlot}`, data);
       }
       
@@ -1093,10 +1106,12 @@ const CropEyeMap: React.FC<MapProps> = ({
       });
       setGrowthData((prev: LayerTileResponse) => preserveLayerTilesOnFetchError(prev));
       
-      // Provide more specific error messages
+      if (isNoImageryError(err?.message)) {
+        // No satellite image for this day — expected; don't block the map UI.
+        return;
+      }
       let errorMessage = "Failed to fetch growth data";
       if (err?.message?.includes("Failed to fetch") || err?.name === "TypeError") {
-        // Check for CORS error specifically
         if (err?.message?.includes("CORS") || err?.message?.includes("cors")) {
           errorMessage = "CORS error: Backend server is not allowing requests from this origin. Please check CORS configuration on the server.";
         } else {
@@ -1117,12 +1132,17 @@ const CropEyeMap: React.FC<MapProps> = ({
     const apiPlot = plotNameForApi(plotName);
     const forceRefresh = Boolean(options?.forceRefresh);
 
-    const apiEndDate = layerApiEndDate(currentEndDate);
-    const memKey = `water:${apiPlot}:${currentEndDate}`;
+    const apiEndDate = latestRebinDateForLayer(
+      timelinePayload?.timeline,
+      "Water Uptake",
+    );
+    if (!apiEndDate) return;
+
+    const memKey = `water:${apiPlot}:${apiEndDate}`;
     const today = new Date().toISOString().split("T")[0];
-    const sharedKey = `layer:water:${apiPlot}:${currentEndDate}`;
+    const sharedKey = `layer:water:${apiPlot}:${apiEndDate}`;
     const sharedTtlMs =
-      currentEndDate === today ? 10 * 60 * 1000 : 30 * 60 * 1000;
+      apiEndDate === today ? 10 * 60 * 1000 : 30 * 60 * 1000;
 
     if (forceRefresh) {
       layerTilesCacheRef.current.delete(memKey);
@@ -1137,7 +1157,6 @@ const CropEyeMap: React.FC<MapProps> = ({
       return;
     }
 
-    // Check cache first (only for today's date to ensure freshness)
     if (!forceRefresh) {
     const sharedCached = getCache(sharedKey, sharedTtlMs);
     if (sharedCached) {
@@ -1148,8 +1167,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       }
       return;
     }
-    // Back-compat: older cache key used by prefetch/login
-    if (currentEndDate === today) {
+    if (apiEndDate === today) {
       const cachedData = getCached(`waterUptakeData_${apiPlot}`);
       if (cachedData) {
         layerTilesCacheRef.current.set(memKey, cachedData);
@@ -1162,16 +1180,10 @@ const CropEyeMap: React.FC<MapProps> = ({
     }
     }
 
-    // Use direct backend URL in production (proxy only works in dev)
-    // const baseUrl = import.meta.env.DEV 
-    //   ? '/api/dev-plot' 
-    //   : 'https://admin-cropeye.up.railway.app';
     const baseUrl = 'https://admin-cropeye.up.railway.app';
     const url = `${baseUrl}/wateruptake?plot_name=${encodeURIComponent(apiPlot)}&end_date=${apiEndDate}&days_back=15`;
 
     try {
-      
-      // Try fetch with explicit CORS mode and proper headers matching curl command
       const data = await getOrFetchJson({
         key: sharedKey,
         url,
@@ -1190,12 +1202,10 @@ const CropEyeMap: React.FC<MapProps> = ({
       layerTilesCacheRef.current.set(memKey, data);
       setWaterUptakeData(data);
       
-      // Cache the data if it's for today's date
-      if (currentEndDate === today) {
+      if (apiEndDate === today) {
         setCached(`waterUptakeData_${apiPlot}`, data);
       }
       
-      // Preserve plot boundary from water uptake data if not already set
       if (!skipAnalysisBoundaryRef.current && !plotBoundary && data?.features?.[0]?.geometry) {
         setPlotBoundary(data.features[0]);
       }
@@ -1213,10 +1223,9 @@ const CropEyeMap: React.FC<MapProps> = ({
       });
       setWaterUptakeData((prev: LayerTileResponse) => preserveLayerTilesOnFetchError(prev));
       
-      // Provide more specific error messages
+      if (isNoImageryError(err?.message)) return;
       let errorMessage = "Failed to fetch water uptake data";
       if (err?.message?.includes("Failed to fetch") || err?.name === "TypeError") {
-        // Check for CORS error specifically
         if (err?.message?.includes("CORS") || err?.message?.includes("cors")) {
           errorMessage = "CORS error: Backend server is not allowing requests from this origin. Please check CORS configuration on the server.";
         } else {
@@ -1237,10 +1246,15 @@ const CropEyeMap: React.FC<MapProps> = ({
     const apiPlot = plotNameForApi(plotName);
     const forceRefresh = Boolean(options?.forceRefresh);
 
-    const apiEndDate = layerApiEndDate(currentEndDate);
-    const memKey = `soil:${apiPlot}:${currentEndDate}`;
+    const apiEndDate = latestRebinDateForLayer(
+      timelinePayload?.timeline,
+      "Soil Moisture",
+    );
+    if (!apiEndDate) return;
+
+    const memKey = `soil:${apiPlot}:${apiEndDate}`;
     if (forceRefresh) {
-      removeCache(`layer:soil:${apiPlot}:${currentEndDate}`);
+      removeCache(`layer:soil:${apiPlot}:${apiEndDate}`);
       removeCache(`soilMoistureData_${apiPlot}`);
       layerTilesCacheRef.current.delete(memKey);
     } else if (layerTilesCacheRef.current.has(memKey)) {
@@ -1252,10 +1266,9 @@ const CropEyeMap: React.FC<MapProps> = ({
       return;
     }
 
-    // Check cache first (only for today's date to ensure freshness)
     const today = new Date().toISOString().split('T')[0];
-    const sharedKey = `layer:soil:${apiPlot}:${currentEndDate}`;
-    const sharedTtlMs = currentEndDate === today ? 10 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+    const sharedKey = `layer:soil:${apiPlot}:${apiEndDate}`;
+    const sharedTtlMs = apiEndDate === today ? 10 * 60 * 1000 : 30 * 60 * 1000;
     if (!forceRefresh) {
     const sharedCached = getCache(sharedKey, sharedTtlMs);
     if (sharedCached) {
@@ -1266,8 +1279,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       }
       return;
     }
-    // Back-compat: older cache key used by prefetch/login
-    if (currentEndDate === today) {
+    if (apiEndDate === today) {
       const cachedData = getCached(`soilMoistureData_${apiPlot}`);
       if (cachedData) {
         layerTilesCacheRef.current.set(memKey, cachedData);
@@ -1280,12 +1292,8 @@ const CropEyeMap: React.FC<MapProps> = ({
     }
     }
 
-    // Use direct backend URL in production (proxy only works in dev)
-    // const baseUrl = import.meta.env.DEV 
-    //   ? '/api/dev-plot' 
-    //   : 'https://admin-cropeye.up.railway.app';
     const baseUrl = 'https://admin-cropeye.up.railway.app';
-    const url = `${baseUrl}/SoilMoisture?plot_name=${encodeURIComponent(apiPlot)}&end_date=${apiEndDate}&days_back=7`;
+    const url = `${baseUrl}/SoilMoisture?plot_name=${encodeURIComponent(apiPlot)}&end_date=${apiEndDate}&days_back=15`;
 
     
     try {
@@ -1307,12 +1315,10 @@ const CropEyeMap: React.FC<MapProps> = ({
       layerTilesCacheRef.current.set(memKey, data);
       setSoilMoistureData(data);
       
-      // Cache the data if it's for today's date
-      if (currentEndDate === today) {
+      if (apiEndDate === today) {
         setCached(`soilMoistureData_${apiPlot}`, data);
       }
       
-      // Preserve plot boundary from soil moisture data if not already set
       if (!skipAnalysisBoundaryRef.current && !plotBoundary && data?.features?.[0]?.geometry) {
         setPlotBoundary(data.features[0]);
       }
@@ -1330,10 +1336,9 @@ const CropEyeMap: React.FC<MapProps> = ({
       });
       setSoilMoistureData((prev: LayerTileResponse) => preserveLayerTilesOnFetchError(prev));
       
-      // Provide more specific error messages
+      if (isNoImageryError(err?.message)) return;
       let errorMessage = "Failed to fetch soil moisture data";
       if (err?.message?.includes("Failed to fetch") || err?.name === "TypeError") {
-        // Check for CORS error specifically
         if (err?.message?.includes("CORS") || err?.message?.includes("cors")) {
           errorMessage = "CORS error: Backend server is not allowing requests from this origin. Please check CORS configuration on the server.";
         } else {
@@ -1351,9 +1356,15 @@ const CropEyeMap: React.FC<MapProps> = ({
     setError(null);
 
     const apiPlot = plotNameForApi(plotName);
-    const currentDate = getCurrentDate();
+    const currentDate =
+      latestRebinDateForLayer(timelinePayload?.timeline, "Growth") ||
+      latestRebinOverall;
+    if (!currentDate) {
+      setLoading(false);
+      return;
+    }
     const baseUrl = 'https://admin-cropeye.up.railway.app';
-    const url = `${baseUrl}/analyze_Growth?plot_name=${encodeURIComponent(apiPlot)}&end_date=${currentDate}&days_back=7`;
+    const url = `${baseUrl}/analyze_Growth?plot_name=${encodeURIComponent(apiPlot)}&end_date=${currentDate}&days_back=15`;
 
     try {
       
@@ -1432,9 +1443,12 @@ const CropEyeMap: React.FC<MapProps> = ({
     const apiPlot = plotNameForApi(plotName);
 
     try {
-      const currentDate = getCurrentDate();
+      const currentDate =
+        latestRebinDateForLayer(timelinePayload?.timeline, "Growth") ||
+        latestRebinOverall;
+      if (!currentDate) return;
       const resp = await fetch(
-        `https://sef-cropeye.up.railway.app/analyze?plot_name=${encodeURIComponent(apiPlot)}&end_date=${currentDate}&days_back=7`,
+        `https://sef-cropeye.up.railway.app/analyze?plot_name=${encodeURIComponent(apiPlot)}&end_date=${currentDate}&days_back=15`,
         {
           method: "GET",
           headers: { "Content-Type": "application/json" },
@@ -1497,10 +1511,15 @@ const CropEyeMap: React.FC<MapProps> = ({
     }
 
     const apiPlot = plotNameForApi(plotName);
-    const apiEndDate = layerApiEndDate(currentEndDate);
-    const memKey = `pest:${apiPlot}:${currentEndDate}`;
+    const apiEndDate = latestRebinDateForLayer(
+      timelinePayload?.timeline,
+      "PEST",
+    );
+    if (!apiEndDate) return;
+
+    const memKey = `pest:${apiPlot}:${apiEndDate}`;
     if (forceRefresh) {
-      removeCache(`layer:pest:${apiPlot}:${currentEndDate}`);
+      removeCache(`layer:pest:${apiPlot}:${apiEndDate}`);
       removeCache(`pestData_${apiPlot}`);
       removeCache(`pestData_${plotName}`);
       layerTilesCacheRef.current.delete(memKey);
@@ -1537,10 +1556,9 @@ const CropEyeMap: React.FC<MapProps> = ({
       return;
     }
 
-    // Check cache first (only for today's date to ensure freshness)
     const today = new Date().toISOString().split('T')[0];
-    const sharedKey = `layer:pest:${apiPlot}:${currentEndDate}`;
-    const sharedTtlMs = currentEndDate === today ? 10 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+    const sharedKey = `layer:pest:${apiPlot}:${apiEndDate}`;
+    const sharedTtlMs = apiEndDate === today ? 10 * 60 * 1000 : 30 * 60 * 1000;
     if (!forceRefresh) {
     const sharedCached = getCache(sharedKey, sharedTtlMs);
     if (sharedCached) {
@@ -1551,8 +1569,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       }
       return;
     }
-    // Back-compat: older cache key used by prefetch/login
-    if (currentEndDate === today) {
+    if (apiEndDate === today) {
       const cachedData =
         getCached(`pestData_${apiPlot}`) || getCached(`pestData_${plotName}`);
       if (cachedData) {
@@ -1563,12 +1580,8 @@ const CropEyeMap: React.FC<MapProps> = ({
     }
     }
 
-    // Use direct backend URL in production (proxy only works in dev)
-    // const baseUrl = import.meta.env.DEV 
-    //   ? '/api/dev-plot' 
-    //   : 'https://admin-cropeye.up.railway.app';
     const baseUrl = 'https://admin-cropeye.up.railway.app';
-    const url = `${baseUrl}/pest-detection?plot_name=${encodeURIComponent(apiPlot)}&end_date=${apiEndDate}&days_back=7`;
+    const url = `${baseUrl}/pest-detection?plot_name=${encodeURIComponent(apiPlot)}&end_date=${apiEndDate}&days_back=15`;
 
     try {
       const data = await getOrFetchJson({
@@ -1589,12 +1602,10 @@ const CropEyeMap: React.FC<MapProps> = ({
       layerTilesCacheRef.current.set(memKey, data);
       setPestData(data);
       
-      // Cache the data if it's for today's date
-      if (currentEndDate === today) {
+      if (apiEndDate === today) {
         setCached(`pestData_${apiPlot}`, data);
       }
       
-      // Preserve plot boundary from pest data if not already set
       if (!skipAnalysisBoundaryRef.current && !plotBoundary && data?.features?.[0]?.geometry) {
         setPlotBoundary(data.features[0]);
       }
@@ -1636,10 +1647,9 @@ const CropEyeMap: React.FC<MapProps> = ({
       });
       setPestData((prev: LayerTileResponse) => preserveLayerTilesOnFetchError(prev));
       
-      // Provide more specific error messages
+      if (isNoImageryError(err?.message)) return;
       let errorMessage = "Failed to fetch pest data";
       if (err?.message?.includes("Failed to fetch") || err?.name === "TypeError") {
-        // Check for CORS error specifically
         if (err?.message?.includes("CORS") || err?.message?.includes("cors")) {
           errorMessage = "CORS error: Backend server is not allowing requests from this origin. Please check CORS configuration on the server.";
         } else {
