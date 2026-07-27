@@ -17,6 +17,15 @@
   z-index: 450 !important;
 }
 
+/* Legend pixel dots + yellow plot border must sit ABOVE analysis tiles */
+.leaflet-pixelOverlay-pane {
+  z-index: 550 !important;
+}
+
+.leaflet-plotBorderOverlay-pane {
+  z-index: 560 !important;
+}
+
 .controls-header {
   display: flex;
   justify-content: space-between;
@@ -474,6 +483,14 @@
 /* Keep Growth/Water/Soil/Pest tiles above satellite in split-screen too */
 .splitscreen-overlay .leaflet-analysisOverlay-pane {
   z-index: 1450 !important;
+}
+
+.splitscreen-overlay .leaflet-pixelOverlay-pane {
+  z-index: 1550 !important;
+}
+
+.splitscreen-overlay .leaflet-plotBorderOverlay-pane {
+  z-index: 1560 !important;
 }
 
 /* Custom zoom controls */
@@ -1038,6 +1055,14 @@
      Without this, backend tile_url loads but the colored layer is hidden under Google imagery. */
   .leaflet-analysisOverlay-pane {
     z-index: 450 !important;
+  }
+
+  .leaflet-pixelOverlay-pane {
+    z-index: 550 !important;
+  }
+
+  .leaflet-plotBorderOverlay-pane {
+    z-index: 560 !important;
   }
   
   /* Ensure circles and polygons stay below controls */

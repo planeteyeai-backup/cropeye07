@@ -2750,8 +2750,17 @@ const CropEyeMap: React.FC<MapProps> = ({
             </Pane>
           )}
 
-          {selectedLegendClass && renderFilteredPixels()}
-          {renderPlotBorder()}
+          {/* Legend pixels + yellow border ABOVE green analysis tiles (pane 450).
+              Default overlay-pane is forced to z-index 100 in CSS, so without this
+              the white pixel circles render under the tile layer and look invisible. */}
+          {selectedLegendClass && (
+            <Pane name="pixelOverlay" style={{ zIndex: 550 }}>
+              {renderFilteredPixels()}
+            </Pane>
+          )}
+          <Pane name="plotBorderOverlay" style={{ zIndex: 560 }}>
+            {renderPlotBorder()}
+          </Pane>
         </MapContainer>
 
         {legendData.length > 0 && (
