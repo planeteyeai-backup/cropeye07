@@ -57,6 +57,7 @@ import MapCropStatusOverlay from "./MapCropStatusOverlay";
 import FieldIndicesStageBadge from "./FieldIndicesStageBadge";
 import { useFieldIndicesCropStage } from "../hooks/useFieldIndicesCropStage";
 import { enrichPlotsWithFarmDetails } from "../utils/fertilizerStage";
+import { normalizePlotKey } from "../utils/plotName";
 import {
   cropConditionStyleFromCci,
   fetchWaterStressAnalysis,
@@ -234,6 +235,71 @@ function getPlotIdsFromFarmer(farmer: any): string[] {
   return ids;
 }
 
+/** Keep slash/underscore plot ids equivalent (Google Translate / API format drift). */
+function resolvePlotIdInList(
+  plotIds: string[],
+  candidate: string | null | undefined,
+): string | null {
+  if (!candidate?.trim() || !plotIds.length) return null;
+  if (plotIds.includes(candidate)) return candidate;
+  const target = normalizePlotKey(candidate);
+  return plotIds.find((id) => normalizePlotKey(id) === target) ?? null;
+}
+
+function managerPlotStorageKey(farmerId: string): string {
+  return `cropeye:mgrSelectedPlot:${farmerId}`;
+}
+
+function managerFarmerStorageKey(officerId: string): string {
+  return `cropeye:mgrSelectedFarmer:${officerId}`;
+}
+
+function readStoredManagerPlot(
+  farmerId: string,
+  plotIds: string[],
+): string | null {
+  if (!farmerId || typeof sessionStorage === "undefined") return null;
+  try {
+    const raw = sessionStorage.getItem(managerPlotStorageKey(farmerId));
+    return resolvePlotIdInList(plotIds, raw);
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredManagerPlot(farmerId: string, plotId: string): void {
+  if (!farmerId || !plotId || typeof sessionStorage === "undefined") return;
+  try {
+    sessionStorage.setItem(managerPlotStorageKey(farmerId), plotId);
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
+function readStoredManagerFarmer(
+  officerId: string,
+  farmers: any[],
+): string | null {
+  if (!officerId || typeof sessionStorage === "undefined") return null;
+  try {
+    const raw = sessionStorage.getItem(managerFarmerStorageKey(officerId));
+    if (!raw?.trim()) return null;
+    const match = farmers.find((f: any) => getFarmerId(f) === String(raw));
+    return match ? String(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredManagerFarmer(officerId: string, farmerId: string): void {
+  if (!officerId || !farmerId || typeof sessionStorage === "undefined") return;
+  try {
+    sessionStorage.setItem(managerFarmerStorageKey(officerId), farmerId);
+  } catch {
+    // ignore
+  }
+}
+
 /** Convert GeoJSON boundary ring to Leaflet [lat, lng] pairs; ignore bad points. */
 function boundaryToLeafletCoords(boundary: any): [number, number][] {
   let value = boundary;
@@ -372,6 +438,14 @@ const ManagerFarmDash: React.FC = () => {
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const dashboardLoadedForPlotRef = useRef<string>("");
   const plotFetchGenRef = useRef(0);
+  /** Farmer id we last auto-defaulted a plot for — avoid resetting to plot[0] on enrich/GT re-renders. */
+  const plotAutoSelectFarmerRef = useRef<string>("");
+  /** Last FO id whose farmers list we fully synced (ignore fieldOfficers identity churn). */
+  const lastSyncedOfficerIdRef = useRef<string>("");
+  /** Plot the user explicitly chose — never overwrite with plot[0] until FO/farmer changes. */
+  const userPickedPlotRef = useRef<string | null>(null);
+  const selectedFarmerIdRef = useRef<string>("");
+  const selectedFieldOfficerIdRef = useRef<string>("");
 
   const lineStyles: LineStyles = {
     growth: { color: "#16a34a", label: "Growth Index" },
@@ -450,10 +524,13 @@ const ManagerFarmDash: React.FC = () => {
     const farmer = farmersForSelectedOfficer.find(
       (f) => getFarmerId(f) === String(selectedFarmerId),
     );
+    const plotList = Array.isArray(farmer?.plots) ? farmer.plots : [];
+    const target = normalizePlotKey(selectedPlotId);
     return (
-      farmer?.plots?.find(
-        (p: any) => String(p.fastapi_plot_id) === String(selectedPlotId),
-      ) ?? null
+      plotList.find((p: any) => {
+        const id = getPlotIdFromRecord(p);
+        return id != null && normalizePlotKey(id) === target;
+      }) ?? null
     );
   }, [selectedPlotId, selectedFarmerId, farmersForSelectedOfficer]);
 
@@ -488,6 +565,14 @@ const ManagerFarmDash: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount only
   }, []);
 
+  useEffect(() => {
+    selectedFarmerIdRef.current = selectedFarmerId;
+  }, [selectedFarmerId]);
+
+  useEffect(() => {
+    selectedFieldOfficerIdRef.current = selectedFieldOfficerId;
+  }, [selectedFieldOfficerId]);
+
   const selectOfficerFarmersAndPlot = (
     officers: any[],
     preferredOfficerId?: string,
@@ -497,30 +582,66 @@ const ManagerFarmDash: React.FC = () => {
       setFarmersForSelectedOfficer([]);
       setSelectedFarmerId("");
       setPlots([]);
+      userPickedPlotRef.current = null;
       setSelectedPlotId("");
       return;
     }
 
     const officer =
       officers.find((o) => String(o.id) === preferredOfficerId) ?? officers[0];
-    const farmersList = officer?.farmers ?? [];
-    setSelectedFieldOfficerId(String(officer.id));
+    applyOfficerSelection(String(officer.id), officers);
+  };
+
+  /** Imperative FO change — never driven by <select> / Translate fake events. */
+  const applyOfficerSelection = (
+    officerId: string,
+    officersList?: any[],
+  ): void => {
+    const list = officersList ?? fieldOfficers;
+    if (!officerId) return;
+    if (
+      officerId === selectedFieldOfficerIdRef.current &&
+      farmersForSelectedOfficer.length > 0
+    ) {
+      return;
+    }
+
+    const officer = list.find((fo) => String(fo.id) === String(officerId));
+    if (!officer) return;
+
+    const farmersList = Array.isArray(officer?.farmers) ? officer.farmers : [];
+    lastSyncedOfficerIdRef.current = String(officerId);
+    setSelectedFieldOfficerId(String(officerId));
     setFarmersForSelectedOfficer(farmersList);
+    userPickedPlotRef.current = null;
 
     if (!farmersList.length) {
+      plotAutoSelectFarmerRef.current = "";
       setSelectedFarmerId("");
       setPlots([]);
       setSelectedPlotId("");
       return;
     }
 
-    const farmer = farmersList[0];
+    const storedFarmerId = readStoredManagerFarmer(String(officerId), farmersList);
+    const farmer =
+      farmersList.find((f: any) => getFarmerId(f) === storedFarmerId) ??
+      farmersList[0];
     const farmerId = getFarmerId(farmer) ?? "";
     const plotIds = getPlotIdsFromFarmer(farmer);
+    const restoredPlot = readStoredManagerPlot(farmerId, plotIds);
 
+    plotAutoSelectFarmerRef.current = farmerId;
     setSelectedFarmerId(farmerId);
     setPlots(plotIds);
-    setSelectedPlotId(plotIds[0] ?? "");
+    writeStoredManagerFarmer(String(officerId), farmerId);
+
+    if (restoredPlot) {
+      userPickedPlotRef.current = restoredPlot;
+      setSelectedPlotId(restoredPlot);
+    } else {
+      setSelectedPlotId(plotIds[0] ?? "");
+    }
   };
 
   // NEW: Function to set plot coordinates from existing state
@@ -530,7 +651,9 @@ const ManagerFarmDash: React.FC = () => {
         (f) => getFarmerId(f) === String(selectedFarmerId),
       );
       const plot = farmer?.plots?.find(
-        (p: any) => getPlotIdFromRecord(p) === String(plotId),
+        (p: any) =>
+          normalizePlotKey(String(getPlotIdFromRecord(p) ?? "")) ===
+          normalizePlotKey(plotId),
       );
 
       const coords = boundaryToLeafletCoords(resolvePlotBoundary(plot));
@@ -546,32 +669,6 @@ const ManagerFarmDash: React.FC = () => {
     }
   };
 
-  // Update farmers dropdown when field officer changes
-  useEffect(() => {
-    if (selectedFieldOfficerId) {
-      const officer = fieldOfficers.find(
-        (fo) => String(fo.id) === selectedFieldOfficerId,
-      );
-      const farmersList = Array.isArray(officer?.farmers) ? officer.farmers : [];
-      setFarmersForSelectedOfficer(farmersList);
-      dashboardLoadedForPlotRef.current = "";
-      // Keep previous polygon until new plot coords arrive (Leaflet removeChild safety).
-      if (farmersList.length > 0) {
-        setSelectedFarmerId((prev) => {
-          const stillValid = farmersList.some(
-            (f: any) => getFarmerId(f) === String(prev),
-          );
-          if (stillValid) return prev;
-          return getFarmerId(farmersList[0]) ?? "";
-        });
-      } else {
-        setSelectedFarmerId("");
-        setPlots([]);
-        setSelectedPlotId("");
-      }
-    }
-  }, [selectedFieldOfficerId, fieldOfficers]);
-
   // Enrich farmer plots with /farms/ details (plantation date + planting method for crop stage).
   useEffect(() => {
     const farmerId = selectedFarmerId?.trim();
@@ -583,6 +680,8 @@ const ManagerFarmDash: React.FC = () => {
       try {
         const farmsRes = await getFarmsByFarmerId(farmerId);
         if (cancelled) return;
+        // Ignore stale enrichment if user already switched farmer.
+        if (selectedFarmerIdRef.current !== farmerId) return;
 
         const farms = parseFarmsListResponse(farmsRes?.data);
         if (!farms.length) return;
@@ -590,11 +689,11 @@ const ManagerFarmDash: React.FC = () => {
         setFarmersForSelectedOfficer((prev) =>
           prev.map((farmer) => {
             if (getFarmerId(farmer) !== farmerId) return farmer;
-            const plots = Array.isArray(farmer?.plots) ? farmer.plots : [];
-            if (!plots.length) return farmer;
+            const plotList = Array.isArray(farmer?.plots) ? farmer.plots : [];
+            if (!plotList.length) return farmer;
             return {
               ...farmer,
-              plots: enrichPlotsWithFarmDetails(plots, farms),
+              plots: enrichPlotsWithFarmDetails(plotList, farms),
             };
           }),
         );
@@ -608,40 +707,76 @@ const ManagerFarmDash: React.FC = () => {
     };
   }, [selectedFarmerId]);
 
-  // Fetch plots when farmer is selected
+  // Update plot id LIST only. Never assign selectedPlotId to plot[0] here.
   useEffect(() => {
-    if (selectedFarmerId && selectedFarmerId !== "undefined") {
-      const selectedFarmer = farmersForSelectedOfficer.find(
-        (f) => getFarmerId(f) === String(selectedFarmerId),
-      );
-
-      if (selectedFarmer) {
-        const plotIds = getPlotIdsFromFarmer(selectedFarmer);
-
-        setPlots(plotIds);
-
-        if (plotIds.length > 0) {
-          setSelectedPlotId((prev) => {
-            if (prev && plotIds.includes(prev)) {
-              return prev;
-            }
-            dashboardLoadedForPlotRef.current = "";
-            return plotIds[0];
-          });
-        } else {
-          dashboardLoadedForPlotRef.current = "";
-          setSelectedPlotId("");
-          // Keep last polygon until next plot loads (avoids Leaflet removeChild crash).
-        }
-      } else {
-        setPlots([]);
-        setSelectedPlotId("");
-      }
-    } else {
+    if (!selectedFarmerId || selectedFarmerId === "undefined") {
       setPlots([]);
-      setSelectedPlotId("");
+      return;
     }
+
+    const selectedFarmer = farmersForSelectedOfficer.find(
+      (f) => getFarmerId(f) === String(selectedFarmerId),
+    );
+    if (!selectedFarmer) return;
+
+    const plotIds = getPlotIdsFromFarmer(selectedFarmer);
+    setPlots((prev) =>
+      prev.length === plotIds.length &&
+      prev.every((id, i) => id === plotIds[i])
+        ? prev
+        : plotIds,
+    );
+
+    if (plotIds.length === 0) return;
+    setSelectedPlotId((prev) => {
+      if (!prev) return prev;
+      const kept = resolvePlotIdInList(plotIds, prev);
+      if (kept) {
+        if (kept !== prev && userPickedPlotRef.current) {
+          userPickedPlotRef.current = kept;
+          writeStoredManagerPlot(selectedFarmerId, kept);
+        }
+        return kept;
+      }
+      const locked = resolvePlotIdInList(plotIds, userPickedPlotRef.current);
+      return locked ?? prev;
+    });
   }, [selectedFarmerId, farmersForSelectedOfficer]);
+
+  const applyUserPlotSelection = (plotId: string) => {
+    if (!plotId) return;
+    userPickedPlotRef.current = plotId;
+    plotAutoSelectFarmerRef.current = String(selectedFarmerId);
+    writeStoredManagerPlot(selectedFarmerId, plotId);
+    if (plotId === selectedPlotId) return;
+    dashboardLoadedForPlotRef.current = "";
+    setSelectedPlotId(plotId);
+    void fetchPlotCoordinates(plotId);
+  };
+
+  const applyFarmerSelection = (farmerId: string) => {
+    if (!farmerId || farmerId === selectedFarmerId) return;
+    userPickedPlotRef.current = null;
+    dashboardLoadedForPlotRef.current = "";
+
+    const farmer = farmersForSelectedOfficer.find(
+      (f) => getFarmerId(f) === String(farmerId),
+    );
+    const plotIds = getPlotIdsFromFarmer(farmer);
+    const restored = readStoredManagerPlot(farmerId, plotIds);
+
+    plotAutoSelectFarmerRef.current = farmerId;
+    setSelectedFarmerId(farmerId);
+    setPlots(plotIds);
+    writeStoredManagerFarmer(selectedFieldOfficerId, farmerId);
+
+    if (restored) {
+      userPickedPlotRef.current = restored;
+      setSelectedPlotId(restored);
+    } else {
+      setSelectedPlotId(plotIds[0] ?? "");
+    }
+  };
 
   useEffect(() => {
     if (!selectedPlotId) {
@@ -814,14 +949,7 @@ const ManagerFarmDash: React.FC = () => {
     }
     setPlotStatsError(null);
     setLoadingWaterStress(true);
-    setMetrics((prev) => ({
-      ...prev,
-      fieldScore: null,
-      cropConditionLabel: null,
-      cropConditionValue: null,
-      stressCount: null,
-      stressTotalDays: null,
-    }));
+    // Keep previous metrics on screen while the new plot loads (avoids full-page "refresh" flash).
     try {
       const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
       const today = new Date(Date.now() - tzOffsetMs)
@@ -1647,7 +1775,7 @@ const ManagerFarmDash: React.FC = () => {
                 className="flex flex-col sm:flex-row gap-4 w-full sm:w-auto notranslate"
                 translate="no"
               >
-                <div className="flex flex-col flex-1 sm:flex-none">
+                <div className="flex flex-col flex-1 sm:flex-none notranslate" translate="no">
                   <label className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
                     <Users className="w-4 h-4" />
                     Field Officer ({fieldOfficers.length})
@@ -1656,20 +1784,33 @@ const ManagerFarmDash: React.FC = () => {
                     className="px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200 bg-white shadow-sm w-full sm:w-64 notranslate"
                     translate="no"
                     value={selectedFieldOfficerId}
-                    onChange={(e) => setSelectedFieldOfficerId(e.target.value)}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      if (next === selectedFieldOfficerId) return;
+                      if (!next && selectedFieldOfficerId) return;
+                      applyOfficerSelection(next);
+                    }}
                     disabled={loadingFarmers}
                   >
                     {loadingFarmers ? (
-                      <option>Loading...</option>
+                      <option className="notranslate" translate="no">
+                        Loading...
+                      </option>
                     ) : fieldOfficers.length === 0 ? (
-                      <option>No officers found</option>
+                      <option className="notranslate" translate="no">
+                        No officers found
+                      </option>
                     ) : (
                       <>
-                        <option value="">Select an officer</option>
+                        <option value="" className="notranslate" translate="no">
+                          Select an officer
+                        </option>
                         {fieldOfficers.map((officer) => (
                           <option
                             key={`officer-${officer.id}`}
                             value={officer.id}
+                            className="notranslate"
+                            translate="no"
                           >
                             {officer.first_name ?? ""} {officer.last_name ?? ""}{" "}
                             ({Array.isArray(officer.farmers)
@@ -1683,7 +1824,7 @@ const ManagerFarmDash: React.FC = () => {
                   </select>
                 </div>
 
-                <div className="flex flex-col flex-1 sm:flex-none">
+                <div className="flex flex-col flex-1 sm:flex-none notranslate" translate="no">
                   <label className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
                     <Users className="w-4 h-4" /> Farmers (
                     {farmersForSelectedOfficer.length})
@@ -1693,12 +1834,10 @@ const ManagerFarmDash: React.FC = () => {
                     translate="no"
                     value={selectedFarmerId}
                     onChange={(e) => {
-                      dashboardLoadedForPlotRef.current = "";
-                      // Do not clear plotCoordinates here — emptying Polygon/tooltip
-                      // mid-render causes removeChild crashes (esp. with kn locale).
-                      setPlots([]);
-                      setSelectedPlotId("");
-                      setSelectedFarmerId(e.target.value);
+                      const next = e.target.value;
+                      if (next === selectedFarmerId) return;
+                      if (!next && selectedFarmerId) return;
+                      applyFarmerSelection(next);
                     }}
                     disabled={
                       !selectedFieldOfficerId ||
@@ -1706,14 +1845,21 @@ const ManagerFarmDash: React.FC = () => {
                     }
                   >
                     {loadingFarmers ? (
-                      <option>Loading farmers...</option>
+                      <option className="notranslate" translate="no">
+                        Loading farmers...
+                      </option>
                     ) : farmersForSelectedOfficer.length === 0 ? (
-                      <option>No farmers found</option>
+                      <option className="notranslate" translate="no">
+                        No farmers found
+                      </option>
                     ) : (
                       <>
-                        <option value="">Select a farmer</option>
+                        <option value="" className="notranslate" translate="no">
+                          Select a farmer
+                        </option>
                         {farmersForSelectedOfficer.map((farmer, index) => {
-                          const farmerId = getFarmerId(farmer) ?? `unknown-${index}`;
+                          const farmerId =
+                            getFarmerId(farmer) ?? `unknown-${index}`;
                           const farmerName =
                             `${farmer.first_name ?? ""} ${farmer.last_name ?? ""}`.trim() ||
                             farmer.name ||
@@ -1722,9 +1868,13 @@ const ManagerFarmDash: React.FC = () => {
                           const plotsCount = Array.isArray(farmer.plots)
                             ? farmer.plots.length
                             : 0;
-
                           return (
-                            <option key={`farmer-${farmerId}`} value={farmerId}>
+                            <option
+                              key={`farmer-${farmerId}`}
+                              value={farmerId}
+                              className="notranslate"
+                              translate="no"
+                            >
                               {farmerName} ({plotsCount} plot
                               {plotsCount !== 1 ? "s" : ""})
                             </option>
@@ -1735,7 +1885,7 @@ const ManagerFarmDash: React.FC = () => {
                   </select>
                 </div>
 
-                <div className="flex flex-col flex-1 sm:flex-none">
+                <div className="flex flex-col flex-1 sm:flex-none notranslate" translate="no">
                   <label className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
                     <MapPin className="w-4 h-4" />
                     Plots ({plots.length})
@@ -1745,32 +1895,36 @@ const ManagerFarmDash: React.FC = () => {
                     translate="no"
                     value={selectedPlotId}
                     onChange={(e) => {
-                      const newPlotId = e.target.value;
-                      setSelectedPlotId(newPlotId);
-                      if (newPlotId) {
-                        // Immediately fetch coordinates and update map
-                        fetchPlotCoordinates(newPlotId);
-                      }
+                      const next = e.target.value;
+                      if (next === selectedPlotId) return;
+                      if (!next && selectedPlotId) return;
+                      applyUserPlotSelection(next);
                     }}
                     disabled={!selectedFarmerId || plots.length === 0}
                   >
                     {!selectedFarmerId ? (
-                      <option value="">Select farmer first</option>
+                      <option value="" className="notranslate" translate="no">
+                        Select farmer first
+                      </option>
                     ) : plots.length === 0 ? (
-                      <option value="">No plots available</option>
+                      <option value="" className="notranslate" translate="no">
+                        No plots available
+                      </option>
                     ) : (
                       <>
-                        <option value="">Select a plot</option>
-                        {plots.map((plotId, index) => {
-                          return (
-                            <option
-                              key={`plot-${plotId}-${index}`}
-                              value={plotId}
-                            >
-                              Plot: {plotId}
-                            </option>
-                          );
-                        })}
+                        <option value="" className="notranslate" translate="no">
+                          Select a plot
+                        </option>
+                        {plots.map((plotId, index) => (
+                          <option
+                            key={`plot-${plotId}-${index}`}
+                            value={plotId}
+                            className="notranslate"
+                            translate="no"
+                          >
+                            Plot: {plotId}
+                          </option>
+                        ))}
                       </>
                     )}
                   </select>
@@ -2100,9 +2254,10 @@ const ManagerFarmDash: React.FC = () => {
               />
 
               <MapSectionErrorBoundary
-                resetKey={`${selectedFarmerId}|${selectedPlotId}`}
+                resetKey={String(selectedFarmerId || "none")}
               >
                 <MapContainer
+                  key={`mgr-map-${selectedFarmerId || "none"}`}
                   center={mapCenter}
                   zoom={16}
                   minZoom={10}
