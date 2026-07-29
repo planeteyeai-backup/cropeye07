@@ -1,6 +1,7 @@
 import React, { useEffect, useId } from "react";
 import { Languages } from "lucide-react";
 import "./GoogleTranslateWidget.css";
+import { protectAllManagerFarmDashRoots } from "../utils/protectManagerDashFromTranslate";
 
 declare global {
   interface Window {
@@ -124,6 +125,10 @@ const hideGoogleTranslateTopBar = () => {
   });
 
   protectNumericTextNodes();
+  // Manager Farm Dashboard must stay untranslated in production (Kannada GT breaks selects).
+  if (import.meta.env.PROD) {
+    protectAllManagerFarmDashRoots();
+  }
 };
 
 const GOOGTRANS = "googtrans";

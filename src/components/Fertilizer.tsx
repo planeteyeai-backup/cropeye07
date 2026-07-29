@@ -7,6 +7,7 @@ import { useAppContext } from "../context/AppContext";
 import FertilizerTable from "./FertilizerTable";
 import { useFarmerProfile } from "../hooks/useFarmerProfile";
 import { useI18nLite, type AppLanguage } from "../i18nLite";
+import { resolveAvailableImageEndDateForPlot } from "../utils/plotImageEndDates";
 
 interface FertilizerEntry {
   day: number;
@@ -35,7 +36,7 @@ const marathiVideoList: VideoResource[] = [
   },
   {
     title: "ऊस शेतीत योग्य जातीची निवड",
-    url: "https://www.youtube.com/                                                                                                                               embed/Si0hh9xFHvI?si=Y582InMZoil2dccv",
+    url: "https://www.youtube.com/embed/Si0hh9xFHvI?si=Y582InMZoil2dccv",
     desc: "ऊस शेतीत योग्य जातीची निवड ही यशस्वी शेतीचा पाया आहे. महाराष्ट्र, उत्तर प्रदेश आणि कर्नाटकात कोणत्या जाती सर्वाधिक लोकप्रिय आहेत, त्यांच्या वैशिष्ट्यांसह जाणून घ्या.",
   },
 ];
@@ -141,10 +142,16 @@ const Fertilizer: React.FC = () => {
     }
 
     try {
-      const currentDate = new Date().toISOString().split("T")[0];
+      // One timeline/overall date only — no date fallback chain for NPK.
+      const imageEndDate = await resolveAvailableImageEndDateForPlot(PLOT_NAME);
+      if (!imageEndDate) {
+        throw new Error(
+          "No Sentinel image date available for this plot. Open Plot View once, then retry fertilizer.",
+        );
+      }
       const url = `${API_BASE_URL}/required-n/${encodeURIComponent(
         PLOT_NAME
-      )}?end_date=${currentDate}`;
+      )}?end_date=${imageEndDate}`;
 
       const res = await fetch(url, {
         method: "POST",
@@ -155,13 +162,15 @@ const Fertilizer: React.FC = () => {
         mode: "cors",
       });
 
-      if (!res.ok) throw new Error(`Error: ${res.status} ${res.statusText}`);
+      if (!res.ok) {
+        throw new Error(
+          `Soil NPK not available for this plot (server ${res.status}). Values are shown only when the API returns data.`,
+        );
+      }
 
       const json = await res.json();
 
-      
-
-      // Extract NPK data from the new response structure
+      // Extract NPK data from the new response structure — only show if present.
       if (
         json.soilN !== undefined && json.soilP !== undefined && json.soilK !== undefined &&
         json.plantanalysis_n !== undefined && json.plantanalysis_p !== undefined && json.plantanalysis_k !== undefined
@@ -178,12 +187,13 @@ const Fertilizer: React.FC = () => {
         setCached(cacheKey, npk);
       } else {
         throw new Error(
-          "Invalid NPK response structure - missing soilN, soilP, soilK or plantanalysis_n, _p, _k"
+          "Soil NPK response incomplete — values are shown only when the API returns full N/P/K data.",
         );
       }
     } catch (err: any) {
       setNpkError(err.message || "Failed to fetch NPK data");
-      setAppState((prev: any) => ({ ...prev, npkData: {} }));
+      // No empty/fake NPK object — clear so cards show "No Data".
+      setAppState((prev: any) => ({ ...prev, npkData: null }));
     } finally {
       setNpkLoading(false);
       npkFetchingRef.current = false;

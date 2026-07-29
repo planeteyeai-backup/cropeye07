@@ -169,3 +169,22 @@ export function resolveLayerImageEndDate(
   const floor = [...dates].reverse().find((d) => d <= ui);
   return floor || layerLatest;
 }
+
+/**
+ * Candidate Admin `end_date` values for a layer, newest first.
+ * Timeline can list dates Admin has not synced yet — callers should try these
+ * in order and fall back on older dates when Admin returns 404.
+ */
+export function candidateEndDatesForLayer(
+  timeline: TimelineBucket[] | undefined,
+  layer: MapAnalysisLayer,
+  uiDateIso?: string,
+): string[] {
+  const dates = sortedRebinDatesForLayer(timeline, layer);
+  if (!dates.length) return [];
+  const ui = (uiDateIso || "").trim().split("T")[0];
+  const capped =
+    /^\d{4}-\d{2}-\d{2}$/.test(ui) ? dates.filter((d) => d <= ui) : dates;
+  const use = capped.length ? capped : dates;
+  return [...use].reverse();
+}

@@ -275,18 +275,12 @@ export const Header: React.FC<HeaderProps> = ({
       return { latitude: 18.5204, longitude: 73.8567, source: "default" };
     }
 
-    // For non-farmers (manager, field officer, owner), use current location
+    // For non-farmers (manager, field officer, owner): never prompt for
+    // browser geolocation — weather uses cached coords or a default factory area.
     if (userLocation) {
       return { ...userLocation, source: "current" };
     }
 
-    // If no location available, show prompt
-    if (locationPermission === "prompt") {
-      setShowLocationPrompt(true);
-      throw new Error("Location permission required");
-    }
-
-    // Fallback to default location (Pune, India)
     return { latitude: 18.5204, longitude: 73.8567, source: "default" };
   };
 
@@ -370,7 +364,7 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <>
       <header
-        className="header-container bg-blue-100 notranslate"
+        className="header-container bg-blue-100"
         translate="no"
       >
         {/* Main Header Section */}

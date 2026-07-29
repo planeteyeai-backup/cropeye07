@@ -19,7 +19,7 @@ const MapCropStatusOverlay: React.FC<MapCropStatusOverlayProps> = ({
 
   return (
     <div
-      className="absolute top-10 left-1/2 -translate-x-1/2 z-10 pointer-events-none w-[calc(100%-2rem)] max-w-xl notranslate"
+      className="absolute top-10 left-1/2 -translate-x-1/2 z-10 pointer-events-none w-[calc(100%-2rem)] max-w-xl"
       translate="no"
     >
       <div className="bg-black/20 backdrop-blur-sm rounded-2xl px-3 sm:px-5 py-3 border border-white/30 shadow-2xl">

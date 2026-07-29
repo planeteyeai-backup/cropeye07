@@ -63,6 +63,11 @@ import {
   fetchWaterStressAnalysis,
   parseWaterStressMetrics,
 } from "../utils/waterStressApi";
+import {
+  MANAGER_FARM_DASH_ATTR,
+  protectManagerFarmDashSubtree,
+  syncManagerDashSelectLocks,
+} from "../utils/protectManagerDashFromTranslate";
 
 // Constants (same as FarmerDashboard)
 const BASE_URL = "https://events-cropeye.up.railway.app";
@@ -446,6 +451,10 @@ const ManagerFarmDash: React.FC = () => {
   const userPickedPlotRef = useRef<string | null>(null);
   const selectedFarmerIdRef = useRef<string>("");
   const selectedFieldOfficerIdRef = useRef<string>("");
+  const selectedPlotIdRef = useRef<string>("");
+  /** Production: only accept FO/farmer/plot <select> changes after a real pointer/key gesture. */
+  const filterSelectGestureRef = useRef(false);
+  const dashRootRef = useRef<HTMLDivElement>(null);
 
   const lineStyles: LineStyles = {
     growth: { color: "#16a34a", label: "Growth Index" },
@@ -572,6 +581,59 @@ const ManagerFarmDash: React.FC = () => {
   useEffect(() => {
     selectedFieldOfficerIdRef.current = selectedFieldOfficerId;
   }, [selectedFieldOfficerId]);
+
+  useEffect(() => {
+    selectedPlotIdRef.current = selectedPlotId;
+  }, [selectedPlotId]);
+
+  // Production-only: block Google Translate (Kannada) from rewriting Manager dashboard selects.
+  useEffect(() => {
+    if (!import.meta.env.PROD) return;
+    const root = dashRootRef.current;
+    if (!root) return;
+
+    const run = () => {
+      protectManagerFarmDashSubtree(root);
+      syncManagerDashSelectLocks(root);
+    };
+    run();
+
+    const obs = new MutationObserver(run);
+    obs.observe(root, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+    });
+    const tick = window.setInterval(run, 400);
+
+    return () => {
+      obs.disconnect();
+      window.clearInterval(tick);
+    };
+  }, [selectedFieldOfficerId, selectedFarmerId, selectedPlotId, fieldOfficers.length]);
+
+  const markFilterSelectGesture = () => {
+    filterSelectGestureRef.current = true;
+  };
+
+  const acceptFilterSelectChange = (next: string, current: string): boolean => {
+    if (next === current) {
+      filterSelectGestureRef.current = false;
+      return false;
+    }
+    // Ignore empty flashes from Translate while a value is selected.
+    if (!next && current) {
+      filterSelectGestureRef.current = false;
+      return false;
+    }
+    // Production: drop Translate remount "change" events with no user gesture.
+    if (import.meta.env.PROD && !filterSelectGestureRef.current) {
+      return false;
+    }
+    filterSelectGestureRef.current = false;
+    return true;
+  };
 
   const selectOfficerFarmersAndPlot = (
     officers: any[],
@@ -1720,7 +1782,11 @@ const ManagerFarmDash: React.FC = () => {
   // metrics show "-" until data arrives (see loadingData banner below).
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50">
+    <div
+      ref={dashRootRef}
+      {...{ [MANAGER_FARM_DASH_ATTR]: "true" }}
+      className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50"
+    >
       {/* Enhanced Header */}
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 ">
@@ -1771,11 +1837,8 @@ const ManagerFarmDash: React.FC = () => {
           <div className="flex items-center gap-3">
             <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center w-full lg:w-auto">
               {/* Filters */}
-              <div
-                className="flex flex-col sm:flex-row gap-4 w-full sm:w-auto notranslate"
-                translate="no"
-              >
-                <div className="flex flex-col flex-1 sm:flex-none notranslate" translate="no">
+              <div className="flex flex-col sm:flex-row gap-4 w-full sm:w-auto">
+                <div className="flex flex-col flex-1 sm:flex-none">
                   <label className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
                     <Users className="w-4 h-4" />
                     Field Officer ({fieldOfficers.length})
@@ -1783,11 +1846,16 @@ const ManagerFarmDash: React.FC = () => {
                   <select
                     className="px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200 bg-white shadow-sm w-full sm:w-64 notranslate"
                     translate="no"
+                    data-gt-lock={selectedFieldOfficerId}
                     value={selectedFieldOfficerId}
+                    onPointerDown={markFilterSelectGesture}
+                    onKeyDown={markFilterSelectGesture}
                     onChange={(e) => {
                       const next = e.target.value;
-                      if (next === selectedFieldOfficerId) return;
-                      if (!next && selectedFieldOfficerId) return;
+                      if (!acceptFilterSelectChange(next, selectedFieldOfficerId)) {
+                        e.currentTarget.value = selectedFieldOfficerId;
+                        return;
+                      }
                       applyOfficerSelection(next);
                     }}
                     disabled={loadingFarmers}
@@ -1824,7 +1892,7 @@ const ManagerFarmDash: React.FC = () => {
                   </select>
                 </div>
 
-                <div className="flex flex-col flex-1 sm:flex-none notranslate" translate="no">
+                <div className="flex flex-col flex-1 sm:flex-none">
                   <label className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
                     <Users className="w-4 h-4" /> Farmers (
                     {farmersForSelectedOfficer.length})
@@ -1832,11 +1900,16 @@ const ManagerFarmDash: React.FC = () => {
                   <select
                     className="px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200 bg-white shadow-sm w-full sm:w-64 notranslate"
                     translate="no"
+                    data-gt-lock={selectedFarmerId}
                     value={selectedFarmerId}
+                    onPointerDown={markFilterSelectGesture}
+                    onKeyDown={markFilterSelectGesture}
                     onChange={(e) => {
                       const next = e.target.value;
-                      if (next === selectedFarmerId) return;
-                      if (!next && selectedFarmerId) return;
+                      if (!acceptFilterSelectChange(next, selectedFarmerId)) {
+                        e.currentTarget.value = selectedFarmerId;
+                        return;
+                      }
                       applyFarmerSelection(next);
                     }}
                     disabled={
@@ -1885,7 +1958,7 @@ const ManagerFarmDash: React.FC = () => {
                   </select>
                 </div>
 
-                <div className="flex flex-col flex-1 sm:flex-none notranslate" translate="no">
+                <div className="flex flex-col flex-1 sm:flex-none">
                   <label className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
                     <MapPin className="w-4 h-4" />
                     Plots ({plots.length})
@@ -1893,11 +1966,16 @@ const ManagerFarmDash: React.FC = () => {
                   <select
                     className="px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200 bg-white shadow-sm w-full sm:w-64 notranslate"
                     translate="no"
+                    data-gt-lock={selectedPlotId}
                     value={selectedPlotId}
+                    onPointerDown={markFilterSelectGesture}
+                    onKeyDown={markFilterSelectGesture}
                     onChange={(e) => {
                       const next = e.target.value;
-                      if (next === selectedPlotId) return;
-                      if (!next && selectedPlotId) return;
+                      if (!acceptFilterSelectChange(next, selectedPlotId)) {
+                        e.currentTarget.value = selectedPlotId;
+                        return;
+                      }
                       applyUserPlotSelection(next);
                     }}
                     disabled={!selectedFarmerId || plots.length === 0}
@@ -2229,8 +2307,7 @@ const ManagerFarmDash: React.FC = () => {
           <div className="lg:col-span-2 bg-white rounded-xl shadow-lg overflow-hidden">
             <div
               ref={mapWrapperRef}
-              className="relative w-full h-[400px] sm:h-[400px] md:h-[450px] lg:h-[500px] xl:h-full min-h-[300px] notranslate"
-              translate="no"
+              className="relative w-full h-[400px] sm:h-[400px] md:h-[450px] lg:h-[500px] xl:h-full min-h-[300px]"
             >
               {/* Fullscreen Toggle */}
               <div

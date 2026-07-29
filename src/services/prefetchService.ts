@@ -12,14 +12,16 @@ import {
 import { getFastApiToken } from '../utils/auth';
 import { getCache, setCache } from '../utils/cache';
 import { getCache as getContextCache } from '../components/utils/cache';
-import { getOrFetchJson } from "../utils/requestCache";
 import {
   fetchAnalysisTimeline,
-  latestRebinDateForLayer,
 } from "./analysisTimeline";
+import { persistPlotImageEndDatesFromTimeline } from "../utils/plotImageEndDates";
+import {
+  buildAdminEndDateCandidates,
+  fetchAdminLayerWithDateFallback,
+} from "../utils/adminLayerApi";
 
 // Base URLs for external APIs
-const BASE_URL = 'https://admin-cropeye.up.railway.app';
 const EVENTS_BASE_URL = 'https://events-cropeye.up.railway.app';
 const WEATHER_BASE_URL = 'https://weather-cropeye.up.railway.app';
 
@@ -100,7 +102,6 @@ export const prefetchAllData = async (
 ): Promise<PrefetchResult> => {
   const errors: string[] = [];
   const fetchedEndpoints: string[] = [];
-  const today = new Date().toISOString().split('T')[0];
   const isFarmer = role === 'farmer' || !role;
 
   try {
@@ -233,123 +234,50 @@ export const prefetchAllData = async (
       };
     }
 
-    // 4. Fetch map layers using each layer's latest image date (never calendar today)
+    // 4. Fetch map layers — try newest timeline date, then older on Admin 404
     let timeline = null as Awaited<ReturnType<typeof fetchAnalysisTimeline>>;
     try {
       timeline = await fetchAnalysisTimeline(plotName);
+      if (timeline?.timeline?.length) {
+        persistPlotImageEndDatesFromTimeline(plotName, timeline.timeline);
+      }
     } catch {
       timeline = null;
     }
-    const growthEnd = latestRebinDateForLayer(timeline?.timeline, "Growth");
-    const waterEnd = latestRebinDateForLayer(timeline?.timeline, "Water Uptake");
-    const soilEnd = latestRebinDateForLayer(timeline?.timeline, "Soil Moisture");
-    const pestEnd = latestRebinDateForLayer(timeline?.timeline, "PEST");
 
-    const mapDataPromises: Promise<any>[] = [];
-
-    if (growthEnd) {
-      mapDataPromises.push(
-      getOrFetchJson({
-        key: `layer:growth:${plotName}:${growthEnd}`,
-        url: `${BASE_URL}/analyze_Growth?plot_name=${plotName}&end_date=${growthEnd}&days_back=15`,
-        ttlMs: 10 * 60 * 1000,
-        fetchInit: {
-          method: "POST",
-          mode: "cors",
-          cache: "no-cache",
-          credentials: "omit",
-          headers: { Accept: "application/json" },
-        },
+    const prefetchLayer = (
+      layer: "Growth" | "Water Uptake" | "Soil Moisture" | "PEST",
+      cacheLabel: string,
+    ) => {
+      const candidateDates = buildAdminEndDateCandidates(
+        plotName,
+        layer,
+        timeline?.timeline,
+      );
+      if (!candidateDates.length) return null;
+      return fetchAdminLayerWithDateFallback({
+        plotName,
+        apiPlotName: plotName,
+        layer,
+        candidateDates,
       })
-        .then((data) => {
-          setCached(`growthData_${plotName}`, data);
-          fetchedEndpoints.push("growthData");
+        .then(({ data }) => {
+          setCached(`${cacheLabel}_${plotName}`, data);
+          fetchedEndpoints.push(cacheLabel);
           return data;
         })
         .catch((err) => {
-          errors.push(`Growth: ${err.message}`);
+          errors.push(`${layer}: ${err.message}`);
           return null;
-        }),
-      );
-    }
+        });
+    };
 
-    if (waterEnd) {
-      mapDataPromises.push(
-      getOrFetchJson({
-        key: `layer:water:${plotName}:${waterEnd}`,
-        url: `${BASE_URL}/wateruptake?plot_name=${plotName}&end_date=${waterEnd}&days_back=15`,
-        ttlMs: 10 * 60 * 1000,
-        fetchInit: {
-          method: "POST",
-          mode: "cors",
-          cache: "no-cache",
-          credentials: "omit",
-          headers: { Accept: "application/json" },
-        },
-      })
-        .then((data) => {
-          setCached(`waterUptakeData_${plotName}`, data);
-          fetchedEndpoints.push("waterUptakeData");
-          return data;
-        })
-        .catch((err) => {
-          errors.push(`Water Uptake: ${err.message}`);
-          return null;
-        }),
-      );
-    }
-
-    if (soilEnd) {
-      mapDataPromises.push(
-      getOrFetchJson({
-        key: `layer:soil:${plotName}:${soilEnd}`,
-        url: `${BASE_URL}/SoilMoisture?plot_name=${plotName}&end_date=${soilEnd}&days_back=15`,
-        ttlMs: 10 * 60 * 1000,
-        fetchInit: {
-          method: "POST",
-          mode: "cors",
-          cache: "no-cache",
-          credentials: "omit",
-          headers: { Accept: "application/json" },
-        },
-      })
-        .then((data) => {
-          setCached(`soilMoistureData_${plotName}`, data);
-          fetchedEndpoints.push("soilMoistureData");
-          return data;
-        })
-        .catch((err) => {
-          errors.push(`Soil Moisture: ${err.message}`);
-          return null;
-        }),
-      );
-    }
-
-    if (pestEnd) {
-      mapDataPromises.push(
-      getOrFetchJson({
-        key: `layer:pest:${plotName}:${pestEnd}`,
-        url: `${BASE_URL}/pest-detection?plot_name=${plotName}&end_date=${pestEnd}&days_back=15`,
-        ttlMs: 10 * 60 * 1000,
-        fetchInit: {
-          method: "POST",
-          mode: "cors",
-          cache: "no-cache",
-          credentials: "omit",
-          headers: { Accept: "application/json" },
-        },
-      })
-        .then((data) => {
-          setCached(`pestData_${plotName}`, data);
-          fetchedEndpoints.push("pestData");
-          return data;
-        })
-        .catch((err) => {
-          errors.push(`Pest: ${err.message}`);
-          return null;
-        }),
-      );
-    }
+    const mapDataPromises: Promise<any>[] = [
+      prefetchLayer("Growth", "growthData"),
+      prefetchLayer("Water Uptake", "waterUptakeData"),
+      prefetchLayer("Soil Moisture", "soilMoistureData"),
+      prefetchLayer("PEST", "pestData"),
+    ].filter(Boolean) as Promise<any>[];
 
     // 5. Fetch weather data if plot has coordinates
     let weatherPromise: Promise<any> | null = null;

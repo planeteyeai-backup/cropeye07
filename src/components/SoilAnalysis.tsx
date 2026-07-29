@@ -3,6 +3,7 @@ import { Download, Info, Satellite } from "lucide-react";
 import { useAppContext } from "../context/AppContext";
 import { useFarmerProfile } from "../hooks/useFarmerProfile";
 import { RefreshCw } from "lucide-react";
+import { resolveAvailableImageEndDateForPlot } from "../utils/plotImageEndDates";
 
 interface NutrientData {
   name: string;
@@ -85,6 +86,7 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
   const soilData = appState.soilData || null;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [npkUnavailable, setNpkUnavailable] = useState(false);
   // Use global selectedPlotName if available, otherwise fall back to prop
   const activePlotName = selectedPlotName || plotName;
   const [currentPlotName, setCurrentPlotName] = useState<string | null>(
@@ -157,19 +159,35 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
 
       setLoading(true);
       setError(null);
+      setNpkUnavailable(false);
 
       try {
-        const currentDate = new Date().toISOString().split("T")[0];
+        // Single timeline/overall image date only — no multi-date NPK fallback.
+        const imageEndDate =
+          (await resolveAvailableImageEndDateForPlot(currentPlotName)) || "";
+        if (!imageEndDate) {
+          setError(
+            "No Sentinel image date available for this plot yet. Open the map once so timeline dates can load, then retry.",
+          );
+          setLoading(false);
+          return;
+        }
+        const currentDate = imageEndDate;
 
-        // First, fetch the NEW API with soil NPK data (with timeout protection)
+        // required-n: soil N/P/K — show ONLY when this API returns 200 (Mandya often 500).
         const soilNPKUrl = `https://main-cropeye.up.railway.app/required-n/${encodeURIComponent(
           currentPlotName
         )}?end_date=${currentDate}`;
 
-        let soilNPKData = null;
+        let soilNPKData: {
+          soilN?: number;
+          soilP?: number;
+          soilK?: number;
+        } | null = null;
+        let requiredNFailed = false;
         try {
           const npkController = new AbortController();
-          const npkTimeoutId = setTimeout(() => npkController.abort(), 15000); // 15s timeout
+          const npkTimeoutId = setTimeout(() => npkController.abort(), 15000);
 
           const soilNPKResponse = await fetch(soilNPKUrl, {
             method: "POST",
@@ -182,13 +200,28 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
           clearTimeout(npkTimeoutId);
 
           if (soilNPKResponse.ok) {
-            soilNPKData = await soilNPKResponse.json();
+            const json = await soilNPKResponse.json();
+            if (
+              json?.soilN !== undefined &&
+              json?.soilP !== undefined &&
+              json?.soilK !== undefined
+            ) {
+              soilNPKData = json;
+            } else {
+              requiredNFailed = true;
+            }
+          } else {
+            requiredNFailed = true;
+            console.warn(
+              `required-n ${soilNPKResponse.status} for ${currentPlotName} @ ${currentDate} — soil NPK will not be shown`,
+            );
           }
         } catch (soilNPKError: any) {
-          // Ignore NPK timeout/network errors and proceed with main analysis API
+          requiredNFailed = true;
+          console.warn("required-n failed — soil NPK will not be shown", soilNPKError);
         }
 
-        // Then fetch the original NPK analysis API
+        // analyze-npk: pH / CEC / other soil stats (separate from soil NPK cards)
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 30000);
 
@@ -221,15 +254,12 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
 
         if (data && data.npk_analysis) {
           const npkAnalysis = data.npk_analysis;
-          const estimatedUptake = npkAnalysis.estimated_npk_uptake_perAcre;
           const recommendedDose = npkAnalysis.recommended_dose_perAcre;
           const fertilizerRequire = npkAnalysis.fertilizer_require_perAcre;
           const finalDisplayedDose = npkAnalysis.final_displayed_dose;
 
+          // Do NOT map estimated uptake into soil N/P/K — those come only from required-n.
           soilDataToSet = {
-            nitrogen: estimatedUptake?.N || 0,
-            phosphorus: estimatedUptake?.P || 0,
-            potassium: estimatedUptake?.K || 0,
             recommended_nitrogen: recommendedDose?.N || 0,
             recommended_phosphorus: recommendedDose?.P || 0,
             recommended_potassium: recommendedDose?.K || 0,
@@ -282,9 +312,6 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
 
         if (!soilDataToSet) {
           soilDataToSet = {
-            nitrogen: data?.nitrogen || 0,
-            phosphorus: data?.phosphorus || 0,
-            potassium: data?.potassium || 0,
             ph: data?.ph || data?.pH || 0,
             cec: data?.cec || data?.cation_exchange_capacity || 0,
             organic_carbon:
@@ -304,14 +331,13 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
           };
         }
 
-        // 🔥 CRITICAL: Override nitrogen, phosphorus, potassium with soilN, soilP, soilK
+        // Soil N/P/K cards: only when required-n returned a real payload (no zeros/fallback).
         if (soilNPKData) {
           soilDataToSet = {
             ...soilDataToSet,
-            // REPLACE old values with soilN, soilP, soilK from required-n endpoint
-            nitrogen: soilNPKData.soilN || 0,
-            phosphorus: soilNPKData.soilP || 0,
-            potassium: soilNPKData.soilK || 0,
+            soilN: soilNPKData.soilN,
+            soilP: soilNPKData.soilP,
+            soilK: soilNPKData.soilK,
           };
         }
 
@@ -321,6 +347,9 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
             soilData: soilDataToSet,
           }));
           setCached(cacheKey, soilDataToSet);
+          if (requiredNFailed) {
+            setNpkUnavailable(true);
+          }
         } else {
           throw new Error(
             "Unexpected API response structure. Could not find soil statistics."
@@ -351,36 +380,10 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
           setError(`Failed to fetch soil data: ${err.message}`);
         }
 
-        const fallbackData: ApiSoilData = {
-          plot_name: currentPlotName,
-          nitrogen: undefined,
-          phosphorus: undefined,
-          potassium: undefined,
-          pH: undefined,
-          cec: undefined,
-          organic_carbon: undefined,
-          soil_density: undefined,
-          ocd: undefined,
-          soc: undefined,
-          bulk_density: undefined,
-          soil_organic_carbon: undefined,
-          total_nitrogen: undefined,
-          cation_exchange_capacity: undefined,
-          fe: undefined,
-          organic_carbon_stock: undefined,
-          phh2o: undefined,
-          bdod_0_5cm_mean: undefined,
-          soc_0_5cm_mean: undefined,
-          nitrogen_0_5cm_mean: undefined,
-          cec_0_5cm_mean: undefined,
-          ocd_0_5cm_mean: undefined,
-          ocs_0_30cm_mean: undefined,
-          phh2o_0_5cm_mean: undefined,
-        };
-
+        // No fake/empty fallback soil NPK — clear so UI shows nothing for N/P/K.
         setAppState((prev: any) => ({
           ...prev,
-          soilData: fallbackData,
+          soilData: null,
         }));
 
         if (err.message.includes("Failed to fetch") && retryCount < 2) {
@@ -428,8 +431,9 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
   }
 
   function getNitrogenLevel(
-    value: number
-  ): "very-low" | "low" | "medium" | "optimal" | "very-high" {
+    value: number | null
+  ): "very-low" | "low" | "medium" | "optimal" | "very-high" | "unknown" {
+    if (value === null || value === undefined) return "unknown";
     if (value < 30) return "very-low";
     if (value < 50) return "low";
     if (value < 80) return "medium";
@@ -555,19 +559,13 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
     {
       name: "Nitrogen",
       symbol: "N",
-      // PRIORITY: Use soilN from new API
-      value:
-        soilData?.soilN ??
-        soilData?.nitrogen ??
-        soilData?.total_nitrogen ??
-        null,
+      // Only from required-n (soilN). No fallback to uptake / zeros.
+      value: soilData?.soilN ?? null,
       unit: "Kg/acre",
       optimalRange: "50 - 150",
-      level: getNitrogenLevel(
-        soilData?.soilN ?? soilData?.nitrogen ?? soilData?.total_nitrogen ?? 0
-      ),
+      level: getNitrogenLevel(soilData?.soilN ?? null),
       percentage: calculatePercentage(
-        soilData?.soilN ?? soilData?.nitrogen ?? soilData?.total_nitrogen,
+        soilData?.soilN ?? null,
         50,
         150,
         10,
@@ -577,13 +575,12 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
     {
       name: "Phosphorus",
       symbol: "P",
-      // PRIORITY: Use soilP from new API
-      value: soilData?.soilP ?? soilData?.phosphorus ?? null,
+      value: soilData?.soilP ?? null,
       unit: "Kg/acre",
       optimalRange: "25 - 75",
-      level: getPhosphorusLevel(soilData?.soilP ?? soilData?.phosphorus),
+      level: getPhosphorusLevel(soilData?.soilP ?? null),
       percentage: calculatePercentage(
-        soilData?.soilP ?? soilData?.phosphorus,
+        soilData?.soilP ?? null,
         25,
         75,
         5,
@@ -593,13 +590,12 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
     {
       name: "Potassium",
       symbol: "K",
-      // PRIORITY: Use soilK from new API
-      value: soilData?.soilK ?? soilData?.potassium ?? null,
+      value: soilData?.soilK ?? null,
       unit: "Kg/acre",
       optimalRange: "20 - 100",
-      level: getPotassiumLevel(soilData?.soilK ?? soilData?.potassium),
+      level: getPotassiumLevel(soilData?.soilK ?? null),
       percentage: calculatePercentage(
-        soilData?.soilK ?? soilData?.potassium,
+        soilData?.soilK ?? null,
         20,
         100,
         5,
@@ -784,6 +780,14 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
           {error && (
             <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-center text-sm text-red-700">
               {error}
+            </div>
+          )}
+
+          {npkUnavailable && !error && (
+            <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-center text-sm text-amber-800">
+              Soil NPK (N/P/K) is not available for this plot from the server.
+              Values are shown only when the API returns data. Other soil metrics
+              below may still be available.
             </div>
           )}
 

@@ -8,16 +8,23 @@ import { useAppContext } from "../context/AppContext";
 import { FaExpand, FaColumns } from 'react-icons/fa';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 import { AnalysisTimelineRibbon } from "./AnalysisTimelineRibbon";
-import { getOrFetchJson } from "../utils/requestCache";
 import { resolveApiPlotName, plotKeyFromRecord } from "../utils/plotName";
 import { getCache, removeCache, removeCachesMatchingPlot } from "../utils/cache";
 import {
   fetchAnalysisTimeline,
   sortedRebinDatesForLayer,
   latestRebinDateAcrossAllLayers,
-  latestRebinDateForLayer,
   type AnalysisTimelineResponse,
 } from "../services/analysisTimeline";
+import {
+  getApiEndDateForLayer,
+  persistPlotImageEndDatesFromTimeline,
+} from "../utils/plotImageEndDates";
+import {
+  buildAdminEndDateCandidates,
+  fetchAdminLayerWithDateFallback,
+  isAdminNoImageryError,
+} from "../utils/adminLayerApi";
 import { getSinglePlotAgroStats } from "../api";
 import { useI18nLite } from "../i18nLite.ts";
 import {
@@ -386,13 +393,7 @@ function waterUptakeVeryHealthyCoordinates(pixelSummary: Record<string, unknown>
  */
 
 function isNoImageryError(message: string | undefined): boolean {
-  if (!message) return false;
-  const m = message.toLowerCase();
-  return (
-    m.includes("no sentinel") ||
-    m.includes("no images found") ||
-    m.includes("http 404")
-  );
+  return isAdminNoImageryError(message);
 }
 
 /** Overview framing: zoom in enough to see analysis tiles inside the yellow border. */
@@ -597,14 +598,9 @@ const CropEyeMap: React.FC<MapProps> = ({
     null,
   );
   
-  // Date navigation state (similar to Streamlit logic)
-  const [currentEndDate, setCurrentEndDate] = useState<string>(() => {
-    const today = new Date();
-    const year = today.getFullYear();
-    const month = String(today.getMonth() + 1).padStart(2, '0');
-    const day = String(today.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  });
+  // Date navigation state — empty until timeline snaps to a Sentinel-available date.
+  // Never start as calendar "today" (Mandya Admin 404/500 for today).
+  const [currentEndDate, setCurrentEndDate] = useState<string>("");
   const [showDatePopup, setShowDatePopup] = useState(false);
   const [popupSide, setPopupSide] = useState<'left' | 'right' | null>(null);
   const DAYS_STEP = 5;
@@ -624,6 +620,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       setTimelineError(null);
       mapRebinSnapKeyRef.current = "";
       layerTilesCacheRef.current.clear();
+      setCurrentEndDate("");
       return;
     }
     setTimelinePayload(null);
@@ -631,9 +628,18 @@ const CropEyeMap: React.FC<MapProps> = ({
     setTimelineError(null);
     mapRebinSnapKeyRef.current = "";
     layerTilesCacheRef.current.clear();
+    setCurrentEndDate("");
     fetchAnalysisTimeline(plotNameForApi(plot))
       .then((data) => {
-        if (!cancelled) setTimelinePayload(data);
+        if (cancelled) return;
+        setTimelinePayload(data);
+        // Store Sentinel-available end dates for this plot (Map + Soil/Fertilizer reuse).
+        if (data?.timeline?.length) {
+          persistPlotImageEndDatesFromTimeline(
+            plotNameForApi(plot),
+            data.timeline,
+          );
+        }
       })
       .catch((err) => {
         if (!cancelled) {
@@ -694,33 +700,39 @@ const CropEyeMap: React.FC<MapProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeLayer, selectedPlotName]);
 
-  // Fetch Growth / Water / Soil / Pest once per plot using each layer's latest image date.
-  // Left/right date navigation does not change API end_date (always latest image).
+  // Fetch Growth / Water / Soil / Pest using only dates that have Sentinel imagery.
+  // Wait until currentEndDate is snapped to timeline (never fetch with calendar today).
   useEffect(() => {
     if (!selectedPlotName) return;
     if (timelineLoading) return;
     if (!latestRebinOverall) return;
+    if (!currentEndDate) return;
+    // Avoid racing before snap: today / future dates cause Mandya Admin 404s.
+    if (currentEndDate > latestRebinOverall) return;
 
-    const fetchKey = `${selectedPlotName}|latest|${latestRebinOverall}`;
+    const fetchKey = `${selectedPlotName}|img:${currentEndDate}|${latestRebinOverall}`;
     if (layerFetchInFlightRef.current.has(fetchKey)) return;
     layerFetchInFlightRef.current.add(fetchKey);
     setDateNavigationLoading(true);
     setError(null);
     const fetchAllLayerData = async () => {
       try {
-        await Promise.all([
+        // allSettled: one layer 404 must not block others finishing / clearing spinner
+        await Promise.allSettled([
           fetchGrowthData(selectedPlotName),
           fetchWaterUptakeData(selectedPlotName),
           fetchSoilMoistureData(selectedPlotName),
           fetchPestData(selectedPlotName),
         ]);
         console.log(
-          "✅ Map: All 4 layer APIs fetched with each layer's latest image end_date for plot:",
+          "✅ Map: Layer fetch finished for plot:",
           selectedPlotName,
+          "uiDate:",
+          currentEndDate,
         );
       } catch (err) {
         console.error(
-          "❌ Map: Some layer APIs failed for plot:",
+          "❌ Map: Layer fetch error for plot:",
           selectedPlotName,
           err,
         );
@@ -731,7 +743,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     };
     fetchAllLayerData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPlotName, timelineLoading, latestRebinOverall]);
+  }, [selectedPlotName, timelineLoading, latestRebinOverall, currentEndDate]);
 
   useEffect(() => {
     if (!dateNavigationLoading) {
@@ -1009,105 +1021,71 @@ const CropEyeMap: React.FC<MapProps> = ({
     const apiPlot = plotNameForApi(plotName);
     const forceRefresh = Boolean(options?.forceRefresh);
 
-    const apiEndDate = latestRebinDateForLayer(
-      timelinePayload?.timeline,
+    const candidateDates = buildAdminEndDateCandidates(
+      plotName,
       "Growth",
+      timelinePayload?.timeline,
+      currentEndDate,
     );
-    if (!apiEndDate) return;
+    if (!candidateDates.length) return;
 
-    const memKey = `growth:${apiPlot}:${apiEndDate}`;
-    const today = new Date().toISOString().split("T")[0];
-    const sharedKey = `layer:growth:${apiPlot}:${apiEndDate}`;
-    const sharedTtlMs =
-      apiEndDate === today ? 10 * 60 * 1000 : 30 * 60 * 1000;
-
-    if (forceRefresh) {
-      layerTilesCacheRef.current.delete(memKey);
-      removeCache(sharedKey);
-      removeCache(`growthData_${apiPlot}`);
-    } else if (layerTilesCacheRef.current.has(memKey)) {
-      const hit = layerTilesCacheRef.current.get(memKey) as any;
-      setGrowthData(hit ?? null);
-      if (!skipAnalysisBoundaryRef.current && !plotBoundary && hit?.features?.[0]?.geometry) {
-        setPlotBoundary(hit.features[0]);
-      }
-      return;
-    } else {
-      const sharedCached = getCache(sharedKey, sharedTtlMs);
-      if (sharedCached) {
-        layerTilesCacheRef.current.set(memKey, sharedCached);
-        setGrowthData(sharedCached);
-        if (!skipAnalysisBoundaryRef.current && !plotBoundary && sharedCached?.features?.[0]?.geometry) {
-          setPlotBoundary(sharedCached.features[0]);
+    if (!forceRefresh) {
+      for (const d of candidateDates) {
+        const memKey = `growth:${apiPlot}:${d}`;
+        if (layerTilesCacheRef.current.has(memKey)) {
+          const hit = layerTilesCacheRef.current.get(memKey) as any;
+          setGrowthData(hit ?? null);
+          if (!skipAnalysisBoundaryRef.current && !plotBoundary && hit?.features?.[0]?.geometry) {
+            setPlotBoundary(hit.features[0]);
+          }
+          return;
         }
-        return;
-      }
-      if (apiEndDate === today) {
-        const cachedData = getCached(`growthData_${apiPlot}`);
-        if (cachedData) {
-          layerTilesCacheRef.current.set(memKey, cachedData);
-          setGrowthData(cachedData);
-          if (!skipAnalysisBoundaryRef.current && !plotBoundary && cachedData?.features?.[0]?.geometry) {
-            setPlotBoundary(cachedData.features[0]);
+        const sharedCached = getCache(`layer:growth:${apiPlot}:${d}`, 30 * 60 * 1000);
+        if (sharedCached) {
+          layerTilesCacheRef.current.set(memKey, sharedCached);
+          setGrowthData(sharedCached);
+          if (!skipAnalysisBoundaryRef.current && !plotBoundary && sharedCached?.features?.[0]?.geometry) {
+            setPlotBoundary(sharedCached.features[0]);
           }
           return;
         }
       }
+    } else {
+      for (const d of candidateDates) {
+        layerTilesCacheRef.current.delete(`growth:${apiPlot}:${d}`);
+        removeCache(`layer:growth:${apiPlot}:${d}`);
+      }
+      removeCache(`growthData_${apiPlot}`);
     }
 
-    // Use proxy in development to avoid CORS issues, direct URL in production
-    // const baseUrl = import.meta.env.DEV 
-      // ? '/api/dev-plot' 
-      // : 'https://admin-cropeye.up.railway.app';
-    const baseUrl='https://admin-cropeye.up.railway.app';
-    const url = `${baseUrl}/analyze_Growth?plot_name=${encodeURIComponent(apiPlot)}&end_date=${apiEndDate}&days_back=15`;
-    
     try {
-      
-      // Try fetch with explicit CORS mode and proper headers matching curl command
-      const data = await getOrFetchJson({
-        key: sharedKey,
-        url,
-        ttlMs: sharedTtlMs,
+      const { data, endDate: apiEndDate } = await fetchAdminLayerWithDateFallback({
+        plotName,
+        apiPlotName: apiPlot,
+        layer: "Growth",
+        candidateDates,
         forceRefresh,
-        fetchInit: {
-          method: "POST",
-          mode: "cors",
-          cache: "no-cache",
-          credentials: "omit",
-          headers: {
-            Accept: "application/json",
-          },
-        },
       });
+      const memKey = `growth:${apiPlot}:${apiEndDate}`;
       layerTilesCacheRef.current.set(memKey, data);
       setGrowthData(data);
-      
-      // Cache the data if it's for today's date
-      if (apiEndDate === today) {
-        setCached(`growthData_${apiPlot}`, data);
-      }
-      
-      // Preserve plot boundary from growth data if not already set
-      if (!skipAnalysisBoundaryRef.current && !plotBoundary && data?.features?.[0]?.geometry) {
-        setPlotBoundary(data.features[0]);
+
+      if (!skipAnalysisBoundaryRef.current && !plotBoundary && (data as any)?.features?.[0]?.geometry) {
+        setPlotBoundary((data as any).features[0]);
       }
     } catch (err: any) {
-      layerTilesCacheRef.current.delete(memKey);
       console.error("Error fetching growth data:", {
         error: err,
         message: err?.message,
-        name: err?.name,
-        stack: err?.stack,
-        url: url,
-        plotName: plotName,
+        plotName,
         endDate: currentEndDate,
-        apiEndDate,
+        candidateDates,
       });
       setGrowthData((prev: LayerTileResponse) => preserveLayerTilesOnFetchError(prev));
-      
+
       if (isNoImageryError(err?.message)) {
-        // No satellite image for this day — expected; don't block the map UI.
+        // No imagery for this layer/date — hide tiles (do not keep a wrong older scene).
+        setGrowthData(null);
         return;
       }
       let errorMessage = "Failed to fetch growth data";
@@ -1132,98 +1110,70 @@ const CropEyeMap: React.FC<MapProps> = ({
     const apiPlot = plotNameForApi(plotName);
     const forceRefresh = Boolean(options?.forceRefresh);
 
-    const apiEndDate = latestRebinDateForLayer(
-      timelinePayload?.timeline,
+    const candidateDates = buildAdminEndDateCandidates(
+      plotName,
       "Water Uptake",
+      timelinePayload?.timeline,
+      currentEndDate,
     );
-    if (!apiEndDate) return;
-
-    const memKey = `water:${apiPlot}:${apiEndDate}`;
-    const today = new Date().toISOString().split("T")[0];
-    const sharedKey = `layer:water:${apiPlot}:${apiEndDate}`;
-    const sharedTtlMs =
-      apiEndDate === today ? 10 * 60 * 1000 : 30 * 60 * 1000;
-
-    if (forceRefresh) {
-      layerTilesCacheRef.current.delete(memKey);
-      removeCache(sharedKey);
-      removeCache(`waterUptakeData_${apiPlot}`);
-    } else if (layerTilesCacheRef.current.has(memKey)) {
-      const hit = layerTilesCacheRef.current.get(memKey) as any;
-      setWaterUptakeData(hit ?? null);
-      if (!skipAnalysisBoundaryRef.current && !plotBoundary && hit?.features?.[0]?.geometry) {
-        setPlotBoundary(hit.features[0]);
-      }
-      return;
-    }
+    if (!candidateDates.length) return;
 
     if (!forceRefresh) {
-    const sharedCached = getCache(sharedKey, sharedTtlMs);
-    if (sharedCached) {
-      layerTilesCacheRef.current.set(memKey, sharedCached);
-      setWaterUptakeData(sharedCached);
-      if (!skipAnalysisBoundaryRef.current && !plotBoundary && sharedCached?.features?.[0]?.geometry) {
-        setPlotBoundary(sharedCached.features[0]);
-      }
-      return;
-    }
-    if (apiEndDate === today) {
-      const cachedData = getCached(`waterUptakeData_${apiPlot}`);
-      if (cachedData) {
-        layerTilesCacheRef.current.set(memKey, cachedData);
-        setWaterUptakeData(cachedData);
-        if (!skipAnalysisBoundaryRef.current && !plotBoundary && cachedData?.features?.[0]?.geometry) {
-          setPlotBoundary(cachedData.features[0]);
+      for (const d of candidateDates) {
+        const memKey = `water:${apiPlot}:${d}`;
+        if (layerTilesCacheRef.current.has(memKey)) {
+          const hit = layerTilesCacheRef.current.get(memKey) as any;
+          setWaterUptakeData(hit ?? null);
+          if (!skipAnalysisBoundaryRef.current && !plotBoundary && hit?.features?.[0]?.geometry) {
+            setPlotBoundary(hit.features[0]);
+          }
+          return;
         }
-        return;
+        const sharedCached = getCache(`layer:water:${apiPlot}:${d}`, 30 * 60 * 1000);
+        if (sharedCached) {
+          layerTilesCacheRef.current.set(memKey, sharedCached);
+          setWaterUptakeData(sharedCached);
+          if (!skipAnalysisBoundaryRef.current && !plotBoundary && sharedCached?.features?.[0]?.geometry) {
+            setPlotBoundary(sharedCached.features[0]);
+          }
+          return;
+        }
       }
+    } else {
+      for (const d of candidateDates) {
+        layerTilesCacheRef.current.delete(`water:${apiPlot}:${d}`);
+        removeCache(`layer:water:${apiPlot}:${d}`);
+      }
+      removeCache(`waterUptakeData_${apiPlot}`);
     }
-    }
-
-    const baseUrl = 'https://admin-cropeye.up.railway.app';
-    const url = `${baseUrl}/wateruptake?plot_name=${encodeURIComponent(apiPlot)}&end_date=${apiEndDate}&days_back=15`;
 
     try {
-      const data = await getOrFetchJson({
-        key: sharedKey,
-        url,
-        ttlMs: sharedTtlMs,
+      const { data, endDate: apiEndDate } = await fetchAdminLayerWithDateFallback({
+        plotName,
+        apiPlotName: apiPlot,
+        layer: "Water Uptake",
+        candidateDates,
         forceRefresh,
-        fetchInit: {
-          method: "POST",
-          mode: "cors",
-          cache: "no-cache",
-          credentials: "omit",
-          headers: {
-            Accept: "application/json",
-          },
-        },
       });
+      const memKey = `water:${apiPlot}:${apiEndDate}`;
       layerTilesCacheRef.current.set(memKey, data);
       setWaterUptakeData(data);
-      
-      if (apiEndDate === today) {
-        setCached(`waterUptakeData_${apiPlot}`, data);
-      }
-      
-      if (!skipAnalysisBoundaryRef.current && !plotBoundary && data?.features?.[0]?.geometry) {
-        setPlotBoundary(data.features[0]);
+      if (!skipAnalysisBoundaryRef.current && !plotBoundary && (data as any)?.features?.[0]?.geometry) {
+        setPlotBoundary((data as any).features[0]);
       }
     } catch (err: any) {
-      layerTilesCacheRef.current.delete(memKey);
       console.error("Error fetching water uptake data:", {
         error: err,
         message: err?.message,
-        name: err?.name,
-        stack: err?.stack,
-        url: url,
-        plotName: plotName,
+        plotName,
         endDate: currentEndDate,
-        apiEndDate,
+        candidateDates,
       });
       setWaterUptakeData((prev: LayerTileResponse) => preserveLayerTilesOnFetchError(prev));
-      
-      if (isNoImageryError(err?.message)) return;
+      if (isNoImageryError(err?.message)) {
+        setWaterUptakeData(null);
+        return;
+      }
       let errorMessage = "Failed to fetch water uptake data";
       if (err?.message?.includes("Failed to fetch") || err?.name === "TypeError") {
         if (err?.message?.includes("CORS") || err?.message?.includes("cors")) {
@@ -1246,97 +1196,70 @@ const CropEyeMap: React.FC<MapProps> = ({
     const apiPlot = plotNameForApi(plotName);
     const forceRefresh = Boolean(options?.forceRefresh);
 
-    const apiEndDate = latestRebinDateForLayer(
-      timelinePayload?.timeline,
+    const candidateDates = buildAdminEndDateCandidates(
+      plotName,
       "Soil Moisture",
+      timelinePayload?.timeline,
+      currentEndDate,
     );
-    if (!apiEndDate) return;
+    if (!candidateDates.length) return;
 
-    const memKey = `soil:${apiPlot}:${apiEndDate}`;
-    if (forceRefresh) {
-      removeCache(`layer:soil:${apiPlot}:${apiEndDate}`);
-      removeCache(`soilMoistureData_${apiPlot}`);
-      layerTilesCacheRef.current.delete(memKey);
-    } else if (layerTilesCacheRef.current.has(memKey)) {
-      const hit = layerTilesCacheRef.current.get(memKey) as any;
-      setSoilMoistureData(hit ?? null);
-      if (!skipAnalysisBoundaryRef.current && !plotBoundary && hit?.features?.[0]?.geometry) {
-        setPlotBoundary(hit.features[0]);
-      }
-      return;
-    }
-
-    const today = new Date().toISOString().split('T')[0];
-    const sharedKey = `layer:soil:${apiPlot}:${apiEndDate}`;
-    const sharedTtlMs = apiEndDate === today ? 10 * 60 * 1000 : 30 * 60 * 1000;
     if (!forceRefresh) {
-    const sharedCached = getCache(sharedKey, sharedTtlMs);
-    if (sharedCached) {
-      layerTilesCacheRef.current.set(memKey, sharedCached);
-      setSoilMoistureData(sharedCached);
-      if (!skipAnalysisBoundaryRef.current && !plotBoundary && sharedCached?.features?.[0]?.geometry) {
-        setPlotBoundary(sharedCached.features[0]);
-      }
-      return;
-    }
-    if (apiEndDate === today) {
-      const cachedData = getCached(`soilMoistureData_${apiPlot}`);
-      if (cachedData) {
-        layerTilesCacheRef.current.set(memKey, cachedData);
-        setSoilMoistureData(cachedData);
-        if (!skipAnalysisBoundaryRef.current && !plotBoundary && cachedData?.features?.[0]?.geometry) {
-          setPlotBoundary(cachedData.features[0]);
+      for (const d of candidateDates) {
+        const memKey = `soil:${apiPlot}:${d}`;
+        if (layerTilesCacheRef.current.has(memKey)) {
+          const hit = layerTilesCacheRef.current.get(memKey) as any;
+          setSoilMoistureData(hit ?? null);
+          if (!skipAnalysisBoundaryRef.current && !plotBoundary && hit?.features?.[0]?.geometry) {
+            setPlotBoundary(hit.features[0]);
+          }
+          return;
         }
-        return;
+        const sharedCached = getCache(`layer:soil:${apiPlot}:${d}`, 30 * 60 * 1000);
+        if (sharedCached) {
+          layerTilesCacheRef.current.set(memKey, sharedCached);
+          setSoilMoistureData(sharedCached);
+          if (!skipAnalysisBoundaryRef.current && !plotBoundary && sharedCached?.features?.[0]?.geometry) {
+            setPlotBoundary(sharedCached.features[0]);
+          }
+          return;
+        }
       }
-    }
+    } else {
+      for (const d of candidateDates) {
+        layerTilesCacheRef.current.delete(`soil:${apiPlot}:${d}`);
+        removeCache(`layer:soil:${apiPlot}:${d}`);
+      }
+      removeCache(`soilMoistureData_${apiPlot}`);
     }
 
-    const baseUrl = 'https://admin-cropeye.up.railway.app';
-    const url = `${baseUrl}/SoilMoisture?plot_name=${encodeURIComponent(apiPlot)}&end_date=${apiEndDate}&days_back=15`;
-
-    
     try {
-      const data = await getOrFetchJson({
-        key: sharedKey,
-        url,
-        ttlMs: sharedTtlMs,
+      const { data, endDate: apiEndDate } = await fetchAdminLayerWithDateFallback({
+        plotName,
+        apiPlotName: apiPlot,
+        layer: "Soil Moisture",
+        candidateDates,
         forceRefresh,
-        fetchInit: {
-          method: "POST",
-          mode: "cors",
-          cache: "no-cache",
-          credentials: "omit",
-          headers: {
-            Accept: "application/json",
-          },
-        },
       });
+      const memKey = `soil:${apiPlot}:${apiEndDate}`;
       layerTilesCacheRef.current.set(memKey, data);
       setSoilMoistureData(data);
-      
-      if (apiEndDate === today) {
-        setCached(`soilMoistureData_${apiPlot}`, data);
-      }
-      
-      if (!skipAnalysisBoundaryRef.current && !plotBoundary && data?.features?.[0]?.geometry) {
-        setPlotBoundary(data.features[0]);
+      if (!skipAnalysisBoundaryRef.current && !plotBoundary && (data as any)?.features?.[0]?.geometry) {
+        setPlotBoundary((data as any).features[0]);
       }
     } catch (err: any) {
-      layerTilesCacheRef.current.delete(memKey);
       console.error("Error fetching soil moisture data:", {
         error: err,
         message: err?.message,
-        name: err?.name,
-        stack: err?.stack,
-        url: url,
-        plotName: plotName,
+        plotName,
         endDate: currentEndDate,
-        apiEndDate,
+        candidateDates,
       });
       setSoilMoistureData((prev: LayerTileResponse) => preserveLayerTilesOnFetchError(prev));
-      
-      if (isNoImageryError(err?.message)) return;
+      if (isNoImageryError(err?.message)) {
+        setSoilMoistureData(null);
+        return;
+      }
       let errorMessage = "Failed to fetch soil moisture data";
       if (err?.message?.includes("Failed to fetch") || err?.name === "TypeError") {
         if (err?.message?.includes("CORS") || err?.message?.includes("cors")) {
@@ -1356,65 +1279,44 @@ const CropEyeMap: React.FC<MapProps> = ({
     setError(null);
 
     const apiPlot = plotNameForApi(plotName);
-    const currentDate =
-      latestRebinDateForLayer(timelinePayload?.timeline, "Growth") ||
-      latestRebinOverall;
-    if (!currentDate) {
+    const candidateDates = buildAdminEndDateCandidates(
+      plotName,
+      "Growth",
+      timelinePayload?.timeline,
+      currentEndDate,
+    );
+    if (!candidateDates.length) {
       setLoading(false);
       return;
     }
-    const baseUrl = 'https://admin-cropeye.up.railway.app';
-    const url = `${baseUrl}/analyze_Growth?plot_name=${encodeURIComponent(apiPlot)}&end_date=${currentDate}&days_back=15`;
 
     try {
-      
-      // Try fetch with explicit CORS mode and proper headers matching curl command
-      const resp = await fetch(url, {
-          method: "POST",
-        mode: "cors",
-        cache: "no-cache",
-        credentials: "omit",
-        headers: { 
-          "Accept": "application/json"
-        },
-        // Note: Not setting body at all, let browser handle empty POST body
+      const { data } = await fetchAdminLayerWithDateFallback({
+        plotName,
+        apiPlotName: apiPlot,
+        layer: "Growth",
+        candidateDates,
       });
-
-
-      if (!resp.ok) {
-        const errorText = await resp.text().catch(() => 'Unable to read error response');
-        console.error("Plot API error response:", errorText);
-        
-        // Handle 502 Bad Gateway - filter out HTML error page
-        if (resp.status === 502 || errorText.includes('<html>') || errorText.includes('Bad Gateway')) {
-          throw new Error('Backend service is temporarily unavailable. Please try again in a few moments.');
-        }
-        
-        throw new Error(`Plot API failed: ${resp.status} ${resp.statusText}`);
-      }
-
-      const data = await resp.json();
       setPlotData(data);
-      
-      // Preserve plot boundary separately so it persists across layer changes
-      if (!skipAnalysisBoundaryRef.current && data?.features?.[0]?.geometry) {
-        setPlotBoundary(data.features[0]);
+
+      if (!skipAnalysisBoundaryRef.current && (data as any)?.features?.[0]?.geometry) {
+        setPlotBoundary((data as any).features[0]);
       }
     } catch (err: any) {
       console.error("Error fetching plot data:", {
         error: err,
         message: err?.message,
-        name: err?.name,
-        stack: err?.stack,
-        url: url,
-        plotName: plotName,
-        endDate: currentDate
+        plotName,
+        candidateDates,
       });
-      
-      // Provide more specific error messages
+
+      if (isNoImageryError(err?.message)) {
+        // Keep existing plot visible when Admin has not synced latest timeline dates.
+        return;
+      }
+
       let errorMessage = "Failed to fetch plot data";
       if (err?.message?.includes("Failed to fetch") || err?.name === "TypeError") {
-        // Check for CORS error specifically
         if (err?.message?.includes("CORS") || err?.message?.includes("cors")) {
           errorMessage = "CORS error: Backend server is not allowing requests from this origin. Please check CORS configuration on the server.";
         } else {
@@ -1424,8 +1326,6 @@ const CropEyeMap: React.FC<MapProps> = ({
         errorMessage = err.message;
       }
       setError(errorMessage);
-      // Don't clear plotData or plotBoundary on error - keep existing plot visible
-      // Only clear if this is a new plot selection
       if (
         !skipAnalysisBoundaryRef.current &&
         (!plotBoundary || plotBoundary.properties?.plot_name !== plotName)
@@ -1443,9 +1343,12 @@ const CropEyeMap: React.FC<MapProps> = ({
     const apiPlot = plotNameForApi(plotName);
 
     try {
-      const currentDate =
-        latestRebinDateForLayer(timelinePayload?.timeline, "Growth") ||
-        latestRebinOverall;
+      const currentDate = getApiEndDateForLayer(
+        plotName,
+        "Growth",
+        timelinePayload?.timeline,
+        currentEndDate,
+      );
       if (!currentDate) return;
       const resp = await fetch(
         `https://sef-cropeye.up.railway.app/analyze?plot_name=${encodeURIComponent(apiPlot)}&end_date=${currentDate}&days_back=15`,
@@ -1511,143 +1414,100 @@ const CropEyeMap: React.FC<MapProps> = ({
     }
 
     const apiPlot = plotNameForApi(plotName);
-    const apiEndDate = latestRebinDateForLayer(
-      timelinePayload?.timeline,
+    const candidateDates = buildAdminEndDateCandidates(
+      plotName,
       "PEST",
+      timelinePayload?.timeline,
+      currentEndDate,
     );
-    if (!apiEndDate) return;
+    if (!candidateDates.length) return;
 
-    const memKey = `pest:${apiPlot}:${apiEndDate}`;
-    if (forceRefresh) {
-      removeCache(`layer:pest:${apiPlot}:${apiEndDate}`);
+    const applyPestSummary = (data: any) => {
+      if (!data?.pixel_summary || !onPestDataChange) return;
+      const ps = data.pixel_summary;
+      const chewingPestPercentage = ps.chewing_affected_pixel_percentage || 0;
+      const suckingPercentage = ps.sucking_affected_pixel_percentage || 0;
+      const fungiPercentage = ps.fungi_affected_pixel_percentage || 0;
+      const soilBornePercentage = ps.SoilBorn_affected_pixel_percentage || 0;
+      const totalAffectedPercentage =
+        chewingPestPercentage + suckingPercentage + fungiPercentage + soilBornePercentage;
+      onPestDataChange({
+        plotName,
+        pestPercentage: totalAffectedPercentage,
+        healthyPercentage: 100 - totalAffectedPercentage,
+        totalPixels: ps.total_pixel_count || 0,
+        pestAffectedPixels:
+          (ps.chewing_affected_pixel_count || 0) +
+          (ps.sucking_affected_pixel_count || 0) +
+          (ps.fungi_affected_pixel_count || 0) +
+          (ps.SoilBorn_pixel_count || 0),
+        chewingPestPercentage,
+        chewingPestPixels: ps.chewing_affected_pixel_count || 0,
+        suckingPercentage,
+        suckingPixels: ps.sucking_affected_pixel_count || 0,
+      });
+    };
+
+    if (!forceRefresh) {
+      for (const d of candidateDates) {
+        const memKey = `pest:${apiPlot}:${d}`;
+        if (layerTilesCacheRef.current.has(memKey)) {
+          const hit = layerTilesCacheRef.current.get(memKey) as any;
+          setPestData(hit ?? null);
+          if (!skipAnalysisBoundaryRef.current && !plotBoundary && hit?.features?.[0]?.geometry) {
+            setPlotBoundary(hit.features[0]);
+          }
+          applyPestSummary(hit);
+          return;
+        }
+        const sharedCached = getCache(`layer:pest:${apiPlot}:${d}`, 30 * 60 * 1000);
+        if (sharedCached) {
+          layerTilesCacheRef.current.set(memKey, sharedCached);
+          setPestData(sharedCached);
+          if (!skipAnalysisBoundaryRef.current && !plotBoundary && sharedCached?.features?.[0]?.geometry) {
+            setPlotBoundary(sharedCached.features[0]);
+          }
+          applyPestSummary(sharedCached);
+          return;
+        }
+      }
+    } else {
+      for (const d of candidateDates) {
+        layerTilesCacheRef.current.delete(`pest:${apiPlot}:${d}`);
+        removeCache(`layer:pest:${apiPlot}:${d}`);
+      }
       removeCache(`pestData_${apiPlot}`);
       removeCache(`pestData_${plotName}`);
-      layerTilesCacheRef.current.delete(memKey);
-    } else if (layerTilesCacheRef.current.has(memKey)) {
-      const hit = layerTilesCacheRef.current.get(memKey) as any;
-      setPestData(hit ?? null);
-      if (!skipAnalysisBoundaryRef.current && !plotBoundary && hit?.features?.[0]?.geometry) {
-        setPlotBoundary(hit.features[0]);
-      }
-      if (hit?.pixel_summary && onPestDataChange) {
-        const ps = hit.pixel_summary;
-        const chewingPestPercentage = ps.chewing_affected_pixel_percentage || 0;
-        const suckingPercentage = ps.sucking_affected_pixel_percentage || 0;
-        const fungiPercentage = ps.fungi_affected_pixel_percentage || 0;
-        const soilBornePercentage = ps.SoilBorn_affected_pixel_percentage || 0;
-        const totalAffectedPercentage =
-          chewingPestPercentage + suckingPercentage + fungiPercentage + soilBornePercentage;
-        onPestDataChange({
-          plotName,
-          pestPercentage: totalAffectedPercentage,
-          healthyPercentage: 100 - totalAffectedPercentage,
-          totalPixels: ps.total_pixel_count || 0,
-          pestAffectedPixels:
-            (ps.chewing_affected_pixel_count || 0) +
-            (ps.sucking_affected_pixel_count || 0) +
-            (ps.fungi_affected_pixel_count || 0) +
-            (ps.SoilBorn_pixel_count || 0),
-          chewingPestPercentage,
-          chewingPestPixels: ps.chewing_affected_pixel_count || 0,
-          suckingPercentage,
-          suckingPixels: ps.sucking_affected_pixel_count || 0,
-        });
-      }
-      return;
     }
-
-    const today = new Date().toISOString().split('T')[0];
-    const sharedKey = `layer:pest:${apiPlot}:${apiEndDate}`;
-    const sharedTtlMs = apiEndDate === today ? 10 * 60 * 1000 : 30 * 60 * 1000;
-    if (!forceRefresh) {
-    const sharedCached = getCache(sharedKey, sharedTtlMs);
-    if (sharedCached) {
-      layerTilesCacheRef.current.set(memKey, sharedCached);
-      setPestData(sharedCached);
-      if (!skipAnalysisBoundaryRef.current && !plotBoundary && sharedCached?.features?.[0]?.geometry) {
-        setPlotBoundary(sharedCached.features[0]);
-      }
-      return;
-    }
-    if (apiEndDate === today) {
-      const cachedData =
-        getCached(`pestData_${apiPlot}`) || getCached(`pestData_${plotName}`);
-      if (cachedData) {
-        layerTilesCacheRef.current.set(memKey, cachedData);
-        setPestData(cachedData);
-        return;
-      }
-    }
-    }
-
-    const baseUrl = 'https://admin-cropeye.up.railway.app';
-    const url = `${baseUrl}/pest-detection?plot_name=${encodeURIComponent(apiPlot)}&end_date=${apiEndDate}&days_back=15`;
 
     try {
-      const data = await getOrFetchJson({
-        key: sharedKey,
-        url,
-        ttlMs: sharedTtlMs,
+      const { data, endDate: apiEndDate } = await fetchAdminLayerWithDateFallback({
+        plotName,
+        apiPlotName: apiPlot,
+        layer: "PEST",
+        candidateDates,
         forceRefresh,
-        fetchInit: {
-          method: "POST",
-          mode: "cors",
-          cache: "no-cache",
-          credentials: "omit",
-          headers: {
-            Accept: "application/json",
-          },
-        },
       });
+      const memKey = `pest:${apiPlot}:${apiEndDate}`;
       layerTilesCacheRef.current.set(memKey, data);
       setPestData(data);
-      
-      if (apiEndDate === today) {
-        setCached(`pestData_${apiPlot}`, data);
+      if (!skipAnalysisBoundaryRef.current && !plotBoundary && (data as any)?.features?.[0]?.geometry) {
+        setPlotBoundary((data as any).features[0]);
       }
-      
-      if (!skipAnalysisBoundaryRef.current && !plotBoundary && data?.features?.[0]?.geometry) {
-        setPlotBoundary(data.features[0]);
-      }
-
-      if (data?.pixel_summary && onPestDataChange) {
-        const chewingPestPercentage = data.pixel_summary.chewing_affected_pixel_percentage || 0;
-        const suckingPercentage = data.pixel_summary.sucking_affected_pixel_percentage || 0;
-        const fungiPercentage = data.pixel_summary.fungi_affected_pixel_percentage || 0;
-        const soilBornePercentage = data.pixel_summary.SoilBorn_affected_pixel_percentage || 0;
-
-        const totalAffectedPercentage = chewingPestPercentage + suckingPercentage + fungiPercentage + soilBornePercentage;
-        
-        onPestDataChange({
-          plotName,
-          pestPercentage: totalAffectedPercentage,
-          healthyPercentage: 100 - totalAffectedPercentage,
-          totalPixels: data.pixel_summary.total_pixel_count || 0,
-          pestAffectedPixels: (data.pixel_summary.chewing_affected_pixel_count || 0) + 
-                             (data.pixel_summary.sucking_affected_pixel_count || 0) + 
-                             (data.pixel_summary.fungi_affected_pixel_count || 0) +  
-                             (data.pixel_summary.SoilBorn_pixel_count || 0),
-          chewingPestPercentage,
-          chewingPestPixels: data.pixel_summary.chewing_affected_pixel_count || 0,
-          suckingPercentage,
-          suckingPixels: data.pixel_summary.sucking_affected_pixel_count || 0,
-        });
-      }
+      applyPestSummary(data);
     } catch (err: any) {
-      layerTilesCacheRef.current.delete(memKey);
       console.error("Error in fetchPestData:", {
         error: err,
         message: err?.message,
-        name: err?.name,
-        stack: err?.stack,
-        url: url,
-        plotName: plotName,
+        plotName,
         endDate: currentEndDate,
-        apiEndDate,
+        candidateDates,
       });
       setPestData((prev: LayerTileResponse) => preserveLayerTilesOnFetchError(prev));
-      
-      if (isNoImageryError(err?.message)) return;
+      if (isNoImageryError(err?.message)) {
+        setPestData(null);
+        return;
+      }
       let errorMessage = "Failed to fetch pest data";
       if (err?.message?.includes("Failed to fetch") || err?.name === "TypeError") {
         if (err?.message?.includes("CORS") || err?.message?.includes("cors")) {
