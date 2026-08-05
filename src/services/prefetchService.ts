@@ -2,15 +2,17 @@ import {
   getFarmerMyProfile,
   getCurrentUser,
   getFarmsWithFarmerDetails,
+  getAllFarmsWithFarmerDetails,
   getTasks,
   getFieldOfficerAgroStats,
   getManagerFieldOfficersAgroStats,
   getMyFieldOfficers,
   managerAgroStatsCacheKey,
   fieldOfficerAgroStatsCacheKey,
+  MANAGER_FIELD_OFFICERS_CACHE_KEY,
 } from '../api';
 import { getFastApiToken } from '../utils/auth';
-import { getCache, setCache } from '../utils/cache';
+import { setCache } from '../utils/cache';
 import { getCache as getContextCache } from '../components/utils/cache';
 import {
   fetchAnalysisTimeline,
@@ -36,15 +38,12 @@ type UserRole = 'farmer' | 'manager' | 'admin' | 'fieldofficer' | 'owner' | 'pla
 /** Roles that should not prefetch authenticated /farms/ (owner uses public progress APIs). */
 const SKIP_FARMS_PREFETCH_ROLES = new Set<UserRole>(['owner', 'planeteye']);
 
-export const MANAGER_FIELD_OFFICERS_CACHE_KEY = 'managerFieldOfficers_v1';
-const MANAGER_FIELD_OFFICERS_TTL_MS = 5 * 60 * 1000;
+export { MANAGER_FIELD_OFFICERS_CACHE_KEY };
 
 /** Manager Farm Crop Status — field officers + nested farmers (localStorage cache). */
 export const prefetchManagerFieldOfficers = async (): Promise<boolean> => {
   try {
-    const response = await getMyFieldOfficers();
-    const field_officers = response.data?.field_officers ?? [];
-    setCache(MANAGER_FIELD_OFFICERS_CACHE_KEY, { field_officers });
+    await getMyFieldOfficers(); // single-flight + cache inside api.ts
     return true;
   } catch {
     return false;
@@ -122,18 +121,25 @@ export const prefetchAllData = async (
       const commonPromises: Promise<any>[] = [userPromise];
 
       if (!SKIP_FARMS_PREFETCH_ROLES.has(role as UserRole)) {
+        // Manager Harvest needs full pagination — one shared fetch (not first page only).
+        const farmsPromise =
+          role === 'manager'
+            ? getAllFarmsWithFarmerDetails().then((data) => {
+                setCached('farmsWithFarmerDetails', data);
+                fetchedEndpoints.push('farmsWithFarmerDetails');
+                return data;
+              })
+            : getFarmsWithFarmerDetails().then((response) => {
+                const data = response.data?.results || response.data || [];
+                setCached('farmsWithFarmerDetails', data);
+                fetchedEndpoints.push('farmsWithFarmerDetails');
+                return data;
+              });
         commonPromises.push(
-          getFarmsWithFarmerDetails()
-            .then((response) => {
-              const data = response.data?.results || response.data || [];
-              setCached('farmsWithFarmerDetails', data);
-              fetchedEndpoints.push('farmsWithFarmerDetails');
-              return data;
-            })
-            .catch((err) => {
-              errors.push(`Farms: ${err.message}`);
-              return null;
-            }),
+          farmsPromise.catch((err) => {
+            errors.push(`Farms: ${err.message}`);
+            return null;
+          }),
         );
       }
 
@@ -171,15 +177,16 @@ export const prefetchAllData = async (
         commonPromises.push(agroPromise);
       }
 
-      // 2c. For manager: prefetch agroStats for all field officers once (shared cache)
+      // 2c. For manager: prefetch latest agroStats (no end_date) — same key Harvest Planning uses.
+      // Prefetching ?end_date=today often has empty sugar_yield and does not warm Harvest KPIs.
       if (role === 'manager') {
-        const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
-        const endDate = new Date(Date.now() - tzOffsetMs).toISOString().slice(0, 10);
-        const managerAgroPromise = getManagerFieldOfficersAgroStats(endDate)
+        const managerAgroPromise = getManagerFieldOfficersAgroStats()
           .then((data) => {
-            const key = managerAgroStatsCacheKey(endDate);
-            setCached(key, data);
-            setCache(key, data);
+            const key = managerAgroStatsCacheKey();
+            if (data && Object.keys(data).length > 0) {
+              setCached(key, data);
+              setCache(key, data);
+            }
             fetchedEndpoints.push('managerAgroStats');
             return data;
           })

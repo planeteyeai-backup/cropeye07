@@ -1,13 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import jsPDF from "jspdf";
-import html2canvas from "html2canvas";
-//import { Download } from "lucide-react";
 import "./App.css";
 import { useAppContext } from "../context/AppContext";
 import FertilizerTable from "./FertilizerTable";
 import { useFarmerProfile } from "../hooks/useFarmerProfile";
 import { useI18nLite, type AppLanguage } from "../i18nLite";
-import { resolveAvailableImageEndDateForPlot } from "../utils/plotImageEndDates";
 
 interface FertilizerEntry {
   day: number;
@@ -96,25 +92,12 @@ const Fertilizer: React.FC = () => {
 
   const API_BASE_URL = "https://main-cropeye.up.railway.app";
 
-  const getCurrentDate = () => {
-    return new Date().toLocaleDateString("en-IN", {
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-      weekday: "long",
-    });
-  };
-
   const { appState, setAppState, getCached, setCached } = useAppContext();
-  const data = appState.fertilizerData || [];
   const npkData = appState.npkData || {};
-  const noFertilizerRequired = appState.noFertilizerRequired || false;
 
-  const [isLoading, setIsLoading] = useState(true);
   const [npkLoading, setNpkLoading] = useState(false);
   const [npkError, setNpkError] = useState<string | null>(null);
 
-  const tableRef = useRef<HTMLDivElement>(null);
   const npkFetchingRef = useRef(false);
 
   const fetchNPKData = useCallback(async () => {
@@ -142,16 +125,12 @@ const Fertilizer: React.FC = () => {
     }
 
     try {
-      // One timeline/overall date only — no date fallback chain for NPK.
-      const imageEndDate = await resolveAvailableImageEndDateForPlot(PLOT_NAME);
-      if (!imageEndDate) {
-        throw new Error(
-          "No Sentinel image date available for this plot. Open Plot View once, then retry fertilizer.",
-        );
-      }
+      // NPK uses calendar today only — not Sentinel/image end_date.
+      const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
+      const today = new Date(Date.now() - tzOffsetMs).toISOString().slice(0, 10);
       const url = `${API_BASE_URL}/required-n/${encodeURIComponent(
         PLOT_NAME
-      )}?end_date=${imageEndDate}`;
+      )}?end_date=${today}`;
 
       const res = await fetch(url, {
         method: "POST",
@@ -206,7 +185,6 @@ const Fertilizer: React.FC = () => {
 
     if (cached) {
       setAppState((prev: any) => ({ ...prev, fertilizerData: cached }));
-      setIsLoading(false);
       return;
     }
 
@@ -226,27 +204,14 @@ const Fertilizer: React.FC = () => {
         setAppState((prev: any) => ({ ...prev, fertilizerData: entries }));
         setCached(cacheKey, entries);
       })
-      .catch(() => {})
-      .finally(() => setIsLoading(false));
-  }, []);
+      .catch(() => {});
+  }, [getCached, setCached, setAppState]);
 
   useEffect(() => {
     if (PLOT_NAME && !profileLoading) {
       fetchNPKData();
     }
   }, [PLOT_NAME, profileLoading, fetchNPKData]);
-
-  const handleDownloadPDF = async () => {
-    if (tableRef.current) {
-      const canvas = await html2canvas(tableRef.current);
-      const img = canvas.toDataURL("image/png");
-      const pdf = new jsPDF("l", "mm", "a4");
-      const w = pdf.internal.pageSize.getWidth();
-      const h = (canvas.height * w) / canvas.width;
-      pdf.addImage(img, "PNG", 0, 10, w, h);
-      pdf.save("fertilizer_table.pdf");
-    }
-  };
 
   const infoCards = [
     {
@@ -256,13 +221,6 @@ const Fertilizer: React.FC = () => {
         : npkData.N !== undefined
         ? Number(npkData.N).toFixed(2)
         : "No Data",
-      desc:
-        // Only show desc if fertilizer is required (not "No Fertilizer required")
-        !noFertilizerRequired && npkData.plantanalysis_n !== undefined
-          ? npkData.plantanalysis_n < 0
-            ? `Excess: ${Math.abs(npkData.plantanalysis_n).toFixed(2)} kg/acre`
-            : `Fertilizer Required: ${npkData.plantanalysis_n.toFixed(2)} kg/acre`
-          : "",
       bgColor: "bg-green-50",
       iconBg: "bg-green-500",
       textColor: "text-green-700",
@@ -274,13 +232,6 @@ const Fertilizer: React.FC = () => {
         : npkData.P !== undefined
         ? Number(npkData.P).toFixed(2)
         : "No Data",
-      desc:
-        // Only show desc if fertilizer is required (not "No Fertilizer required")
-        !noFertilizerRequired && npkData.plantanalysis_p !== undefined
-          ? npkData.plantanalysis_p < 0
-            ? `Excess: ${Math.abs(npkData.plantanalysis_p).toFixed(2)} kg/acre`
-            : `Fertilizer Required: ${npkData.plantanalysis_p.toFixed(2)} kg/acre`
-          : "",
       bgColor: "bg-blue-50",
       iconBg: "bg-blue-500",
       textColor: "text-blue-700",
@@ -292,13 +243,6 @@ const Fertilizer: React.FC = () => {
         : npkData.K !== undefined
         ? Number(npkData.K).toFixed(2)
         : "No Data",
-      desc:
-        // Only show desc if fertilizer is required (not "No Fertilizer required")
-        !noFertilizerRequired && npkData.plantanalysis_k !== undefined
-          ? npkData.plantanalysis_k < 0
-            ? `Excess: ${Math.abs(npkData.plantanalysis_k).toFixed(2)} kg/acre`
-            : `Fertilizer Required: ${npkData.plantanalysis_k.toFixed(2)} kg/acre`
-          : "",
       bgColor: "bg-yellow-50",
       iconBg: "bg-yellow-500",
       textColor: "text-yellow-700",
@@ -395,10 +339,7 @@ const Fertilizer: React.FC = () => {
             NPK Uptake & Requirements
           </div>
           <div className="text-right">
-            <div className="text-lg font-medium text-gray-700">
-              {/* {getCurrentDate()} */}
-            </div>
-            {/* <div className="text-sm text-gray-600 mt-1">Plot: {PLOT_NAME}</div> */}
+            <div className="text-lg font-medium text-gray-700" />
             {npkLoading && (
               <div className="text-sm text-blue-600 mt-1">
                 Loading NPK data...
@@ -425,79 +366,12 @@ const Fertilizer: React.FC = () => {
                   {card.short}
                 </span>
               </div>
-              <div className={`text-4xl font-extrabold ${card.textColor} mb-2`}>
+              <div className={`text-4xl font-extrabold ${card.textColor}`}>
                 {card.value}
               </div>
-              <div className="text-sm text-gray-600">{card.desc}</div>
             </div>
           ))}
         </div>
-
-        {/* Fertilizer Table */}
-        {/* <div
-          className="bg-white shadow-lg rounded-lg overflow-hidden mb-12"
-          ref={tableRef}
-        >
-          <div className="flex justify-between items-center px-6 py-4 border-b">
-            <h2 className="text-2xl font-bold text-green-700">
-              Fertilizer Schedule
-            </h2>
-            <button
-              onClick={handleDownloadPDF}
-              className="flex items-center px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700"
-            >
-              <Download className="mr-2 h-5 w-5" />
-              Download PDF
-            </button>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y">
-              <thead className="bg-gray-50">
-                <tr>
-                  {[
-                    "Day",
-                    "Stage",
-                    "Nutrients",
-                    "Recommended Dosage",
-                    "Chemical",
-                  ].map((h, i) => (
-                    <th
-                      key={i}
-                      className="px-6 py-3 text-left text-xs font-medium text-gray-500"
-                    >
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y">
-                {isLoading ? (
-                  <tr>
-                    <td colSpan={5} className="text-center py-4">
-                      Loading fertilizer data...
-                    </td>
-                  </tr>
-                ) : data.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="text-center py-4">
-                      No fertilizer data available.
-                    </td>
-                  </tr>
-                ) : (
-                  data.map((entry: FertilizerEntry, index: number) => (
-                    <tr key={index}>
-                      <td className="px-6 py-4">{entry.day}</td>
-                      <td className="px-6 py-4">{entry.stage}</td>
-                      <td className="px-6 py-4">{entry.nutrients}</td>
-                      <td className="px-6 py-4">{entry.recommendedDosage}</td>
-                      <td className="px-6 py-4">{entry.chemical}</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div> */}
 
         <FertilizerTable />
 

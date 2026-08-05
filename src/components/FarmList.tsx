@@ -1,12 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { Download, Edit, Search, Trash2, Loader2, Eye, X, User, Ruler, Map, Droplets, Save, LandPlot } from 'lucide-react';
 import { getRecentFarmers, patchFarm, updateUser, patchPlot, patchIrrigation } from '../api';
-// import {
-//   formatFarmerDisplayName,
-//   // formatPlantationDate,
-//   formatRecordAddress,
-//   getPlantationFromRecord,
-// } from '../utils/plantation';
+import {
+  collectFarmsFromRecord,
+  formatRecordAddress,
+  pickDisplayEmail,
+} from '../utils/plantation';
 
 const ITEMS_PER_PAGE = 5;
 
@@ -51,6 +50,136 @@ const formatPlantationDate = (value: unknown): string => {
     month: 'short',
     year: 'numeric',
   });
+};
+
+const firstNonEmpty = (...values: unknown[]): string => {
+  for (const value of values) {
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text && text.toLowerCase() !== 'n/a' && text.toLowerCase() !== 'null') {
+      return text;
+    }
+  }
+  return '';
+};
+
+/** Prefer real name over phone-as-username. */
+const resolveFarmerDisplayName = (farmer: any): string => {
+  const fullName = `${farmer?.first_name || ''} ${farmer?.last_name || ''}`.trim();
+  if (fullName) return fullName;
+  const username = String(farmer?.username || '').trim();
+  const phone = String(farmer?.phone_number || '').replace(/\D/g, '');
+  if (username && username.replace(/\D/g, '') !== phone) return username;
+  if (phone) return phone;
+  return username || 'N/A';
+};
+
+/** Crop variety may live on farm, nested crop_type, or any plot farm. */
+const resolveCropVariety = (farmer: any, firstFarm: any): string => {
+  const farms = collectFarmsFromRecord(farmer);
+  for (const farm of [firstFarm, ...farms]) {
+    if (!farm) continue;
+    const cropType = farm.crop_type;
+    const variety = firstNonEmpty(
+      typeof cropType === 'object' ? cropType?.crop_variety : null,
+      farm.crop_variety,
+      farm.variety,
+      farm.crop_variety_name,
+    );
+    if (variety) return variety;
+  }
+  if (Array.isArray(farmer?.plots)) {
+    for (const plot of farmer.plots) {
+      const variety = firstNonEmpty(
+        plot?.crop_variety,
+        typeof plot?.crop_type === 'object' ? plot.crop_type?.crop_variety : null,
+      );
+      if (variety) return variety;
+    }
+  }
+  return firstNonEmpty(farmer?.crop_variety);
+};
+
+const resolveCropTypeLabel = (firstFarm: any): string => {
+  const cropType = firstFarm?.crop_type;
+  return (
+    firstNonEmpty(
+      typeof cropType === 'object' ? cropType?.crop_type : cropType,
+      firstFarm?.crop_type_name,
+      firstFarm?.crop_name,
+    ) || 'Sugarcane'
+  );
+};
+
+/** Map GET /farms/recent-farmers/ farmer row → Farmlist table row. */
+const transformRecentFarmer = (farmer: any): Farmer => {
+  const farms = collectFarmsFromRecord(farmer);
+  let firstFarm = farms[0] ?? null;
+  let firstIrrigation = null;
+
+  if (farmer?.farms?.length) {
+    firstFarm = farmer.farms[0];
+    firstIrrigation =
+      firstFarm?.irrigations?.length > 0 ? firstFarm.irrigations[0] : null;
+  } else if (farmer?.plots?.[0]?.farms?.length) {
+    firstFarm = farmer.plots[0].farms[0];
+    firstIrrigation =
+      firstFarm?.irrigations?.length > 0 ? firstFarm.irrigations[0] : null;
+  } else if (firstFarm?.irrigations?.length) {
+    firstIrrigation = firstFarm.irrigations[0];
+  }
+
+  const farmAreaHectares = firstFarm ? parseNumericValue(firstFarm.area_size) : 0;
+  const farmAreaAcresRaw = firstFarm ? hectaresToAcres(firstFarm.area_size) : 0;
+  const email = pickDisplayEmail(farmer);
+  const address = formatRecordAddress(farmer, firstFarm);
+
+  const plantationDateRaw =
+    firstFarm?.plantation_date ??
+    firstFarm?.crop_type?.plantation_date ??
+    farmer?.plantation_date;
+
+  return {
+    id: farmer.id,
+    farmer_name: resolveFarmerDisplayName(farmer),
+    phone_number: farmer.phone_number || 'N/A',
+    area: Number(farmAreaAcresRaw.toFixed(2)),
+    area_hectares: Number(farmAreaHectares.toFixed(4)),
+    plantation_date: formatPlantationDate(plantationDateRaw),
+    plantation_type:
+      firstFarm?.plantation_type ||
+      firstFarm?.crop_type?.plantation_type_display ||
+      firstFarm?.crop_type?.plantation_type ||
+      'N/A',
+    crop_type: resolveCropTypeLabel(firstFarm),
+    crop_variety: resolveCropVariety(farmer, firstFarm),
+    farmer: {
+      id: farmer.id,
+      username: farmer.username,
+      email,
+      phone_number: farmer.phone_number,
+    },
+    first_name: farmer.first_name,
+    last_name: farmer.last_name,
+    email,
+    address,
+    village: farmer.village,
+    state: farmer.state,
+    district: farmer.district,
+    taluka: farmer.taluka,
+    created_at: farmer.date_joined || farmer.created_at,
+    plots: farmer.plots,
+    farms: farmer.farms,
+    irrigation: firstIrrigation,
+  };
+};
+
+const unwrapRecentFarmersPayload = (data: any): any[] => {
+  if (data?.farmers && Array.isArray(data.farmers)) return data.farmers;
+  if (data?.results && Array.isArray(data.results)) return data.results;
+  if (data?.data && Array.isArray(data.data)) return data.data;
+  if (Array.isArray(data)) return data;
+  return [];
 };
 
 interface Farmer {
@@ -139,84 +268,15 @@ export const FarmList: React.FC<FarmlistProps> = ({ users: propUsers, setUsers: 
         setError(null);
         const response = await getRecentFarmers();
         console.log('API Response:', response.data);
-        
-        let farmersData = response.data;
-        
-        // Handle the new response structure: { farmers: [...] }
-        if (farmersData && farmersData.farmers && Array.isArray(farmersData.farmers)) {
-          farmersData = farmersData.farmers;
-        } else if (farmersData && farmersData.results && Array.isArray(farmersData.results)) {
-          // If response has pagination structure like { results: [...], count: ... }
-          farmersData = farmersData.results;
-        } else if (farmersData && farmersData.data && Array.isArray(farmersData.data)) {
-          // If response has nested data structure
-          farmersData = farmersData.data;
-        } else if (!Array.isArray(farmersData)) {
-          console.error('Expected array but got:', typeof farmersData, farmersData);
+
+        const farmersData = unwrapRecentFarmersPayload(response.data);
+        if (!Array.isArray(farmersData)) {
+          console.error('Expected array but got:', typeof response.data, response.data);
           setError('Invalid data format received from server');
           return;
         }
-        
-        // Transform the data to match our interface based on new API response structure
-        const transformedData: Farmer[] = farmersData.map((farmer: any) => {
-          console.log('Processing farmer:', farmer.username, 'Farms:', farmer.farms);
-          
-          // Get the first farm from the farmer's farms array or from plots
-          let firstFarm = null;
-          let firstIrrigation = null;
-          
-          // Try to get farm data from farmer.farms first
-          if (farmer.farms && farmer.farms.length > 0) {
-            firstFarm = farmer.farms[0];
-            firstIrrigation = firstFarm.irrigations && firstFarm.irrigations.length > 0 ? firstFarm.irrigations[0] : null;
-          }
-          // If not found, try to get from plots[0].farms
-          else if (farmer.plots && farmer.plots.length > 0 && farmer.plots[0].farms && farmer.plots[0].farms.length > 0) {
-            firstFarm = farmer.plots[0].farms[0];
-            firstIrrigation = firstFarm.irrigations && firstFarm.irrigations.length > 0 ? firstFarm.irrigations[0] : null;
-          }
-          
-          console.log('First farm data:', firstFarm);
-          console.log('First irrigation data:', firstIrrigation);
 
-          const farmAreaHectares = firstFarm ? parseNumericValue(firstFarm.area_size) : 0;
-          const farmAreaAcresRaw = firstFarm ? hectaresToAcres(firstFarm.area_size) : 0;
-          const transformed = {
-            id: farmer.id,
-            farmer_name: farmer.username || `${farmer.first_name || ''} ${farmer.last_name || ''}`.trim() || 'N/A',
-            phone_number: farmer.phone_number || 'N/A',
-            area: Number(farmAreaAcresRaw.toFixed(2)),
-            area_hectares: Number(farmAreaHectares.toFixed(4)),
-            plantation_date: formatPlantationDate(firstFarm?.plantation_date),
-            plantation_type: firstFarm?.plantation_type || 'N/A',
-            crop_type: firstFarm?.crop_type?.crop_type || firstFarm?.crop_type_name || 'Sugarcane',
-            crop_variety: firstFarm?.crop_type?.crop_variety || firstFarm?.crop_variety || '',
-            farmer: {
-              id: farmer.id,
-              username: farmer.username,
-              email: farmer.email,
-              phone_number: farmer.phone_number
-            },
-            // Additional fields for detailed view
-            first_name: farmer.first_name,
-            last_name: farmer.last_name,
-            email: farmer.email,
-            address: farmer.address,
-            village: farmer.village,
-            state: farmer.state,
-            district: farmer.district,
-            taluka: farmer.taluka,
-            created_at: farmer.date_joined || farmer.created_at,
-            plots: farmer.plots,
-            farms: farmer.farms,
-            // Store irrigation data for easy access
-            irrigation: firstIrrigation
-          };
-          
-          console.log('Transformed farmer data:', transformed);
-          return transformed;
-        });
-        
+        const transformedData: Farmer[] = farmersData.map(transformRecentFarmer);
         console.log('Transformed data:', transformedData);
         setUsers(transformedData);
         if (propSetUsers) {
@@ -443,61 +503,8 @@ export const FarmList: React.FC<FarmlistProps> = ({ users: propUsers, setUsers: 
 
       // Refresh the data
       const response = await getRecentFarmers();
-      let farmersData = response.data;
-      
-      if (farmersData && farmersData.farmers && Array.isArray(farmersData.farmers)) {
-        farmersData = farmersData.farmers;
-      } else if (farmersData && farmersData.results && Array.isArray(farmersData.results)) {
-        farmersData = farmersData.results;
-      } else if (farmersData && farmersData.data && Array.isArray(farmersData.data)) {
-        farmersData = farmersData.data;
-      }
-
-      const transformedData: Farmer[] = farmersData.map((farmer: any) => {
-        let firstFarm = null;
-        let firstIrrigation = null;
-        
-        if (farmer.farms && farmer.farms.length > 0) {
-          firstFarm = farmer.farms[0];
-          firstIrrigation = firstFarm.irrigations && firstFarm.irrigations.length > 0 ? firstFarm.irrigations[0] : null;
-        } else if (farmer.plots && farmer.plots.length > 0 && farmer.plots[0].farms && farmer.plots[0].farms.length > 0) {
-          firstFarm = farmer.plots[0].farms[0];
-          firstIrrigation = firstFarm.irrigations && firstFarm.irrigations.length > 0 ? firstFarm.irrigations[0] : null;
-        }
-
-        const farmAreaHectares = firstFarm ? parseNumericValue(firstFarm.area_size) : 0;
-        const farmAreaAcresRaw = firstFarm ? hectaresToAcres(firstFarm.area_size) : 0;
-        
-        return {
-          id: farmer.id,
-          farmer_name: farmer.username || `${farmer.first_name || ''} ${farmer.last_name || ''}`.trim() || 'N/A',
-          phone_number: farmer.phone_number || 'N/A',
-          area: Number(farmAreaAcresRaw.toFixed(2)),
-          area_hectares: Number(farmAreaHectares.toFixed(4)),
-          plantation_date: formatPlantationDate(firstFarm?.plantation_date),
-          plantation_type: firstFarm?.plantation_type || 'N/A',
-          crop_type: firstFarm?.crop_type?.crop_type || firstFarm?.crop_type_name || 'Sugarcane',
-          crop_variety: firstFarm?.crop_type?.crop_variety || firstFarm?.crop_variety || '',
-          farmer: {
-            id: farmer.id,
-            username: farmer.username,
-            email: farmer.email,
-            phone_number: farmer.phone_number
-          },
-          first_name: farmer.first_name,
-          last_name: farmer.last_name,
-          email: farmer.email,
-          address: farmer.address,
-          village: farmer.village,
-          state: farmer.state,
-          district: farmer.district,
-          taluka: farmer.taluka,
-          created_at: farmer.date_joined || farmer.created_at,
-          plots: farmer.plots,
-          farms: farmer.farms,
-          irrigation: firstIrrigation
-        };
-      });
+      const farmersData = unwrapRecentFarmersPayload(response.data);
+      const transformedData: Farmer[] = farmersData.map(transformRecentFarmer);
 
       setUsers(transformedData);
       if (propSetUsers) {
@@ -731,63 +738,10 @@ export const FarmList: React.FC<FarmlistProps> = ({ users: propUsers, setUsers: 
       
       // Update selectedFarmer with fresh data
       const response = await getRecentFarmers();
-      let farmersData = response.data;
-      
-      if (farmersData && farmersData.farmers && Array.isArray(farmersData.farmers)) {
-        farmersData = farmersData.farmers;
-      } else if (farmersData && farmersData.results && Array.isArray(farmersData.results)) {
-        farmersData = farmersData.results;
-      } else if (farmersData && farmersData.data && Array.isArray(farmersData.data)) {
-        farmersData = farmersData.data;
-      }
-
+      const farmersData = unwrapRecentFarmersPayload(response.data);
       const updatedFarmer = farmersData.find((f: any) => f.id === selectedFarmer.id);
       if (updatedFarmer) {
-        // Transform the updated farmer data
-        let firstFarm = null;
-        let firstIrrigation = null;
-        
-        if (updatedFarmer.farms && updatedFarmer.farms.length > 0) {
-          firstFarm = updatedFarmer.farms[0];
-          firstIrrigation = firstFarm.irrigations && firstFarm.irrigations.length > 0 ? firstFarm.irrigations[0] : null;
-        } else if (updatedFarmer.plots && updatedFarmer.plots.length > 0 && updatedFarmer.plots[0].farms && updatedFarmer.plots[0].farms.length > 0) {
-          firstFarm = updatedFarmer.plots[0].farms[0];
-          firstIrrigation = firstFarm.irrigations && firstFarm.irrigations.length > 0 ? firstFarm.irrigations[0] : null;
-        }
-
-        const farmAreaHectares = firstFarm ? parseNumericValue(firstFarm.area_size) : 0;
-        const farmAreaAcresRaw = firstFarm ? hectaresToAcres(firstFarm.area_size) : 0;
-        
-        const transformedFarmer: Farmer = {
-          id: updatedFarmer.id,
-          farmer_name: updatedFarmer.username || `${updatedFarmer.first_name || ''} ${updatedFarmer.last_name || ''}`.trim() || 'N/A',
-          phone_number: updatedFarmer.phone_number || 'N/A',
-          area: Number(farmAreaAcresRaw.toFixed(2)),
-          area_hectares: Number(farmAreaHectares.toFixed(4)),
-          plantation_date: formatPlantationDate(firstFarm?.plantation_date),
-          plantation_type: firstFarm?.plantation_type || 'N/A',
-          crop_type: firstFarm?.crop_type?.crop_type || firstFarm?.crop_type_name || 'Sugarcane',
-          crop_variety: firstFarm?.crop_type?.crop_variety || firstFarm?.crop_variety || '',
-          farmer: {
-            id: updatedFarmer.id,
-            username: updatedFarmer.username,
-            email: updatedFarmer.email,
-            phone_number: updatedFarmer.phone_number
-          },
-          first_name: updatedFarmer.first_name,
-          last_name: updatedFarmer.last_name,
-          email: updatedFarmer.email,
-          address: updatedFarmer.address,
-          village: updatedFarmer.village,
-          state: updatedFarmer.state,
-          district: updatedFarmer.district,
-          taluka: updatedFarmer.taluka,
-          created_at: updatedFarmer.date_joined || updatedFarmer.created_at,
-          plots: updatedFarmer.plots,
-          farms: updatedFarmer.farms,
-          irrigation: firstIrrigation
-        };
-        
+        const transformedFarmer = transformRecentFarmer(updatedFarmer);
         setSelectedFarmer(transformedFarmer);
         initializeViewModalEditForms(transformedFarmer);
       }

@@ -9,11 +9,14 @@ import api, {
 } from "../api";
 import {
   buildOwnerHarvestRows,
+  collectCropVarietiesFromFarmRows,
   collectHarvestFilterOptions,
+  collectHarvestFilterOptionsFromHierarchy,
   enrichHierarchyWithFarmRows,
   extractFactoryLatLng,
   filterHarvestRows,
   hierarchyHasPlottableData,
+  mergeHarvestFilterOptions,
   normalizeRegionLabel,
   parseManagerFieldOfficersResponse,
   parseOwnerHierarchyResponse,
@@ -100,10 +103,10 @@ interface HarvestData {
   "Area (Hect)": number;
   Days: number;
   /** Legacy typo key (kept for safety). */
-  "Prediction Yield (T/acer)"?: number;
-  "Prediction Yield (T/acre)"?: number;
-  "Brix (Degree)": number;
-  "Recovery (Degree)": number;
+  "Prediction Yield (T/acer)"?: number | null;
+  "Prediction Yield (T/acre)"?: number | null;
+  "Brix (Degree)": number | null;
+  "Recovery (Degree)": number | null;
   "Distance (km)": number;
   Stage: string;
   Region: string;
@@ -234,12 +237,17 @@ const CombinedChart: React.FC<CombinedChartProps> = ({
     if (active && payload && payload.length) {
       const entry = payload[0].payload;
       const day = entry.day;
-      const brixValues = filteredData
-        .filter(
-          (item) =>
-            item.Days === day && typeof item["Brix (Degree)"] === "number",
-        )
-        .map((item) => item["Brix (Degree)"]);
+      const brixValues: number[] = [];
+      for (const item of filteredData) {
+        const v = item["Brix (Degree)"];
+        if (
+          item.Days === day &&
+          typeof v === "number" &&
+          Number.isFinite(v)
+        ) {
+          brixValues.push(v);
+        }
+      }
       const avgBrix = brixValues.length
         ? (brixValues.reduce((a, b) => a + b, 0) / brixValues.length).toFixed(2)
         : "-";
@@ -506,6 +514,20 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
     fieldOfficers: [],
     farmers: [],
   });
+  /** Kept for agroStats auto-refresh without reloading FO/farms. */
+  const managerHarvestCtxRef = useRef<{
+    hierarchy: TeamConnectHierarchy;
+    me: any;
+    farmRows: any[];
+  } | null>(null);
+  const ownerHarvestCtxRef = useRef<{
+    hierarchy: TeamConnectHierarchy;
+    me: any;
+    farmRows: any[];
+    industries: any[];
+    agroStats: Record<string, unknown>;
+  } | null>(null);
+  const agroRefreshingRef = useRef(false);
 
   // Dynamic filter options
   const [regionOptions, setRegionOptions] = useState<FilterOption[]>([
@@ -520,6 +542,8 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
   const [varietyOptions, setVarietyOptions] = useState<FilterOption[]>([
     { value: "All", label: "All" },
   ]);
+  /** Farm crop_variety list — cascade must not wipe this when plot rows lack Variety. */
+  const farmVarietyNamesRef = useRef<string[]>([]);
 
   const managerOptions = useMemo<FilterOption[]>(() => {
     const managers = hierarchyMeta.managers ?? [];
@@ -563,8 +587,8 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
   }, [isLoadingHarvest]);
 
   const harvestLoadHint = isManagerMode
-    ? "Manager harvest usually loads in 10–30 seconds ."
-    : "Owner harvest may take 20–45 seconds for large industries.";
+    ? "Loading field officers & yield… variety filters may fill in a moment."
+    : "Map/yield load first; variety fills when farms finish.";
 
   const harvestLoadingLabel =
     loadElapsedSec > 0
@@ -572,6 +596,86 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
       : "Loading data…";
 
   useEffect(() => {
+    let alive = true;
+    const cleanups: Array<() => void> = [];
+
+    const applyHarvestRows = (
+      hierarchy: TeamConnectHierarchy,
+      agroStats: Record<string, unknown>,
+      farmRows: any[],
+      me: any,
+      industries: any[],
+      opts?: { resetFilters?: boolean },
+    ) => {
+      const enriched = enrichHierarchyWithFarmRows(hierarchy, farmRows);
+      const factoryCenter = extractFactoryLatLng(
+        me,
+        me?.industry,
+        industries[0],
+        ...industries,
+        Object.values(agroStats)[0],
+      );
+      const allData = buildOwnerHarvestRows(
+        enriched,
+        agroStats as Record<string, any>,
+        { factoryCenter, farmRows },
+      );
+      const fromRows = collectHarvestFilterOptions(allData);
+      const fromHierarchy = collectHarvestFilterOptionsFromHierarchy(enriched);
+      const fromFarms = collectCropVarietiesFromFarmRows(farmRows);
+      farmVarietyNamesRef.current = fromFarms;
+      const options = mergeHarvestFilterOptions(fromRows, fromHierarchy, {
+        managers: [],
+        representatives: [],
+        regions: [],
+        sugarcaneTypes: [],
+        varieties: fromFarms,
+      });
+
+      if (!alive) return allData;
+
+      setHierarchyMeta(enriched);
+      setRegionOptions(
+        options.regions.length > 0
+          ? [
+              { value: "All", label: "All" },
+              ...options.regions.map((value) => ({ value, label: value })),
+            ]
+          : [{ value: "All", label: "All" }],
+      );
+      setSugarcaneTypeOptions(
+        options.sugarcaneTypes.length > 0
+          ? [
+              { value: "All", label: "All" },
+              ...options.sugarcaneTypes.map((value) => ({
+                value,
+                label: value,
+              })),
+            ]
+          : [{ value: "All", label: "All" }],
+      );
+      setVarietyOptions(
+        options.varieties.length > 0
+          ? [
+              { value: "All", label: "All" },
+              ...options.varieties.map((value) => ({ value, label: value })),
+            ]
+          : [{ value: "All", label: "All" }],
+      );
+      // Only reset filters on the first paint — background variety enrich must keep user picks.
+      if (opts?.resetFilters !== false) {
+        setFilters({
+          managerId: "All",
+          fieldOfficerId: "All",
+          region: "All",
+          sugarcaneType: "All",
+          variety: "All",
+        });
+      }
+      setRawData(allData);
+      return allData;
+    };
+
     async function fetchData() {
       setLoading(true);
       setDropdownsLoading(true);
@@ -581,6 +685,162 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
 
       try {
         const today = new Date().toISOString().slice(0, 10);
+
+        // ── Manager: me + FO once; agroStats reuses FO cache (no duplicate FO HTTP) ──
+        if (isManagerMode) {
+          const [meSettled, officersSettled] = await Promise.allSettled([
+            getCurrentUser(),
+            getMyFieldOfficers(),
+          ]);
+
+          if (!alive) return;
+
+          if (officersSettled.status === "rejected") {
+            const err: any = officersSettled.reason;
+            setFetchError(
+              err?.response?.data?.detail ||
+                err?.message ||
+                "Could not load field officers. Please try again.",
+            );
+            setDropdownsLoading(false);
+            setRawData([]);
+            setLoading(false);
+            return;
+          }
+
+          const me =
+            meSettled.status === "fulfilled"
+              ? (meSettled.value?.data ?? null)
+              : null;
+          const hierarchy = parseManagerFieldOfficersResponse(
+            officersSettled.value?.data,
+          );
+
+          let agroStats: Record<string, unknown> = {};
+          try {
+            // Always hit Events agroStats when opening Harvest Planning.
+            // Without force:true, login prefetch cache hides the Network request.
+            agroStats = (await getManagerFieldOfficersAgroStats(undefined, {
+              force: true,
+            })) as Record<string, unknown>;
+          } catch (err) {
+            if (import.meta.env.DEV) {
+              console.warn("[Harvest] manager agroStats failed:", err);
+            }
+          }
+
+          managerHarvestCtxRef.current = {
+            hierarchy,
+            me,
+            farmRows: [],
+          };
+
+          // First paint: FO hierarchy + agroStats (map/KPIs). Farms only enrich variety.
+          const firstRows = applyHarvestRows(
+            hierarchy,
+            agroStats,
+            [],
+            me,
+            [],
+          );
+          setDropdownsLoading(false);
+          setLoading(false);
+          if (firstRows.length === 0) {
+            setFetchError(
+              "No harvest plots found for your field officers. Check FO assignments or try again later.",
+            );
+          }
+
+          let lastAgroFetchAt = Date.now();
+          const AGRO_REFRESH_MIN_MS = 2 * 60 * 1000;
+
+          // Soft refresh only — do NOT force-hit right after the first fetch (that doubled agroStats).
+          const refreshAgroStats = async (opts?: { force?: boolean }) => {
+            if (!alive || agroRefreshingRef.current) return;
+            const now = Date.now();
+            if (
+              !opts?.force &&
+              now - lastAgroFetchAt < AGRO_REFRESH_MIN_MS
+            ) {
+              return;
+            }
+            const ctx = managerHarvestCtxRef.current;
+            if (!ctx) return;
+            agroRefreshingRef.current = true;
+            try {
+              const fresh = (await getManagerFieldOfficersAgroStats(undefined, {
+                force: true,
+              })) as Record<string, unknown>;
+              lastAgroFetchAt = Date.now();
+              if (!alive) return;
+              applyHarvestRows(
+                ctx.hierarchy,
+                fresh,
+                ctx.farmRows,
+                ctx.me,
+                [],
+                { resetFilters: false },
+              );
+            } catch (err) {
+              if (import.meta.env.DEV) {
+                console.warn("[Harvest] agroStats auto-refresh failed:", err);
+              }
+            } finally {
+              agroRefreshingRef.current = false;
+            }
+          };
+
+          // Background: farms pagination (was the main multi-loading delay).
+          void getAllFarmsWithFarmerDetails()
+            .then((farmRows) => {
+              if (!alive || !farmRows?.length) return;
+              if (managerHarvestCtxRef.current) {
+                managerHarvestCtxRef.current = {
+                  ...managerHarvestCtxRef.current,
+                  farmRows,
+                };
+              }
+              const enrichedRows = applyHarvestRows(
+                hierarchy,
+                agroStats,
+                farmRows,
+                me,
+                [],
+                { resetFilters: false },
+              );
+              if (enrichedRows.length > 0) setFetchError(null);
+            })
+            .catch((err) => {
+              if (import.meta.env.DEV) {
+                console.warn(
+                  "[Harvest] /farms/?include_farmer=true failed:",
+                  err,
+                );
+              }
+            });
+
+          // Auto-refresh agroStats every 5 minutes while Harvest stays open.
+          const refreshMs = 5 * 60 * 1000;
+          const intervalId = window.setInterval(() => {
+            void refreshAgroStats({ force: true });
+          }, refreshMs);
+
+          const onVisible = () => {
+            if (document.visibilityState === "visible") {
+              // Cooldown prevents spam when tab focus flickers.
+              void refreshAgroStats();
+            }
+          };
+          document.addEventListener("visibilitychange", onVisible);
+
+          cleanups.push(() => {
+            window.clearInterval(intervalId);
+            document.removeEventListener("visibilitychange", onVisible);
+          });
+          return;
+        }
+
+        // ── Owner path: me + team once; agroStats reuses hierarchy; farms parallel for variety ──
         let agroStats: Record<string, unknown> = {};
         let hierarchy: TeamConnectHierarchy = {
           managers: [],
@@ -598,189 +858,119 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
           }
         }
 
-        if (isManagerMode) {
-          const officersRes = await getMyFieldOfficers();
-          hierarchy = parseManagerFieldOfficersResponse(officersRes?.data);
-          setHierarchyMeta(hierarchy);
+        const industryId =
+          me?.industry_id ??
+          me?.industry?.id ??
+          me?.industry?.industry_id ??
+          me?.industryId;
 
-          try {
-            agroStats = (await getManagerFieldOfficersAgroStats(
-              today,
-            )) as Record<string, unknown>;
-          } catch (err) {
-            if (import.meta.env.DEV) {
-              console.warn("[Harvest] manager agroStats failed:", err);
-            }
-          }
-        } else { 
-          const industryId =
-            me?.industry_id ??
-            me?.industry?.id ??
-            me?.industry?.industry_id ??
-            me?.industryId;
+        const [teamSettled, ownerHierarchySettled] = await Promise.allSettled([
+          getTeamConnect(industryId),
+          api.get("/users/owner-hierarchy/"),
+        ]);
 
-          const teamRes = await getTeamConnect(industryId);
-          const teamHierarchy = parseTeamConnectHierarchy(teamRes?.data);
-          let ownerHierarchy = teamHierarchy;
+        const teamHierarchy =
+          teamSettled.status === "fulfilled"
+            ? parseTeamConnectHierarchy(teamSettled.value?.data)
+            : { managers: [], fieldOfficers: [], farmers: [] };
 
-          try {
-            const ownerHierarchyRes = await api.get("/users/owner-hierarchy/");
-            ownerHierarchy = parseOwnerHierarchyResponse(ownerHierarchyRes?.data);
-          } catch {
-            // owner-hierarchy optional
-          }
-
-          hierarchy = pickBestHierarchy(teamHierarchy, ownerHierarchy);
-          if (!hierarchyHasPlottableData(hierarchy)) {
-            hierarchy = hierarchyHasPlottableData(ownerHierarchy)
-              ? ownerHierarchy
-              : teamHierarchy;
-          }
-
-          setHierarchyMeta(hierarchy);
-
-          try {
-            agroStats = (await getOwnerFieldOfficersAgroStats(
-              today,
-            )) as Record<string, unknown>;
-          } catch (err) {
-            if (import.meta.env.DEV) {
-              console.warn("[Harvest] agroStats failed:", err);
-            }
-          }
+        if (teamSettled.status === "rejected") {
+          throw teamSettled.reason;
         }
 
-        // Real crop_variety comes from /farms/?include_farmer=true (not invented).
-        let farmRows: any[] = [];
+        const ownerHierarchy =
+          ownerHierarchySettled.status === "fulfilled"
+            ? parseOwnerHierarchyResponse(ownerHierarchySettled.value?.data)
+            : teamHierarchy;
+
+        hierarchy = pickBestHierarchy(teamHierarchy, ownerHierarchy);
+        if (!hierarchyHasPlottableData(hierarchy)) {
+          hierarchy = hierarchyHasPlottableData(ownerHierarchy)
+            ? ownerHierarchy
+            : teamHierarchy;
+        }
+
+        setHierarchyMeta(hierarchy);
+
+        // Start farms/industries while agroStats runs (cuts total wait for variety).
+        const farmsPromise = getAllFarmsWithFarmerDetails();
+        const industriesPromise = getIndustries()
+          .then((industriesRes) => {
+            const data = industriesRes?.data;
+            return Array.isArray(data?.results)
+              ? data.results
+              : Array.isArray(data)
+                ? data
+                : [];
+          })
+          .catch((err) => {
+            if (import.meta.env.DEV) {
+              console.warn("[Harvest] /users/industries/ failed:", err);
+            }
+            return [] as any[];
+          });
+
         try {
-          farmRows = await getAllFarmsWithFarmerDetails();
+          agroStats = (await getOwnerFieldOfficersAgroStats(today, {
+            hierarchy,
+          })) as Record<string, unknown>;
         } catch (err) {
           if (import.meta.env.DEV) {
-            console.warn("[Harvest] /farms/?include_farmer=true failed:", err);
+            console.warn("[Harvest] agroStats failed:", err);
           }
         }
 
-        hierarchy = enrichHierarchyWithFarmRows(hierarchy, farmRows);
+        if (!alive) return;
 
-        let industries: any[] = [];
-        try {
-          const industriesRes = await getIndustries();
-          const data = industriesRes?.data;
-          industries = Array.isArray(data?.results)
-            ? data.results
-            : Array.isArray(data)
-              ? data
-              : [];
-        } catch (err) {
-          if (import.meta.env.DEV) {
-            console.warn("[Harvest] /users/industries/ failed:", err);
-          }
-        }
-
-        const factoryCenter = extractFactoryLatLng(
-          me,
-          me?.industry,
-          industries[0],
-          ...industries,
-          Object.values(agroStats)[0],
-        );
-
-        const allData = buildOwnerHarvestRows(
-          hierarchy,
-          agroStats as Record<string, any>,
-          { factoryCenter, farmRows },
-        );
-        // Filter options only from harvest rows that have real values (not hierarchy guesses).
-        const options = collectHarvestFilterOptions(allData);
-
-        if (import.meta.env.DEV) {
-          console.groupCollapsed(
-            `[Harvest] ${isManagerMode ? "manager" : "owner"} → filters`,
-          );
-          console.log("rows", allData.length);
-          console.log("farmRows enriched", farmRows.length);
-          console.log(
-            "farmRows with crop_variety",
-            farmRows.filter(
-              (f) =>
-                f?.crop_variety ||
-                (typeof f?.crop_type === "object" && f?.crop_type?.crop_variety),
-            ).length,
-          );
-          console.log("factoryCenter", factoryCenter);
-          console.log("managers", options.managers);
-          console.log("representatives", options.representatives);
-          console.log("regions", options.regions);
-          console.log("sugarcaneTypes", options.sugarcaneTypes);
-          console.log("varieties", options.varieties);
-          console.log(
-            "rowsWithVariety",
-            allData.filter((row) => row.Variety?.trim()).length,
-            "/",
-            allData.length,
-          );
-          console.log(
-            "sample",
-            allData.slice(0, 5).map((row) => ({
-              managerId: row.managerId,
-              fieldOfficerId: row.fieldOfficerId,
-              Manager: row.Manager,
-              representative: row.representative,
-              Region: row.Region,
-              "Sugarcane Type": row["Sugarcane Type"],
-              Variety: row.Variety || "(empty)",
-              "Distance (km)": row["Distance (km)"],
-            })),
-          );
-          console.log(
-            "rowsWithManagerId",
-            allData.filter((row) => row.managerId).length,
-            "/",
-            allData.length,
-          );
-          console.groupEnd();
-        }
-
-        setRegionOptions(
-          options.regions.length > 0
-            ? [
-                { value: "All", label: "All" },
-                ...options.regions.map((value) => ({ value, label: value })),
-              ]
-            : [{ value: "All", label: "All" }],
-        );
-        setSugarcaneTypeOptions(
-          options.sugarcaneTypes.length > 0
-            ? [
-                { value: "All", label: "All" },
-                ...options.sugarcaneTypes.map((value) => ({ value, label: value })),
-              ]
-            : [{ value: "All", label: "All" }],
-        );
-        setVarietyOptions(
-          options.varieties.length > 0
-            ? [
-                { value: "All", label: "All" },
-                ...options.varieties.map((value) => ({ value, label: value })),
-              ]
-            : [{ value: "All", label: "All" }],
-        );
-        setFilters({
-          managerId: "All",
-          fieldOfficerId: "All",
-          region: "All",
-          sugarcaneType: "All",
-          variety: "All",
+        // First paint: map/KPIs. Keep dropdowns loading until farms fill variety.
+        const firstRows = applyHarvestRows(hierarchy, agroStats, [], me, [], {
+          resetFilters: true,
         });
-        setRawData(allData);
-        setDropdownsLoading(false);
-
-        if (allData.length === 0) {
+        setLoading(false);
+        if (firstRows.length === 0) {
           setFetchError(
             "No harvest plots found. Check team-connect has farmers with plots, or try again later.",
           );
         }
+
+        try {
+          const [farmsSettled, industriesSettled] = await Promise.allSettled([
+            farmsPromise,
+            industriesPromise,
+          ]);
+
+          if (!alive) return;
+
+          const farmRows =
+            farmsSettled.status === "fulfilled" ? farmsSettled.value : [];
+          if (farmsSettled.status === "rejected" && import.meta.env.DEV) {
+            console.warn(
+              "[Harvest] /farms/?include_farmer=true failed:",
+              farmsSettled.reason,
+            );
+          }
+
+          const industries =
+            industriesSettled.status === "fulfilled"
+              ? industriesSettled.value
+              : [];
+
+          const enrichedRows = applyHarvestRows(
+            hierarchy,
+            agroStats,
+            farmRows || [],
+            me,
+            industries || [],
+            { resetFilters: false },
+          );
+          if (enrichedRows.length > 0) setFetchError(null);
+        } finally {
+          if (alive) setDropdownsLoading(false);
+        }
+
+        return;
       } catch (err: any) {
+        if (!alive) return;
         console.error("Harvest dashboard fetch error:", err);
         setFetchError(
           err?.response?.data?.detail ||
@@ -790,11 +980,15 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
         setDropdownsLoading(false);
         setRawData([]);
       } finally {
-        setLoading(false);
+        if (alive) setLoading(false);
       }
     }
 
     fetchData();
+    return () => {
+      alive = false;
+      cleanups.forEach((fn) => fn());
+    };
   }, [isManagerMode]);
 
   // Cascade dropdown options from harvest rows only (values present in response data).
@@ -897,6 +1091,12 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
         varietySet.add(item.Variety.trim());
       }
     });
+    // If plot rows still lack Variety (key mismatch), keep farm crop_variety list.
+    if (varietySet.size === 0) {
+      farmVarietyNamesRef.current.forEach((v) => {
+        if (hasValue(v)) varietySet.add(v.trim());
+      });
+    }
     setVarietyOptions(
       varietySet.size > 0
         ? [
@@ -1104,20 +1304,19 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
       (sum, item) => sum + (item["Area (Hect)"] || 0),
       0,
     );
-    const avgYield = filteredData.length
-      ? (
-          filteredData.reduce(
-            (sum, item) => sum + (item["Prediction Yield (T/acre)"] || 0),
-            0,
-          ) / filteredData.length
-        ).toFixed(2)
+    // Average only values present in agroStats (including API 0). Never invent static numbers.
+    const yields = filteredData
+      .map((item) => item["Prediction Yield (T/acre)"])
+      .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+    const avgYield = yields.length
+      ? (yields.reduce((sum, v) => sum + v, 0) / yields.length).toFixed(2)
       : "-";
-    const avgRecovery = filteredData.length
+    const recoveries = filteredData
+      .map((item) => item["Recovery (Degree)"])
+      .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+    const avgRecovery = recoveries.length
       ? (
-          filteredData.reduce(
-            (sum, item) => sum + (item["Recovery (Degree)"] || 0),
-            0,
-          ) / filteredData.length
+          recoveries.reduce((sum, v) => sum + v, 0) / recoveries.length
         ).toFixed(2)
       : "-";
 

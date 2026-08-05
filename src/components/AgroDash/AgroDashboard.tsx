@@ -39,7 +39,10 @@ import {
 } from "recharts";
 import { getUserRole } from "../../utils/auth";
 import { getCache, setCache } from "../utils/cache";
-import { getManagerFieldOfficersAgroStats } from "../../api";
+import {
+  getManagerFieldOfficersAgroStats,
+  managerAgroStatsCacheKey,
+} from "../../api";
 
 // Type definitions
 interface BiomassRange {
@@ -253,11 +256,15 @@ const AgroDashboard: React.FC = () => {
       const role = getUserRole();
 
       const cacheKey =
-        role === "manager" ? `managerAgroStats_${today}` : `agroStats_${today}`;
-      const cached = getCache(cacheKey) as
+        role === "manager"
+          ? managerAgroStatsCacheKey(today)
+          : `agroStats_${today}`;
+      const cachedRaw = getCache(cacheKey) as
         | Record<string, ApiPlotData>
         | null
         | undefined;
+      const cached =
+        cachedRaw && Object.keys(cachedRaw).length > 0 ? cachedRaw : null;
 
       if (!cached) {
         setLoading(true);
@@ -273,7 +280,7 @@ const AgroDashboard: React.FC = () => {
             data = (await getManagerFieldOfficersAgroStats(
               today,
             )) as Record<string, ApiPlotData>;
-            setCache(cacheKey, data);
+            if (Object.keys(data).length > 0) setCache(cacheKey, data);
           }
         } else {
           if (cached) {

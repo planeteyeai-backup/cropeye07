@@ -54,12 +54,18 @@ import {
   getRecentFarmers,
   getFieldOfficerAgroStats,
   getFarmsByFarmerId,
+  getSinglePlotAgroStats,
 } from "../api";
 import { fetchPlotBoundaryCoordinates } from "../utils/plotBoundary";
 import { getUserData } from "../utils/auth";
 import { useAppContext } from "../context/AppContext";
 import { fetchFieldScoreForPlot, fieldScoreCacheKey } from "../utils/fieldScore";
-import { findPlotRef, plotKeyFromRecord } from "../utils/plotName";
+import {
+  findPlotRef,
+  normalizePlotKey,
+  plotKeyFromRecord,
+  resolveApiPlotName,
+} from "../utils/plotName";
 import { getPlantationFromRecord } from "../utils/plantation";
 import { enrichPlotsWithFarmDetails } from "../utils/fertilizerStage";
 import { useFieldIndicesCropStage } from "../hooks/useFieldIndicesCropStage";
@@ -72,6 +78,51 @@ const BASE_URL = "https://events-cropeye.up.railway.app";
 // const SOIL_API_URL = "https://admin-cropeye.up.railway.app";
 // const SOIL_DATE = "2025-10-03";
 
+/** Resolve plot payload from FO agroStats whether keys use `/`, `_`, or quotes. */
+function lookupAgroPlotData(
+  agroStats: Record<string, any> | null | undefined,
+  plotKey: string,
+): any | null {
+  if (!agroStats || !plotKey?.trim()) return null;
+
+  const direct =
+    agroStats[plotKey] ??
+    agroStats[`"${plotKey}"`] ??
+    agroStats[plotKey.replace(/_/g, "/")] ??
+    agroStats[plotKey.replace(/\//g, "_")];
+  if (direct) return direct;
+
+  const target = normalizePlotKey(plotKey);
+  const matched = Object.entries(agroStats).find(
+    ([key]) => normalizePlotKey(key) === target,
+  );
+  return matched?.[1] ?? null;
+}
+
+function toNumberOrNull(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function extractSugarYieldMean(plotData: any): number | null {
+  return toNumberOrNull(
+    plotData?.brix_sugar?.sugar_yield?.mean ??
+      plotData?.brix_sugar?.sugar_yield?.avg ??
+      plotData?.brix_sugar?.sugar_yield?.average ??
+      plotData?.brix_sugar?.sugar_yield_mean ??
+      plotData?.sugar_yield_mean ??
+      plotData?.expected_yield ??
+      plotData?.brix_sugar?.sugar_yield?.min,
+  );
+}
+
+function plotHasYieldOrBiomass(plotData: any): boolean {
+  if (!plotData) return false;
+  if (extractSugarYieldMean(plotData) != null) return true;
+  if (toNumberOrNull(plotData?.biomass?.mean) != null) return true;
+  return false;
+}
 const OTHER_FARMERS_RECOVERY = {
   regional_average: 7.85,
   top_quartile: 8.52,
@@ -571,16 +622,12 @@ const OfficerDashboard: React.FC = () => {
       const cachedStress = getCache(stressCacheKey);
       const cachedFieldScore = getCache(scoreCacheKey);
 
-      const cachedCurrentPlotData = allPlotsData
-        ? allPlotsData[selectedPlotId] ??
-          allPlotsData[`"${selectedPlotId}"`] ??
-          null
-        : null;
+      const cachedCurrentPlotData = lookupAgroPlotData(
+        allPlotsData,
+        selectedPlotId,
+      );
 
-      if (
-        !allPlotsData ||
-        !cachedCurrentPlotData
-      ) {
+      if (!allPlotsData || !cachedCurrentPlotData) {
         shouldShowLoading = true;
       }
 
@@ -604,22 +651,57 @@ const OfficerDashboard: React.FC = () => {
         }
       }
 
-      let currentPlotData = allPlotsData
-        ? allPlotsData[selectedPlotId] ??
-          allPlotsData[`"${selectedPlotId}"`] ??
-          null
-        : null;
+      // FO agroStats keys may be `8/1A` while dropdown uses `8_1A` (or vice versa).
+      const farmer = farmers.find((f) => getFarmerId(f) === selectedFarmerId);
+      const eventsPlotId =
+        resolveApiPlotName(selectedPlotId, farmer?.plots) || selectedPlotId;
 
-      const sugarYieldMeanValue =
-        currentPlotData?.brix_sugar?.sugar_yield?.mean ?? null;
+      let currentPlotData =
+        lookupAgroPlotData(allPlotsData, selectedPlotId) ??
+        lookupAgroPlotData(allPlotsData, eventsPlotId);
+
+      // Same path managers use when bulk agroStats miss the plot / return empty yield.
+      if (!plotHasYieldOrBiomass(currentPlotData)) {
+        const cleanId = eventsPlotId.replace(/"/g, "");
+        const singleCacheKey = `agroSingle_v1_${cleanId}`;
+        let single = getCache(singleCacheKey);
+        if (!single) {
+          try {
+            single = await getSinglePlotAgroStats(cleanId);
+            if (single) setCache(singleCacheKey, single);
+          } catch (err) {
+            console.warn(
+              "FO analyzeSinglePlot fallback failed for yield/biomass:",
+              err,
+            );
+          }
+        }
+        if (plotHasYieldOrBiomass(single)) {
+          currentPlotData = single;
+        } else if (!currentPlotData && single) {
+          currentPlotData = single;
+        }
+      }
+
+      const sugarYieldMeanValue = extractSugarYieldMean(currentPlotData);
 
       const biomassStats = currentPlotData?.biomass ?? null;
-      const biomassTotal = biomassStats?.mean ?? null;
-      const biomassMin = biomassStats?.min ?? null;
-      const biomassMax = biomassStats?.max ?? null;
-      const calculatedBiomass =
-        biomassTotal !== null ? biomassTotal * 0.12 : null;
-      const totalBiomassForMetric = biomassTotal;
+      let biomassTotal = toNumberOrNull(biomassStats?.mean);
+      let biomassMin = toNumberOrNull(biomassStats?.min);
+      let biomassMax = toNumberOrNull(biomassStats?.max);
+
+      // If biomass stats missing, derive from sugar yield (same as FarmerDashboard).
+      let calculatedBiomass: number | null = null;
+      let totalBiomassForMetric: number | null = biomassTotal;
+      if (biomassTotal != null) {
+        calculatedBiomass = biomassTotal * 0.12;
+      } else if (sugarYieldMeanValue != null) {
+        const totalBiomass = sugarYieldMeanValue * 1.27;
+        calculatedBiomass = totalBiomass * 0.12;
+        totalBiomassForMetric = totalBiomass;
+        biomassMin = biomassMin ?? sugarYieldMeanValue;
+        biomassMax = biomassMax ?? sugarYieldMeanValue;
+      }
 
       // Step 3: Update metrics immediately with available data for faster UI response
       if (currentPlotData) {
@@ -628,11 +710,15 @@ const OfficerDashboard: React.FC = () => {
 
         setMetrics((prev) => ({
           ...prev,
-          brix: brixStats?.mean ?? brixStats?.min ?? null,
-          brixMin: brixStats?.min ?? null,
-          brixMax: brixStats?.max ?? null,
-          recovery: recoveryStats?.mean ?? recoveryStats?.min ?? null,
-          area: currentPlotData?.area_acres ?? null,
+          brix: toNumberOrNull(brixStats?.mean ?? brixStats?.min),
+          brixMin: toNumberOrNull(brixStats?.min),
+          brixMax: toNumberOrNull(brixStats?.max),
+          recovery: toNumberOrNull(recoveryStats?.mean ?? recoveryStats?.min),
+          area: toNumberOrNull(
+            currentPlotData?.area_acres ??
+              currentPlotData?.area ??
+              currentPlotData?.area_ha,
+          ),
           biomass: calculatedBiomass,
           totalBiomass: totalBiomassForMetric,
           biomassMin,
@@ -641,14 +727,22 @@ const OfficerDashboard: React.FC = () => {
           daysToHarvest: currentPlotData?.days_to_harvest ?? null,
           growthStage:
             harvestStatus || currentPlotData?.Sugarcane_Status || null,
-          soilPH: currentPlotData?.soil?.phh2o ?? null,
+          soilPH: toNumberOrNull(currentPlotData?.soil?.phh2o),
           organicCarbonDensity:
             currentPlotData?.soil?.organic_carbon_stock != null
-              ? parseFloat(currentPlotData.soil.organic_carbon_stock.toFixed(2))
+              ? parseFloat(
+                  Number(currentPlotData.soil.organic_carbon_stock).toFixed(2),
+                )
               : null,
-          actualYield: currentPlotData?.brix_sugar?.sugar_yield?.min ?? null,
-          sugarYieldMax: currentPlotData?.brix_sugar?.sugar_yield?.max ?? null,
-          sugarYieldMin: currentPlotData?.brix_sugar?.sugar_yield?.min ?? null,
+          actualYield: toNumberOrNull(
+            currentPlotData?.brix_sugar?.sugar_yield?.min ?? sugarYieldMeanValue,
+          ),
+          sugarYieldMax: toNumberOrNull(
+            currentPlotData?.brix_sugar?.sugar_yield?.max,
+          ),
+          sugarYieldMin: toNumberOrNull(
+            currentPlotData?.brix_sugar?.sugar_yield?.min,
+          ),
         }));
       }
 
@@ -1646,7 +1740,7 @@ const OfficerDashboard: React.FC = () => {
                   url="http://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
                   attribution="© Google"
                   maxZoom={20}
-                  maxNativeZoom={18}
+                  maxNativeZoom={15}
                   minZoom={10}
                   tileSize={256}
                   zoomOffset={0}

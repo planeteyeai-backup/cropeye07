@@ -3,7 +3,6 @@ import { Download, Info, Satellite } from "lucide-react";
 import { useAppContext } from "../context/AppContext";
 import { useFarmerProfile } from "../hooks/useFarmerProfile";
 import { RefreshCw } from "lucide-react";
-import { resolveAvailableImageEndDateForPlot } from "../utils/plotImageEndDates";
 
 interface NutrientData {
   name: string;
@@ -162,17 +161,11 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
       setNpkUnavailable(false);
 
       try {
-        // Single timeline/overall image date only — no multi-date NPK fallback.
-        const imageEndDate =
-          (await resolveAvailableImageEndDateForPlot(currentPlotName)) || "";
-        if (!imageEndDate) {
-          setError(
-            "No Sentinel image date available for this plot yet. Open the map once so timeline dates can load, then retry.",
-          );
-          setLoading(false);
-          return;
-        }
-        const currentDate = imageEndDate;
+        // NPK / analyze-npk: calendar today only — not Sentinel/image end_date.
+        const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
+        const currentDate = new Date(Date.now() - tzOffsetMs)
+          .toISOString()
+          .slice(0, 10);
 
         // required-n: soil N/P/K — show ONLY when this API returns 200 (Mandya often 500).
         const soilNPKUrl = `https://main-cropeye.up.railway.app/required-n/${encodeURIComponent(

@@ -17,13 +17,15 @@ import {
   parseTeamConnectHierarchy,
   personDisplayName,
 } from "./utils/teamConnectHarvest";
-import { getCache, setCache } from "./utils/cache";
+import { getCache, setCache, removeCache } from "./utils/cache";
 
 // Set base URL for backend (use .env VITE_API_BASE_URL or new Render backend)
 const DEFAULT_API_BASE_URL = "https://cropeye-backendd.up.railway.app/api";
 
 /** Shared TTL for field-officer / manager agroStats (login + harvest + agro dash). */
 const AGRO_STATS_CACHE_TTL_MS = 10 * 60 * 1000;
+const MY_FIELD_OFFICERS_TTL_MS = 5 * 60 * 1000;
+const FARMS_ALL_TTL_MS = 10 * 60 * 1000;
 
 /** In-flight dedupe so the same FO agroStats URL is never requested twice at once. */
 const fieldOfficerAgroStatsInFlight = new Map<string, Promise<any>>();
@@ -37,6 +39,16 @@ let currentUserInFlight: Promise<any> | null = null;
 let currentUserCache: { res: any; ts: number } | null = null;
 const teamConnectInFlight = new Map<string, Promise<any>>();
 const teamConnectCache = new Map<string, { res: any; ts: number }>();
+
+/** /users/my-field-officers/ — one network call shared by Harvest, Farm Dash, agroStats. */
+let myFieldOfficersInFlight: Promise<any> | null = null;
+let myFieldOfficersCache: { res: any; ts: number } | null = null;
+
+/** Full /farms/?include_farmer=true pagination — one pass shared by Harvest + prefetch. */
+let farmsAllInFlight: Promise<any[]> | null = null;
+
+export const MANAGER_FIELD_OFFICERS_CACHE_KEY = "managerFieldOfficers_v1";
+export const FARMS_ALL_CACHE_KEY = "farmsWithFarmerDetails_all_v2";
 
 export function ownerAgroStatsCacheKey(endDate?: string): string {
   const date = endDate || "latest";
@@ -53,7 +65,8 @@ export function fieldOfficerAgroStatsCacheKey(
 
 export function managerAgroStatsCacheKey(endDate?: string): string {
   const date = endDate || "latest";
-  return `managerAgroStats_${date}`;
+  // v2: empty {} is no longer treated as a valid cache hit
+  return `managerAgroStats_v2_${date}`;
 }
 
 function resolveApiBaseUrl(): string {
@@ -93,8 +106,11 @@ const FASTAPI_AUTH_BASE_URL =
 const SEF_PRODUCTION_URL = "https://sef-cropeye.up.railway.app";
 
 function resolveSefFieldApiBaseUrl(): string {
-  if (import.meta.env.DEV) return "/api/sef";
-  // Production: always Railway SEF. Vercel env like /api/sef or cropeye.ai would return HTML.
+  const fromEnv = String(import.meta.env.VITE_SEF_API_BASE_URL ?? "").trim();
+  if (/^https?:\/\//i.test(fromEnv)) {
+    return fromEnv.replace(/\/$/, "");
+  }
+  // Always hosted SEF — never Vite `/api/sef` localhost proxy.
   return SEF_PRODUCTION_URL;
 }
 
@@ -536,9 +552,11 @@ export const getFarmsWithFarmerDetails = () => {
 /** Paginate farms with nested farmer; capped to avoid hanging the UI. */
 export const getFarmsWithFarmerDetailsPaginated = async (
   maxPages = 15,
+  pageSize = 100,
 ): Promise<any[]> => {
   const all: any[] = [];
-  let nextPath: string | null = "/farms/?include_farmer=true";
+  const size = Math.min(Math.max(pageSize, 1), 200);
+  let nextPath: string | null = `/farms/?include_farmer=true&page_size=${size}`;
   let pageCount = 0;
 
   while (nextPath && pageCount < maxPages) {
@@ -567,9 +585,28 @@ export const getFarmsWithFarmerDetailsPaginated = async (
   return all;
 };
 
-/** Owner/manager-safe: paginate through all farms with nested farmer (recent-farmers is FO-only). */
+/** Owner/manager-safe: paginate through all farms with nested farmer (recent-farmers is FO-only).
+ *  Cached + single-flight so Harvest / prefetch / re-renders do not re-paginate. */
 export const getAllFarmsWithFarmerDetails = async (): Promise<any[]> => {
-  return getFarmsWithFarmerDetailsPaginated(50);
+  const cached = getCache(FARMS_ALL_CACHE_KEY, FARMS_ALL_TTL_MS);
+  if (Array.isArray(cached) && cached.length > 0) {
+    return cached;
+  }
+  if (farmsAllInFlight) return farmsAllInFlight;
+
+  // Larger page_size → fewer round-trips (main manager Harvest delay).
+  farmsAllInFlight = getFarmsWithFarmerDetailsPaginated(30, 100)
+    .then((all) => {
+      if (Array.isArray(all) && all.length > 0) {
+        setCache(FARMS_ALL_CACHE_KEY, all);
+      }
+      return all;
+    })
+    .finally(() => {
+      farmsAllInFlight = null;
+    });
+
+  return farmsAllInFlight;
 };
 
 // Get recent farmers (field officer only — returns 403 for owner/manager)
@@ -1790,13 +1827,19 @@ export const getSinglePlotAgroStats = async (
 export const getFieldOfficerAgroStats = async (
   fieldOfficerId: string | number,
   endDate?: string,
+  options?: { force?: boolean },
 ) => {
   const cacheKey = fieldOfficerAgroStatsCacheKey(fieldOfficerId, endDate);
-  const cached = getCache(cacheKey, AGRO_STATS_CACHE_TTL_MS);
-  if (cached != null) return cached;
+  if (options?.force) {
+    removeCache(cacheKey);
+    fieldOfficerAgroStatsInFlight.delete(cacheKey);
+  } else {
+    const cached = getCache(cacheKey, AGRO_STATS_CACHE_TTL_MS);
+    if (cached != null) return cached;
 
-  const existing = fieldOfficerAgroStatsInFlight.get(cacheKey);
-  if (existing) return existing;
+    const existing = fieldOfficerAgroStatsInFlight.get(cacheKey);
+    if (existing) return existing;
+  }
 
   const dateParam = endDate ? `?end_date=${endDate}` : "";
   const url = `https://events-cropeye.up.railway.app/field-officers/${fieldOfficerId}/agroStats${dateParam}`;
@@ -1816,9 +1859,35 @@ export const getFieldOfficerAgroStats = async (
   return pending;
 };
 
-/** Field officers assigned to the current manager (or owner). */
+/** Field officers assigned to the current manager (or owner).
+ *  Cached + single-flight — Harvest + getManagerFieldOfficersAgroStats share one HTTP call. */
 export const getMyFieldOfficers = () => {
-  return api.get("/users/my-field-officers/");
+  const now = Date.now();
+  if (
+    myFieldOfficersCache &&
+    now - myFieldOfficersCache.ts < MY_FIELD_OFFICERS_TTL_MS
+  ) {
+    return Promise.resolve(myFieldOfficersCache.res);
+  }
+  if (myFieldOfficersInFlight) return myFieldOfficersInFlight;
+
+  myFieldOfficersInFlight = api
+    .get("/users/my-field-officers/")
+    .then((res) => {
+      myFieldOfficersCache = { res, ts: Date.now() };
+      const field_officers = Array.isArray(res?.data?.field_officers)
+        ? res.data.field_officers
+        : Array.isArray(res?.data)
+          ? res.data
+          : [];
+      setCache(MANAGER_FIELD_OFFICERS_CACHE_KEY, { field_officers });
+      return res;
+    })
+    .finally(() => {
+      myFieldOfficersInFlight = null;
+    });
+
+  return myFieldOfficersInFlight;
 };
 
 /** Merge plot dictionaries from multiple field-officer agroStats responses. */
@@ -1836,36 +1905,55 @@ export function mergeAgroStatsPlotData(
 /**
  * Manager dashboard: fetch agroStats for every field officer under this manager in parallel.
  * Cached + deduped so login prefetch and Harvest/Agro dashboards share one network call per FO.
+ * Pass `{ force: true }` to bypass cache and hit Events agroStats again (auto-refresh).
  */
 export const getManagerFieldOfficersAgroStats = async (
   endDate?: string,
+  options?: { force?: boolean },
 ): Promise<Record<string, unknown>> => {
   const mergedKey = managerAgroStatsCacheKey(endDate);
-  const cachedMerged = getCache(mergedKey, AGRO_STATS_CACHE_TTL_MS);
-  if (cachedMerged && typeof cachedMerged === "object") {
-    return cachedMerged as Record<string, unknown>;
-  }
+  const force = Boolean(options?.force);
 
-  const existingMerged = managerAgroStatsInFlight.get(mergedKey);
-  if (existingMerged) return existingMerged;
+  if (force) {
+    removeCache(mergedKey);
+    managerAgroStatsInFlight.delete(mergedKey);
+  } else {
+    // Match owner: never treat empty {} as a cache hit — that blocked Expected Yield
+    // for 10 minutes after a failed/empty FO list or all-agroStats failure.
+    const cachedMerged = getCache(mergedKey, AGRO_STATS_CACHE_TTL_MS) as
+      | Record<string, unknown>
+      | null;
+    if (cachedMerged && Object.keys(cachedMerged).length > 0) {
+      return cachedMerged;
+    }
+
+    const existingMerged = managerAgroStatsInFlight.get(mergedKey);
+    if (existingMerged) return existingMerged;
+  }
 
   const pending = (async (): Promise<Record<string, unknown>> => {
     try {
       const response = await getMyFieldOfficers();
       const data = response?.data;
-      const officers: any[] = data?.field_officers ?? [];
+      const officers: any[] = Array.isArray(data?.field_officers)
+        ? data.field_officers
+        : Array.isArray(data)
+          ? data
+          : [];
       const manager = data?.manager ?? null;
       const managers = manager ? [manager] : [];
 
       if (officers.length === 0) {
-        setCache(mergedKey, {});
+        // Do not cache empty — allow retry on next open of Harvest Planning.
         return {};
       }
 
       const results = await Promise.all(
         officers.map(async (officer) => {
           try {
-            const stats = await getFieldOfficerAgroStats(officer.id, endDate);
+            const stats = await getFieldOfficerAgroStats(officer.id, endDate, {
+              force,
+            });
             if (stats) {
               const createdByRaw = officer?.created_by;
               const createdByUsername =
@@ -1952,7 +2040,9 @@ export const getManagerFieldOfficersAgroStats = async (
       );
 
       const merged = mergeAgroStatsPlotData(...results);
-      setCache(mergedKey, merged);
+      if (Object.keys(merged).length > 0) {
+        setCache(mergedKey, merged);
+      }
       return merged;
     } finally {
       managerAgroStatsInFlight.delete(mergedKey);
@@ -1965,10 +2055,16 @@ export const getManagerFieldOfficersAgroStats = async (
 
 /**
  * Owner dashboard: fetch agroStats for every field officer under this owner in parallel.
- * Fetches field officers from team-connect and then hits events-cropeye for each.
+ * Pass `hierarchy` from Harvest to skip duplicate getCurrentUser + getTeamConnect.
  */
 export const getOwnerFieldOfficersAgroStats = async (
   endDate?: string,
+  options?: {
+    hierarchy?: {
+      fieldOfficers?: any[];
+      managers?: any[];
+    };
+  },
 ): Promise<Record<string, unknown>> => {
   const mergedKey = ownerAgroStatsCacheKey(endDate);
 
@@ -1982,7 +2078,7 @@ export const getOwnerFieldOfficersAgroStats = async (
   const inFlight = ownerAgroStatsInFlight.get(mergedKey);
   if (inFlight) return inFlight;
 
-  const pending = fetchOwnerFieldOfficersAgroStats(endDate)
+  const pending = fetchOwnerFieldOfficersAgroStats(endDate, options)
     .then((merged) => {
       if (merged && Object.keys(merged).length > 0) {
         setCache(mergedKey, merged);
@@ -1999,29 +2095,37 @@ export const getOwnerFieldOfficersAgroStats = async (
 
 const fetchOwnerFieldOfficersAgroStats = async (
   endDate?: string,
+  options?: {
+    hierarchy?: {
+      fieldOfficers?: any[];
+      managers?: any[];
+    };
+  },
 ): Promise<Record<string, unknown>> => {
-  const meRes = await getCurrentUser();
-  const me = meRes?.data;
-  const industryId =
-    me?.industry_id ??
-    me?.industry?.id ??
-    me?.industry?.industry_id ??
-    me?.industryId;
+  let officers = Array.isArray(options?.hierarchy?.fieldOfficers)
+    ? options!.hierarchy!.fieldOfficers!
+    : [];
+  let managers = Array.isArray(options?.hierarchy?.managers)
+    ? options!.hierarchy!.managers!
+    : [];
 
-  const response = await getTeamConnect(industryId);
-  const hierarchy = parseTeamConnectHierarchy(response.data);
-  const officers = hierarchy.fieldOfficers;
-  const managers = hierarchy.managers;
+  // Fallback only when Harvest/Agro did not already load hierarchy.
+  if (officers.length === 0) {
+    const meRes = await getCurrentUser();
+    const me = meRes?.data;
+    const industryId =
+      me?.industry_id ??
+      me?.industry?.id ??
+      me?.industry?.industry_id ??
+      me?.industryId;
 
-  const uniqueIds = Array.from(
-    new Set(
-      officers
-        .map((o) => o?.id ?? o?.user_id)
-        .filter((id) => id != null),
-    ),
-  );
+    const response = await getTeamConnect(industryId);
+    const hierarchy = parseTeamConnectHierarchy(response.data);
+    officers = hierarchy.fieldOfficers;
+    managers = hierarchy.managers;
+  }
 
-  if (uniqueIds.length === 0) {
+  if (officers.length === 0) {
     return {};
   }
 
@@ -2285,10 +2389,11 @@ export const patchFarmMyProfile = (data: {
 /**
  * PATCH /api/farms/my-profile/ — plot boundary for logged-in farmer.
  * Farmers get 403 on PATCH /plots/{id}/; use this endpoint instead.
+ * Never send null boundary/location — backend rejects clearing existing values.
  */
 export const patchFarmerPlotBoundary = (data: {
-  boundary: { type: "Polygon"; coordinates: number[][][] } | null;
-  location: { type: "Point"; coordinates: [number, number] } | null;
+  boundary: { type: "Polygon"; coordinates: number[][][] };
+  location: { type: "Point"; coordinates: [number, number] };
 }) => {
   // Backend my-profile PATCH expects plot geometry nested under `plot`
   // (same shape as the farm response: farm.plot.boundary / farm.plot.location).
@@ -2304,8 +2409,8 @@ export const patchFarmerPlotBoundary = (data: {
 export const updatePlotBoundary = async (
   plotId: string | number,
   data: {
-    boundary: { type: "Polygon"; coordinates: number[][][] } | null;
-    location: { type: "Point"; coordinates: [number, number] } | null;
+    boundary: { type: "Polygon"; coordinates: number[][][] };
+    location: { type: "Point"; coordinates: [number, number] };
   },
 ) => {
   const role = getUserRole()?.toLowerCase()?.replace(/\s+/g, "");
@@ -2398,16 +2503,8 @@ function resolveSefIndustrialYieldUrl(ownerId: number): string {
 }
 
 function resolveSefIndustrialYieldUrls(ownerId: number): string[] {
-  const direct = resolveSefIndustrialYieldUrl(ownerId);
-  if (import.meta.env.DEV) {
-    const query = new URLSearchParams({
-      owner_id: String(ownerId),
-      source: "auto",
-    }).toString();
-    const proxied = `/api/sef/industrial-yield-by-owner?${query}`;
-    return [proxied, direct];
-  }
-  return [direct];
+  // Always hosted SEF — never Vite `/api/sef` localhost proxy.
+  return [resolveSefIndustrialYieldUrl(ownerId)];
 }
 
 function resolvePublicFactoryFarmersUrl(

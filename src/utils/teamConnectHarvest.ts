@@ -9,10 +9,10 @@ export interface TeamConnectHarvestRow {
   "Sugarcane Status": string;
   "Area (Hect)": number;
   Days: number;
-  "Prediction Yield (T/acre)": number;
-  "Prediction Yield (T/acer)"?: number;
-  "Brix (Degree)": number;
-  "Recovery (Degree)": number;
+  "Prediction Yield (T/acre)": number | null;
+  "Prediction Yield (T/acer)"?: number | null;
+  "Brix (Degree)": number | null;
+  "Recovery (Degree)": number | null;
   "Distance (km)": number;
   Stage: string;
   Region: string;
@@ -184,7 +184,11 @@ export function parseManagerFieldOfficersResponse(
 ): TeamConnectHierarchy {
   let fieldOfficers = Array.isArray(data?.field_officers)
     ? data.field_officers
-    : [];
+    : Array.isArray(data?.results)
+      ? data.results
+      : Array.isArray(data)
+        ? data
+        : [];
 
   const managerCandidate =
     data?.manager ??
@@ -626,9 +630,14 @@ function readVariety(farm: any, plot: any, farmer?: any, agro?: any): string {
       : null;
   const plotCrop =
     plot?.crop_type && typeof plot.crop_type === "object" ? plot.crop_type : null;
+  const farmerCrop =
+    farmer?.crop_type && typeof farmer.crop_type === "object"
+      ? farmer.crop_type
+      : null;
 
   return firstNonEmpty(
     farm?.crop_variety,
+    farm?.variety,
     farmCrop?.crop_variety,
     plotFarm?.crop_variety,
     plotFarmCrop?.crop_variety,
@@ -637,10 +646,36 @@ function readVariety(farm: any, plot: any, farmer?: any, agro?: any): string {
     farmerFarm?.crop_variety,
     farmerFarmCrop?.crop_variety,
     farmer?.crop_variety,
+    farmerCrop?.crop_variety,
     agro?.crop_variety,
+    agro?.variety,
     agro?.properties?.crop_variety,
     agro?.features?.[0]?.properties?.crop_variety,
   );
+}
+
+/** Unique crop_variety values from /farms/ rows (for Variety dropdown even if plot-key match fails). */
+export function collectCropVarietiesFromFarmRows(
+  farmRows: any[] | null | undefined,
+): string[] {
+  if (!farmRows?.length) return [];
+  const set = new Set<string>();
+  for (const farm of farmRows) {
+    const variety = firstNonEmpty(
+      farm?.crop_variety,
+      farm?.variety,
+      typeof farm?.crop_type === "object" ? farm.crop_type?.crop_variety : null,
+      farm?.farmer?.crop_variety,
+      typeof farm?.farmer?.crop_type === "object"
+        ? farm.farmer.crop_type?.crop_variety
+        : null,
+      Array.isArray(farm?.plots)
+        ? farm.plots[0]?.crop_variety
+        : null,
+    );
+    if (variety) set.add(variety);
+  }
+  return uniqueSorted([...set]);
 }
 
 /** Index /farms/ crop_variety by every known plot key (owner harvest often misses hierarchy match). */
@@ -653,13 +688,22 @@ export function buildCropVarietyIndexFromFarmRows(
   for (const farm of farmRows) {
     const variety = firstNonEmpty(
       farm?.crop_variety,
+      farm?.variety,
       typeof farm?.crop_type === "object" ? farm.crop_type?.crop_variety : null,
       farm?.farmer?.crop_variety,
+      typeof farm?.farmer?.crop_type === "object"
+        ? farm.farmer.crop_type?.crop_variety
+        : null,
     );
     if (!variety) continue;
 
     for (const key of farmRowPlotKeys(farm)) {
       if (!index.has(key)) index.set(key, variety);
+    }
+    // Farmer-id keys help when agro plot ids don't match farm gat/plot keys.
+    for (const id of farmRowIdentityIds(farm)) {
+      const farmerKey = `farmer:${id}`;
+      if (!index.has(farmerKey)) index.set(farmerKey, variety);
     }
   }
   return index;
@@ -704,6 +748,8 @@ function resolveRowVariety(
     agro?.plot_id,
     agro?.plot_name,
     agro?.fastapi_plot_id,
+    farmer?.id != null ? `farmer:${farmer.id}` : null,
+    farmer?.user_id != null ? `farmer:${farmer.user_id}` : null,
     plot?.gat_number != null && plot?.plot_number != null
       ? `${plot.gat_number}_${plot.plot_number}`
       : null,
@@ -1318,7 +1364,8 @@ function lookupAgroPlot(
   const direct =
     agroStats[plotKey] ??
     agroStats[`"${plotKey}"`] ??
-    agroStats[plotKey.replace(/_/g, "/")];
+    agroStats[plotKey.replace(/_/g, "/")] ??
+    agroStats[plotKey.replace(/\//g, "_")];
 
   if (direct) return direct;
 
@@ -1327,6 +1374,55 @@ function lookupAgroPlot(
     ([key]) => normalizePlotKey(key) === target,
   );
   return matched?.[1] ?? null;
+}
+
+function toFiniteNumber(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Prefer mean/avg from agroStats only — never invent a static 0 when the field is absent. */
+function extractSugarYield(agro: any): number | null {
+  if (!agro || typeof agro !== "object") return null;
+  const sugarYield = agro?.brix_sugar?.sugar_yield;
+  return (
+    toFiniteNumber(sugarYield?.mean) ??
+    toFiniteNumber(sugarYield?.avg) ??
+    toFiniteNumber(sugarYield?.average) ??
+    toFiniteNumber(agro?.brix_sugar?.sugar_yield_mean) ??
+    toFiniteNumber(agro?.sugar_yield_mean) ??
+    toFiniteNumber(agro?.expected_yield) ??
+    toFiniteNumber(typeof sugarYield === "number" ? sugarYield : null) ??
+    null
+  );
+}
+
+/** From Events agroStats only: `brix_sugar.recovery` — no static/fallback invent. */
+function extractRecovery(agro: any): number | null {
+  if (!agro || typeof agro !== "object") return null;
+  const recovery = agro?.brix_sugar?.recovery;
+  return (
+    toFiniteNumber(recovery?.mean) ??
+    toFiniteNumber(recovery?.avg) ??
+    toFiniteNumber(recovery?.average) ??
+    toFiniteNumber(agro?.brix_sugar?.recovery_mean) ??
+    toFiniteNumber(agro?.recovery_mean) ??
+    toFiniteNumber(typeof recovery === "number" ? recovery : null) ??
+    null
+  );
+}
+
+function extractBrix(agro: any): number | null {
+  if (!agro || typeof agro !== "object") return null;
+  const brix = agro?.brix_sugar?.brix;
+  return (
+    toFiniteNumber(brix?.mean) ??
+    toFiniteNumber(brix?.avg) ??
+    toFiniteNumber(brix?.average) ??
+    toFiniteNumber(typeof brix === "number" ? brix : null) ??
+    null
+  );
 }
 
 function plotKeysForContext(plot: any, farm: any | null): string[] {
@@ -1811,16 +1907,9 @@ function buildRowFromContext(
     agro?.soil?.area_acres ??
     (parseFloat(String(farm?.area_size ?? "0")) || 0);
 
-  const yieldValue =
-    agro?.brix_sugar?.sugar_yield?.mean ??
-    agro?.brix_sugar?.sugar_yield?.min ??
-    0;
-  const brixValue =
-    agro?.brix_sugar?.brix?.mean ?? agro?.brix_sugar?.brix?.min ?? 0;
-  const recoveryValue =
-    agro?.brix_sugar?.recovery?.mean ??
-    agro?.brix_sugar?.recovery?.min ??
-    0;
+  const yieldValue = extractSugarYield(agro);
+  const brixValue = extractBrix(agro);
+  const recoveryValue = extractRecovery(agro);
 
   const plotId = plotKeyFromRecord(plot) || plotKey;
   const dataPointId = `${plot?.id ?? plotId}-${farm?.id ?? plotKey}`;
@@ -1867,6 +1956,8 @@ function buildRowFromContext(
       plotKey,
       plotId,
       ...ctx.plotKeys,
+      farmer?.id != null ? `farmer:${farmer.id}` : null,
+      farmer?.user_id != null ? `farmer:${farmer.user_id}` : null,
     ]),
     representative: resolvedRepresentative,
     boundaryCoordinates: center.boundary,
@@ -2036,16 +2127,9 @@ function buildRowFromAgroOnly(
     "Sugarcane Status": computeStatus(days, agro),
     "Area (Hect)": area,
     Days: days,
-    "Prediction Yield (T/acre)":
-      agro?.brix_sugar?.sugar_yield?.mean ??
-      agro?.brix_sugar?.sugar_yield?.min ??
-      0,
-    "Brix (Degree)":
-      agro?.brix_sugar?.brix?.mean ?? agro?.brix_sugar?.brix?.min ?? 0,
-    "Recovery (Degree)":
-      agro?.brix_sugar?.recovery?.mean ??
-      agro?.brix_sugar?.recovery?.min ??
-      0,
+    "Prediction Yield (T/acre)": extractSugarYield(agro),
+    "Brix (Degree)": extractBrix(agro),
+    "Recovery (Degree)": extractRecovery(agro),
     "Distance (km)": readDistanceKm(
       center.lat,
       center.lng,

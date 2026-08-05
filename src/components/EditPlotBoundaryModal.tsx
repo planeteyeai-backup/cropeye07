@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { MapContainer, TileLayer, FeatureGroup, useMap, Marker } from "react-leaflet";
 import { EditControl } from "react-leaflet-draw";
-import { AlertCircle, Loader2, MapPin, Save, Trash2, X } from "lucide-react";
+import { AlertCircle, Crosshair, Loader2, MapPin, Pencil, Save, Trash2, X } from "lucide-react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "leaflet-draw/dist/leaflet.draw.css";
@@ -152,6 +152,9 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
   const [lngInput, setLngInput] = useState("");
   const [mapFocus, setMapFocus] = useState<[number, number] | null>(null);
   const [locationError, setLocationError] = useState<string | null>(null);
+  const [locating, setLocating] = useState(false);
+  /** View existing boundary first; enable draw/edit tools after "Edit Plot". */
+  const [isEditing, setIsEditing] = useState(false);
 
   const displayBoundary = currentBoundary ?? initialBoundary ?? null;
   const leafletCoords = boundaryToLeafletCoords(displayBoundary);
@@ -189,6 +192,9 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
       boundaryToLeafletCoords(initialBoundary ?? null).length >= 3;
     setMapFocus(hasBoundaryOnOpen ? null : locationLatLng);
     setLocationError(null);
+    // View mode when boundary exists; edit mode when drawing a new one.
+    setIsEditing(!hasBoundaryOnOpen);
+    setLocating(false);
   }, [open, initialBoundary, initialLocation, plotId]);
 
   useEffect(() => {
@@ -288,6 +294,31 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
     setError(null);
   };
 
+  /**
+   * Clear the shape on the map so the user can draw again.
+   * Does NOT call the API — backend rejects null boundary/location.
+   */
+  const handleClearForRedraw = () => {
+    const confirmed = window.confirm(
+      "Clear this boundary from the map so you can draw a new one?\n\n" +
+        "After drawing, click Save Boundary. The server does not allow removing a boundary without replacing it.",
+    );
+    if (!confirmed) return;
+
+    handleDrawDeleted();
+    setIsEditing(true);
+    setError(null);
+  };
+
+  /**
+   * "Delete" for an existing plot = clear map + require a new draw + save.
+   * PATCH with boundary/location null is rejected by the API.
+   */
+  const handleDeleteExisting = () => {
+    if (!hadSavedBoundary && !currentBoundary) return;
+    handleClearForRedraw();
+  };
+
   const resolveBoundaryFromMap = (): GeoJsonPolygon | null => {
     commitPendingLayerEdits(featureGroupRef.current);
 
@@ -339,10 +370,49 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
     setMapFocus([lat, lng]);
   };
 
+  const handleUseCurrentLocation = () => {
+    if (!navigator.geolocation) {
+      setLocationError("Geolocation is not supported by this browser.");
+      return;
+    }
+
+    setLocating(true);
+    setLocationError(null);
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const { latitude, longitude } = position.coords;
+        setLatInput(latitude.toFixed(6));
+        setLngInput(longitude.toFixed(6));
+        setMapFocus([latitude, longitude]);
+        setLocating(false);
+      },
+      (err) => {
+        setLocating(false);
+        if (err.code === err.PERMISSION_DENIED) {
+          setLocationError(
+            "Location permission denied. Allow location access in browser settings, then try again.",
+          );
+        } else {
+          setLocationError(
+            "Unable to get your current location. Enter coordinates manually or try again.",
+          );
+        }
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 20000,
+        maximumAge: 0,
+      },
+    );
+  };
+
   const syncPlotBoundary = async (
-    boundary: GeoJsonPolygon | null,
-    location: GeoJsonPoint | null,
+    boundary: GeoJsonPolygon,
+    location: GeoJsonPoint,
   ) => {
+    // Never send null — API returns:
+    // "Cannot remove an existing plot boundary/location. Omit this field to keep…"
     await updatePlotBoundary(plotId, {
       boundary,
       location,
@@ -362,12 +432,24 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
     if (e.response?.status === 403) {
       return "You do not have permission to update this plot boundary. Please contact your field officer or support.";
     }
+
+    const data = e.response?.data;
+    const plotErrors = data?.plot;
+    const boundaryMsg = plotErrors?.boundary?.[0] || data?.boundary?.[0];
+    const locationMsg = plotErrors?.location?.[0] || data?.location?.[0];
+    if (
+      (typeof boundaryMsg === "string" &&
+        boundaryMsg.toLowerCase().includes("cannot remove")) ||
+      (typeof locationMsg === "string" &&
+        locationMsg.toLowerCase().includes("cannot remove"))
+    ) {
+      return "The server does not allow deleting a plot boundary. Clear the map, draw a new shape, then click Save Boundary.";
+    }
+
     return (
-      e.response?.data?.detail ||
-      e.response?.data?.message ||
-      (typeof e.response?.data === "object"
-        ? JSON.stringify(e.response.data)
-        : e.message) ||
+      data?.detail ||
+      data?.message ||
+      (typeof data === "object" ? JSON.stringify(data) : e.message) ||
       "Failed to save plot boundary."
     );
   };
@@ -376,7 +458,9 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
     const boundaryToSave = resolveBoundaryFromMap();
 
     if (!boundaryToSave?.coordinates?.[0]?.length) {
-      setError("Please draw or edit the plot boundary on the map first.");
+      setError(
+        "Please draw the plot boundary on the map first, then click Save Boundary.",
+      );
       return;
     }
 
@@ -398,6 +482,11 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
       setError(null);
 
       const locationToSave = resolveLocationForSave(boundaryToSave);
+      if (!locationToSave) {
+        setError("Could not resolve plot location. Enter lat/long or redraw the boundary.");
+        return;
+      }
+
       await syncPlotBoundary(boundaryToSave, locationToSave);
 
       notifyPlotBoundaryUpdated({
@@ -416,90 +505,76 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
     }
   };
 
-  const handleDelete = async () => {
-    if (!hadSavedBoundary && !currentBoundary) return;
-
-    const confirmed = window.confirm(
-      "Remove this plot boundary from the server? You can draw a new boundary later.",
-    );
-    if (!confirmed) return;
-
-    try {
-      setSaving(true);
-      setError(null);
-
-      await syncPlotBoundary(null, null);
-
-      notifyPlotBoundaryUpdated({
-        plotKey: plotLabel || String(plotId),
-        plotId: String(plotId),
-        boundary: null,
-        extraPlotKeys: plotKeys,
-      });
-
-      onSaved?.(null, null);
-      onClose();
-    } catch (e: any) {
-      setError(formatBoundaryError(e));
-    } finally {
-      setSaving(false);
-    }
-  };
-
   if (!open) return null;
 
-  const hasExistingBoundary =
+  // Use live map state only — after clear/redraw, initialBoundary must not force edit-only tools.
+  const hasDrawnBoundary =
+    boundaryToLeafletCoords(currentBoundary).length >= 3;
+  const showDeleteOption =
+    hadSavedBoundary ||
     boundaryToLeafletCoords(currentBoundary ?? initialBoundary).length >= 3;
 
   const modal = (
     <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/55 p-3 sm:p-4">
       <div className="flex max-h-[calc(100vh-1.5rem)] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
-        <div className="flex shrink-0 items-center justify-between border-b border-gray-100 bg-gradient-to-r from-green-50 to-emerald-50 px-4 py-4 sm:px-5">
+        <div className="flex shrink-0 items-center justify-between border-b border-gray-100 bg-[#1B5E20] px-4 py-4 sm:px-5">
           <div>
-            <h3 className="text-lg font-bold text-gray-800">Edit Plot Boundary</h3>
-            <p className="mt-0.5 text-xs text-gray-500">
-              {plotLabel ? `Plot ${plotLabel}` : "Draw your farm boundary on the map"}
+            <h3 className="text-lg font-bold text-white">Plot Boundary</h3>
+            <p className="mt-0.5 text-xs text-green-100">
+              {plotLabel ? `Plot ${plotLabel}` : "View or edit your farm boundary"}
             </p>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-full p-2 transition-colors hover:bg-white/80"
+            className="rounded-full p-2 transition-colors hover:bg-white/15"
             aria-label="Close"
           >
-            <X size={18} className="text-gray-500" />
+            <X size={18} className="text-white" />
           </button>
         </div>
 
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
-          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-            {hasExistingBoundary ? (
-              <p>
-                <strong>How to edit:</strong> Click the <strong>square edit tool</strong> (top-right),
-                drag corners to resize, then click <strong>Save Boundary</strong> below (you do not need
-                the map toolbar checkmark). Update lat/long if needed.
-              </p>
-            ) : (
-              <ol className="list-decimal space-y-1 pl-4">
-                <li>
-                  Click the <strong>pentagon icon</strong> on the top-right of the map.
-                </li>
-                <li>Click each corner of your plot on the satellite image.</li>
-                <li>Click the first point again (or double-click) to close the shape.</li>
-                <li>
-                  Check the calculated area, then click <strong>Save Boundary</strong>.
-                </li>
-              </ol>
-            )}
-          </div>
+          {isEditing ? (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              {hasDrawnBoundary ? (
+                <p>
+                  <strong>How to edit:</strong> Click the <strong>square edit tool</strong> (top-right),
+                  drag corners to resize, then click <strong>Save Boundary</strong> below. Use{" "}
+                  <strong>Delete / Clear</strong> to remove the shape and draw a new one (server requires a
+                  replacement boundary — empty is not allowed).
+                </p>
+              ) : (
+                <ol className="list-decimal space-y-1 pl-4">
+                  <li>
+                    Optionally tap <strong>Use My Current Location</strong> to center the map on you.
+                  </li>
+                  <li>
+                    Click the <strong>pentagon icon</strong> on the top-right of the map.
+                  </li>
+                  <li>Click each corner of your plot on the satellite image.</li>
+                  <li>Click the first point again (or double-click) to close the shape.</li>
+                  <li>
+                    Check the calculated area, then click <strong>Save Boundary</strong>.
+                  </li>
+                </ol>
+              )}
+            </div>
+          ) : (
+            <div className="rounded-xl border border-slate-200 bg-slate-100 px-4 py-3 text-sm text-slate-700">
+              Viewing plot boundary. Tap <strong>Edit Plot</strong> to make changes, or{" "}
+              <strong>Delete</strong> to clear and redraw.
+            </div>
+          )}
 
           <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
             <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
               Plot center (lat / long)
             </p>
             <p className="mt-1 text-xs text-gray-500">
-              Same as Add Farm: enter coordinates to move the map. Saved as plot location
-              (longitude, latitude).
+              {isEditing
+                ? "Enter coordinates to move the map. Tap the map tools to draw or re-draw the boundary."
+                : "Enter coordinates to move the map. Tap Edit Plot to draw or re-draw the boundary."}
             </p>
             <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
               <input
@@ -507,23 +582,43 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
                 placeholder="Latitude"
                 value={latInput}
                 onChange={(e) => setLatInput(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                disabled={!isEditing}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:bg-gray-100 disabled:text-gray-500"
               />
               <input
                 type="text"
                 placeholder="Longitude"
                 value={lngInput}
                 onChange={(e) => setLngInput(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                disabled={!isEditing}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:bg-gray-100 disabled:text-gray-500"
               />
               <button
                 type="button"
                 onClick={handleLatLngSearch}
-                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+                disabled={!isEditing}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Go to location
               </button>
             </div>
+
+            {isEditing && (
+              <button
+                type="button"
+                onClick={handleUseCurrentLocation}
+                disabled={locating || saving}
+                className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#1B5E20] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#145218] disabled:opacity-60"
+              >
+                {locating ? (
+                  <Loader2 size={16} className="animate-spin" />
+                ) : (
+                  <Crosshair size={16} />
+                )}
+                {locating ? "Getting your location…" : "Use My Current Location"}
+              </button>
+            )}
+
             {locationError && (
               <p className="mt-2 text-xs text-red-600">{locationError}</p>
             )}
@@ -536,7 +631,12 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
             </div>
           )}
 
-          <div className="plot-boundary-editor-map overflow-hidden rounded-xl border border-gray-200">
+          <div className="plot-boundary-editor-map relative overflow-hidden rounded-xl border border-gray-200">
+            {!isEditing && (
+              <div className="pointer-events-none absolute inset-x-0 top-0 z-[1000] bg-slate-200/95 px-3 py-2 text-center text-xs font-medium text-slate-700">
+                Viewing plot boundary. Tap &apos;Edit Plot&apos; to make changes.
+              </div>
+            )}
             <MapContainer
               key={`plot-boundary-${plotId}-${open ? "open" : "closed"}`}
               center={mapCenter}
@@ -557,32 +657,34 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
 
               {markerLatLng && <Marker position={markerLatLng} />}
 
-              <MapDrawSync onBoundaryChange={applyGeometry} />
+              {isEditing && <MapDrawSync onBoundaryChange={applyGeometry} />}
 
               <FeatureGroup ref={featureGroupRef}>
-                <EditControl
-                  position="topright"
-                  onCreated={handleDrawCreated}
-                  onEdited={handleDrawEdited}
-                  onDeleted={handleDrawDeleted}
-                  draw={{
-                    polygon: !hasExistingBoundary,
-                    rectangle: false,
-                    polyline: false,
-                    circle: false,
-                    marker: false,
-                    circlemarker: false,
-                  }}
-                  edit={{
-                    edit: hasExistingBoundary ? {} : false,
-                    remove: hasExistingBoundary,
-                  }}
-                />
+                {isEditing && (
+                  <EditControl
+                    position="topright"
+                    onCreated={handleDrawCreated}
+                    onEdited={handleDrawEdited}
+                    onDeleted={handleDrawDeleted}
+                    draw={{
+                      polygon: !hasDrawnBoundary,
+                      rectangle: false,
+                      polyline: false,
+                      circle: false,
+                      marker: false,
+                      circlemarker: false,
+                    }}
+                    edit={{
+                      edit: hasDrawnBoundary ? {} : false,
+                      remove: hasDrawnBoundary,
+                    }}
+                  />
+                )}
               </FeatureGroup>
             </MapContainer>
           </div>
 
-          {!hasExistingBoundary && areaAcres == null && (
+          {isEditing && !hasDrawnBoundary && areaAcres == null && (
             <p className="text-xs text-gray-500">
               No shape on the map yet. Use the pentagon tool (top-right) to draw your plot.
             </p>
@@ -596,44 +698,67 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
           )}
         </div>
 
-        <div className="flex shrink-0 items-center justify-between gap-2 border-t border-gray-100 bg-gray-50 px-4 py-4 sm:px-5">
-          {(hadSavedBoundary || currentBoundary) && (
-            <button
-              type="button"
-              onClick={handleDelete}
-              disabled={saving}
-              className="inline-flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 transition-colors hover:bg-red-100 disabled:opacity-60"
-            >
-              {saving ? (
-                <Loader2 size={14} className="animate-spin" />
-              ) : (
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-gray-100 bg-gray-50 px-4 py-4 sm:px-5">
+          {showDeleteOption && (
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleDeleteExisting}
+                disabled={saving}
+                className="inline-flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 transition-colors hover:bg-red-100 disabled:opacity-60"
+              >
                 <Trash2 size={14} />
+                Delete Boundary
+              </button>
+              {isEditing && hasDrawnBoundary && (
+                <button
+                  type="button"
+                  onClick={handleClearForRedraw}
+                  disabled={saving}
+                  className="inline-flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800 transition-colors hover:bg-amber-100 disabled:opacity-60"
+                >
+                  Clear to redraw
+                </button>
               )}
-              Delete Boundary
-            </button>
+            </div>
           )}
 
           <div className="ml-auto flex items-center gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-xl border border-gray-300 px-4 py-2 text-sm text-gray-600 transition-colors hover:bg-white"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={handleSave}
-            disabled={saving || !resolveBoundaryFromMap()}
-            className="inline-flex items-center gap-2 rounded-xl bg-green-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-green-700 disabled:opacity-60"
-          >
-            {saving ? (
-              <Loader2 size={14} className="animate-spin" />
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-xl border border-gray-300 px-4 py-2 text-sm text-gray-600 transition-colors hover:bg-white"
+            >
+              Cancel
+            </button>
+            {!isEditing ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsEditing(true);
+                  setLocationError(null);
+                  setError(null);
+                }}
+                className="inline-flex items-center gap-2 rounded-xl bg-[#1B5E20] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[#145218]"
+              >
+                <Pencil size={14} />
+                Edit Plot
+              </button>
             ) : (
-              <Save size={14} />
+              <button
+                type="button"
+                onClick={handleSave}
+                disabled={saving || !hasDrawnBoundary}
+                className="inline-flex items-center gap-2 rounded-xl bg-[#1B5E20] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[#145218] disabled:opacity-60"
+              >
+                {saving ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <Save size={14} />
+                )}
+                Save Boundary
+              </button>
             )}
-            Save Boundary
-          </button>
           </div>
         </div>
       </div>

@@ -12,8 +12,8 @@ import { resolveApiPlotName } from '../../../utils/plotName';
 async function getProfileData(): Promise<any> {
   const cached = getCache('farmerProfile', 10 * 60 * 1000); // 10 min TTL
   if (cached) return cached;
-  const response = await getFarmerMyProfile();
-  return response.data;
+  const response = (await getFarmerMyProfile()) as { data?: unknown };
+  return response?.data ?? null;
 }
 
 export interface WeatherData {
@@ -97,31 +97,6 @@ export function calculateSugarcaneStage(plantationDate: string): string {
 }
 
 /**
- * Check if temperature and humidity fall within pest/disease ranges
- */
-function checkTemperatureHumidityMatch(
-  pestTemp: string,
-  pestHumidity: string,
-  currentTemp: number,
-  currentHumidity: number
-): { tempMatch: boolean; humidityMatch: boolean } {
-  // Parse temperature range (e.g., "28-32" -> min: 28, max: 32)
-  const tempRange = pestTemp.split('-').map(t => parseFloat(t.trim()));
-  const tempMin = tempRange[0];
-  const tempMax = tempRange[1];
-  
-  // Parse humidity range (e.g., "70-80" -> min: 70, max: 80)
-  const humidityRange = pestHumidity.split('-').map(h => parseFloat(h.trim()));
-  const humidityMin = humidityRange[0];
-  const humidityMax = humidityRange[1];
-  
-  const tempMatch = currentTemp >= tempMin && currentTemp <= tempMax;
-  const humidityMatch = currentHumidity >= humidityMin && currentHumidity <= humidityMax;
-  
-  return { tempMatch, humidityMatch };
-}
-
-/**
  * Calculate days since plantation
  */
 export function calculateDaysSincePlantation(plantationDate: string): number {
@@ -150,8 +125,8 @@ function assessPestRisk(
   pest: any,
   daysSincePlantation: number,
   currentMonth: string,
-  currentTemp: number,
-  currentHumidity: number,
+  _currentTemp: number,
+  _currentHumidity: number,
   pestDetectionData?: PestDetectionData
 ): 'High' | 'Moderate' | 'Low' | null {
   // Check if API detected this pest category (legend circle shows percentage)
@@ -210,8 +185,8 @@ function assessDiseaseRisk(
   disease: any,
   daysSincePlantation: number,
   currentMonth: string,
-  currentTemp: number,
-  currentHumidity: number,
+  _currentTemp: number,
+  _currentHumidity: number,
   pestDetectionData?: PestDetectionData
 ): 'High' | 'Moderate' | 'Low' | null {
   // Check if API detected fungi (legend circle shows fungi percentage)
@@ -342,10 +317,8 @@ export async function fetchPestDetectionData(plotId?: string): Promise<PestDetec
       };
     }
     
-    // Use proxy in development to avoid CORS issues, direct URL in production
-    const baseUrl = import.meta.env.DEV 
-      ? '/api/dev-plot' 
-      : 'https://admin-cropeye.up.railway.app';
+    // Always hosted Admin API (no localhost Vite proxy).
+    const baseUrl = 'https://admin-cropeye.up.railway.app';
     const url = `${baseUrl}/pest-detection?plot_name=${encodeURIComponent(plotName)}&end_date=${endDate}&days_back=15`;
     
     // Add timeout to prevent hanging on 503 errors
@@ -602,6 +575,7 @@ export async function generateRiskAssessment(
         'Sucking percentage': pestDetectionData.sucking_affected_pixel_percentage,
         'Soil Born percentage': pestDetectionData.SoilBorn_affected_pixel_percentage,
         'Fungi percentage': pestDetectionData.fungi_affected_pixel_percentage,
+        'Detected': { hasChewing, hasSucking, hasSoilBorn, hasFungi },
         'Active Categories': activeCategories.length > 0 ? activeCategories.join(', ') : 'NONE',
         'Pests': {
           'High': result.pests.High.length,
