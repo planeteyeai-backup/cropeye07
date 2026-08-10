@@ -46,6 +46,7 @@ import {
   Maximize2,
   Gauge,
   Loader2,
+  Sprout,
 } from "lucide-react";
 import "leaflet/dist/leaflet.css";
 import axios from "axios";
@@ -71,6 +72,11 @@ import { enrichPlotsWithFarmDetails } from "../utils/fertilizerStage";
 import { useFieldIndicesCropStage } from "../hooks/useFieldIndicesCropStage";
 import FieldIndicesStageBadge from "./FieldIndicesStageBadge";
 import MapCropStatusOverlay from "./MapCropStatusOverlay";
+import {
+  cropConditionStyleFromCci,
+  fetchWaterStressAnalysis,
+  parseWaterStressMetrics,
+} from "../utils/waterStressApi";
 
 // Constants (same as FarmerDashboard)
 const BASE_URL = "https://events-cropeye.up.railway.app";
@@ -192,6 +198,8 @@ interface Metrics {
   growthStage: string | null;
   soilPH: number | null;
   organicCarbonDensity: number | null;
+  cropConditionLabel: string | null;
+  cropConditionValue: number | null;
   actualYield: number | null;
   cnRatio: number | null;
   sugarYieldMax: number | null;
@@ -240,6 +248,7 @@ const OfficerDashboard: React.FC = () => {
   const [plots, setPlots] = useState<string[]>([]);
   const [loadingFarmers, setLoadingFarmers] = useState<boolean>(false);
   const [loadingData, setLoadingData] = useState<boolean>(false);
+  const [loadingCci, setLoadingCci] = useState<boolean>(false);
   const [showDebugInfo] = useState(false);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
@@ -286,6 +295,8 @@ const OfficerDashboard: React.FC = () => {
     growthStage: null,
     soilPH: null,
     organicCarbonDensity: null,
+    cropConditionLabel: null,
+    cropConditionValue: null,
     actualYield: null,
     cnRatio: null,
     sugarYieldMax: null,
@@ -607,6 +618,30 @@ const OfficerDashboard: React.FC = () => {
       // (days_to_harvest + Sugarcane_Status). Avoid extra network call here.
       const harvestStatus: string | null = null;
       const yieldDataDate = today;
+
+      // CCI from water-stress API (same card as Farmer / Manager dashboards)
+      const farmerForCci = farmers.find(
+        (f) => getFarmerId(f) === selectedFarmerId,
+      );
+      const plantationForWaterStress =
+        selectedPlotPlantation.plantationDate ?? null;
+      setLoadingCci(true);
+      void fetchWaterStressAnalysis(selectedPlotId, {
+        plantationDate: plantationForWaterStress,
+        endDate,
+        plots: farmerForCci?.plots ?? null,
+      })
+        .then((waterStressData) => {
+          const parsed = parseWaterStressMetrics(waterStressData);
+          setMetrics((prev) => ({
+            ...prev,
+            cropConditionLabel: parsed.cropConditionLabel,
+            cropConditionValue: parsed.cropConditionValue,
+          }));
+        })
+        .finally(() => {
+          setLoadingCci(false);
+        });
 
       // Step 1: Use pre-fetched field-officer agroStats (all plots) - no analyzeSinglePlot calls
       // Cache is date-specific because yieldDataDate may change for harvested plots
@@ -1620,17 +1655,57 @@ const OfficerDashboard: React.FC = () => {
             <p className="text-xs text-gray-600 font-medium">Expected Yield</p>
           </div>
 
-          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-teal-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2">
-              <Thermometer className="w-6 h-6 text-teal-600" />
-              <div className="text-right">
-                <div className="text-2xl font-bold text-gray-800">
-                  {metrics.organicCarbonDensity?.toFixed(1) || "-"}
-                </div>
-                <div className="text-sm font-semibold text-teal-600">g/kg</div>
-              </div>
-            </div>
-            <p className="text-xs text-gray-600 font-medium">Organic Carbon</p>
+          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-emerald-200 hover:shadow-xl transition-all duration-300">
+            {(() => {
+              const cciStyle = cropConditionStyleFromCci(
+                metrics.cropConditionValue,
+              );
+              const showCciValue =
+                Boolean(selectedPlotId) &&
+                !loadingCci &&
+                metrics.cropConditionValue != null;
+
+              return (
+                <>
+                  <div className="flex items-center justify-between mb-2">
+                    <Sprout className="w-6 h-6 shrink-0 text-emerald-600" />
+                    <div className="text-right min-w-0">
+                      <div className="text-2xl font-bold text-gray-800">
+                        {!selectedPlotId ? (
+                          "-"
+                        ) : loadingCci ? (
+                          <Loader2 className="w-5 h-5 animate-spin inline-block" />
+                        ) : showCciValue ? (
+                          metrics.cropConditionValue!.toFixed(1)
+                        ) : (
+                          "-"
+                        )}
+                      </div>
+                      <div
+                        className="text-xs font-semibold leading-tight max-w-[7.5rem] ml-auto truncate"
+                        style={{ color: cciStyle?.textColor ?? "#6b7280" }}
+                        title={
+                          showCciValue
+                            ? (cciStyle?.label ??
+                              metrics.cropConditionLabel ??
+                              "")
+                            : undefined
+                        }
+                      >
+                        {!selectedPlotId || loadingCci
+                          ? "CCI"
+                          : (cciStyle?.label ??
+                            metrics.cropConditionLabel ??
+                            "-")}
+                      </div>
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-600 font-medium">
+                    Crop Condition Index
+                  </p>
+                </>
+              );
+            })()}
           </div>
 
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-yellow-200 hover:shadow-xl transition-all duration-300">

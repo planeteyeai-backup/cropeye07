@@ -137,6 +137,17 @@ function chatLocaleToMessageLanguage(locale: ChatLocaleCode | null): Language {
   }
 }
 
+/** Same codes as header `app_language` / Google Translate — do not change header logic. */
+function readAppLanguageAsChatLocale(): ChatLanguage {
+  const v = (
+    typeof window !== "undefined" ? localStorage.getItem("app_language") : null
+  )?.toLowerCase() || "";
+  if (v.startsWith("hi")) return "hi";
+  if (v.startsWith("mr")) return "mr";
+  if (v.startsWith("kn")) return "kn";
+  return "en";
+}
+
 /** Confirm Redis farm context exists before enabling farmer chat. */
 async function verifyFarmerPlotReady(
   plotId: string,
@@ -339,14 +350,32 @@ const Chatbot: React.FC<ChatbotProps> = ({ isOpen, onClose, userRole }) => {
   useEffect(() => {
     if (!isOpen) {
       welcomedThisOpenRef.current = false;
-      setChatLanguage(null);
       // Do NOT reset isInitialized — the ref already tracks which plot is
       // initialized so the next open will skip the API call for the same plot
       setInitErrorRaw(null);
+      return;
     }
+    // Match header language when chatbot opens (header writes `app_language`).
+    setChatLanguage(readAppLanguageAsChatLocale());
   }, [isOpen]);
 
-  // ── Welcome after user picks a language (text only — no voice API / TTS) ─
+  // Keep chatbot language in sync when header language changes (no header edits).
+  useEffect(() => {
+    const syncFromHeader = () => {
+      setChatLanguage(readAppLanguageAsChatLocale());
+    };
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === "app_language") syncFromHeader();
+    };
+    window.addEventListener("app_language_changed", syncFromHeader);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("app_language_changed", syncFromHeader);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
+
+  // ── Welcome after language is set (header sync or chatbot dropdown) ─
   useEffect(() => {
     if (!isOpen || isMinimized || !isInitialized || chatLanguage == null) return;
     if (welcomedThisOpenRef.current) return;
