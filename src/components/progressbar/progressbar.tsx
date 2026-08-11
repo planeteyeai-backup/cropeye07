@@ -96,6 +96,57 @@ const isPastWeek = (node: TimelineNode): boolean => {
   return nodeDate <= today;
 };
 
+/** Survive page refresh — API notes often 401; actions are not stored on backend. */
+const PROGRESS_NOTES_STORAGE_KEY = 'cropeye_progress_notes_v1';
+const PROGRESS_ACTIONS_STORAGE_KEY = 'cropeye_progress_actions_v1';
+const PROGRESS_FARMER_NOTES_STORAGE_KEY = 'cropeye_progress_farmer_notes_v1';
+
+function readJsonStorage<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonStorage(key: string, value: unknown): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
+const loadStoredNotes = (): Record<string, string> =>
+  readJsonStorage(PROGRESS_NOTES_STORAGE_KEY, {});
+
+const loadStoredActions = (): Record<string, ActionTaken> => {
+  const raw = readJsonStorage<Record<string, string>>(
+    PROGRESS_ACTIONS_STORAGE_KEY,
+    {},
+  );
+  const next: Record<string, ActionTaken> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (value === 'yes' || value === 'no') next[key] = value;
+  }
+  return next;
+};
+
+const loadStoredFarmerNotes = (): Record<string, FarmerNote[]> =>
+  readJsonStorage(PROGRESS_FARMER_NOTES_STORAGE_KEY, {});
+
+const persistNotes = (notes: Record<string, string>) =>
+  writeJsonStorage(PROGRESS_NOTES_STORAGE_KEY, notes);
+
+const persistActions = (actions: Record<string, ActionTaken>) =>
+  writeJsonStorage(PROGRESS_ACTIONS_STORAGE_KEY, actions);
+
+const persistFarmerNotes = (farmerNotes: Record<string, FarmerNote[]>) =>
+  writeJsonStorage(PROGRESS_FARMER_NOTES_STORAGE_KEY, farmerNotes);
+
 const buildInitialActions = (
   _farmerId: string,
   _weeksDonePerSection: [number, number, number, number],
@@ -1032,14 +1083,17 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
   const [activeNode, setActiveNode] = useState<string | null>(null);
   const [noteOpenKey, setNoteOpenKey] = useState<string | null>(null);
   const [noteOpenFarmerId, setNoteOpenFarmerId] = useState<string | null>(null);
-  const [notes, setNotes] = useState<Record<string, string>>({});
-  const [farmerNotes, setFarmerNotes] = useState<Record<string, FarmerNote[]>>({});
+  const [notes, setNotes] = useState<Record<string, string>>(() => loadStoredNotes());
+  const [farmerNotes, setFarmerNotes] = useState<Record<string, FarmerNote[]>>(
+    () => loadStoredFarmerNotes(),
+  );
   const [notesLoading, setNotesLoading] = useState(false);
   const [savingNote, setSavingNote] = useState(false);
   const [noteSaveError, setNoteSaveError] = useState<string | null>(null);
-  const [actions, setActions] = useState<Record<string, ActionTaken>>(() =>
-    buildInitialActionsForConfigs(farmerConfigs),
-  );
+  const [actions, setActions] = useState<Record<string, ActionTaken>>(() => ({
+    ...buildInitialActionsForConfigs(farmerConfigs),
+    ...loadStoredActions(),
+  }));
   const [farmerSections, setFarmerSections] = useState<
     Record<string, MonthSectionLabel>
   >({});
@@ -1101,9 +1155,15 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
   }, [farmerConfigs]);
 
   useEffect(() => {
-    setActions(buildInitialActionsForConfigs(farmerConfigs));
-    setNotes({});
-    setFarmerNotes({});
+    // Keep saved Yes/No + notes across farmerConfigs refresh / page reload.
+    // Do NOT wipe localStorage-backed state when configs re-fetch.
+    setActions((prev) => ({
+      ...buildInitialActionsForConfigs(farmerConfigs),
+      ...loadStoredActions(),
+      ...prev,
+    }));
+    setNotes((prev) => ({ ...loadStoredNotes(), ...prev }));
+    setFarmerNotes((prev) => ({ ...loadStoredFarmerNotes(), ...prev }));
     setActiveNode(null);
     setNoteOpenKey(null);
     setNoteOpenFarmerId(null);
@@ -1112,7 +1172,11 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
 
   const loadFarmerNotes = useCallback(async (farmerId: string) => {
     if (isPlanetEyeDemoUser()) {
-      setFarmerNotes((prev) => ({ ...prev, [farmerId]: [] }));
+      setFarmerNotes((prev) => {
+        const next = { ...prev, [farmerId]: prev[farmerId] ?? [] };
+        persistFarmerNotes(next);
+        return next;
+      });
       return;
     }
 
@@ -1125,17 +1189,25 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
         : Array.isArray(data?.results)
           ? data.results
           : [];
-      setFarmerNotes((prev) => ({
-        ...prev,
-        [farmerId]: results,
-      }));
+      setFarmerNotes((prev) => {
+        const cached = prev[farmerId] ?? loadStoredFarmerNotes()[farmerId] ?? [];
+        // Prefer API list when non-empty; otherwise keep cached local notes.
+        const merged =
+          results.length > 0
+            ? results
+            : cached;
+        const next = { ...prev, [farmerId]: merged };
+        persistFarmerNotes(next);
+        return next;
+      });
     } catch {
-      // Keep any notes already shown from local session; only show load hint.
-      setNoteSaveError('Could not load notes for this farmer.');
-      setFarmerNotes((prev) => ({
-        ...prev,
-        [farmerId]: prev[farmerId] ?? [],
-      }));
+      setNoteSaveError('Could not load notes from server — showing saved local notes.');
+      setFarmerNotes((prev) => {
+        const cached = prev[farmerId] ?? loadStoredFarmerNotes()[farmerId] ?? [];
+        const next = { ...prev, [farmerId]: cached };
+        persistFarmerNotes(next);
+        return next;
+      });
     } finally {
       setNotesLoading(false);
     }
@@ -1180,61 +1252,104 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     farmerId: string,
   ) => {
     const noteText = value.trim();
-    setActions((prev) => ({ ...prev, [key]: action }));
     setSavingNote(true);
     setNoteSaveError(null);
 
+    const nextActions = { ...actions, [key]: action };
+    setActions(nextActions);
+    persistActions(nextActions);
+
     try {
-      // Notes API requires content — do not close as "saved" with an empty note.
       if (!noteText) {
-        setNoteSaveError('Please add a note before saving.');
+        // Action Yes/No still persists locally so refresh keeps the green check.
+        handleNoteOpen(null, null);
         return;
       }
 
+      const localNote: FarmerNote = {
+        id: -Date.now(),
+        farmer: Number(farmerId) || 0,
+        farmer_name: '',
+        content: noteText,
+        created_by: 0,
+        created_by_name: 'This device',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      const nextNotes = { ...notes, [key]: noteText };
+      setNotes(nextNotes);
+      persistNotes(nextNotes);
+
+      setFarmerNotes((prev) => {
+        const existing = prev[farmerId] ?? [];
+        const withoutDup = existing.filter(
+          (n) => (n.content ?? '').trim() !== noteText,
+        );
+        const next = {
+          ...prev,
+          [farmerId]: [localNote, ...withoutDup],
+        };
+        persistFarmerNotes(next);
+        return next;
+      });
+
       if (isPlanetEyeDemoUser()) {
-        setNotes((prev) => ({ ...prev, [key]: noteText }));
         handleNoteOpen(null, null);
         return;
       }
 
       const token = getAuthToken();
       if (!token || isPlanetEyeDemoToken(token)) {
-        setNoteSaveError('Please log in again to save notes.');
+        // Local save already done — still close; warn once.
+        setNoteSaveError(
+          'Saved on this device. Log in again to sync notes to the server.',
+        );
+        handleNoteOpen(null, null);
         return;
       }
 
-      const created = await createFarmerNote(farmerId, noteText);
-      const createdNote = created?.data;
-      await loadFarmerNotes(farmerId);
-      // If GET returns empty (or fails), still keep the note we just posted.
-      if (createdNote?.content) {
-        setFarmerNotes((prev) => {
-          const existing = prev[farmerId] ?? [];
-          const hasIt = existing.some(
-            (n) =>
-              n.id === createdNote.id ||
-              (n.content ?? '').trim() === createdNote.content.trim(),
+      try {
+        const created = await createFarmerNote(farmerId, noteText);
+        const createdNote = created?.data;
+        await loadFarmerNotes(farmerId);
+        if (createdNote?.content) {
+          setFarmerNotes((prev) => {
+            const existing = prev[farmerId] ?? [];
+            const hasIt = existing.some(
+              (n) =>
+                n.id === createdNote.id ||
+                (n.content ?? '').trim() === createdNote.content.trim(),
+            );
+            if (hasIt) {
+              persistFarmerNotes(prev);
+              return prev;
+            }
+            const next = {
+              ...prev,
+              [farmerId]: [createdNote, ...existing],
+            };
+            persistFarmerNotes(next);
+            return next;
+          });
+        }
+      } catch (err: any) {
+        // Keep local persistence so refresh still shows the note.
+        const status = err?.response?.status;
+        if (status === 401 || status === 403) {
+          setNoteSaveError(
+            'Saved on this device. Server sync failed — please log in again later.',
           );
-          if (hasIt) return prev;
-          return {
-            ...prev,
-            [farmerId]: [createdNote, ...existing],
-          };
-        });
+        }
       }
-      setNotes((prev) => ({ ...prev, [key]: noteText }));
+
       handleNoteOpen(null, null);
     } catch (err: any) {
-      const status = err?.response?.status;
       const detail =
         err?.response?.data?.detail ||
         err?.response?.data?.message ||
         err?.message;
-      if (status === 401 || status === 403) {
-        setNoteSaveError(
-          'Session expired or not allowed to save notes. Please log in again.',
-        );
-      } else if (typeof detail === 'string' && detail.trim()) {
+      if (typeof detail === 'string' && detail.trim()) {
         setNoteSaveError(detail);
       } else {
         setNoteSaveError('Could not save note. Please try again.');
