@@ -15,7 +15,11 @@ import {
   type FarmerNote,
 } from '../../api';
 import { sanitizeYieldReadings } from './yieldReadingUtils';
-import { isPlanetEyeDemoUser } from '../../utils/auth';
+import {
+  getAuthToken,
+  isPlanetEyeDemoToken,
+  isPlanetEyeDemoUser,
+} from '../../utils/auth';
 import type { FactoryId } from './factoryProgressTypes';
 import type { FarmerProgressConfig } from './progressData';
 import {
@@ -278,13 +282,38 @@ const ActionEditPanel: React.FC<{
   onSave,
   onClose,
 }) => {
-  const [draft, setDraft] = useState(noteValue);
+  const [draft, setDraft] = useState('');
   const [draftAction, setDraftAction] = useState<ActionTaken | null>(actionTaken);
 
   useEffect(() => {
     setDraft('');
     setDraftAction(actionTaken);
-  }, [noteValue, actionTaken, node.id]);
+  }, [actionTaken, node.id]);
+
+  // Merge API notes with the note shown on the hover tooltip (local / last saved).
+  // Backend GET can return empty while local state still has the note just saved.
+  const previousNotes = useMemo(() => {
+    const list = Array.isArray(savedNotes) ? [...savedNotes] : [];
+    const local = noteValue.trim();
+    if (!local) return list;
+    const alreadyListed = list.some(
+      (n) => (n.content ?? '').trim().toLowerCase() === local.toLowerCase(),
+    );
+    if (alreadyListed) return list;
+    return [
+      {
+        id: -1,
+        farmer: 0,
+        farmer_name: '',
+        content: local,
+        created_by: 0,
+        created_by_name: 'This session',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      } satisfies FarmerNote,
+      ...list,
+    ];
+  }, [savedNotes, noteValue]);
 
   return (
     <div
@@ -341,19 +370,23 @@ const ActionEditPanel: React.FC<{
         <p className="mb-1 text-xs font-medium text-slate-500">Previous notes</p>
         {notesLoading ? (
           <p className="text-xs text-slate-400">Loading notes…</p>
-        ) : savedNotes.length === 0 ? (
+        ) : previousNotes.length === 0 ? (
           <p className="text-xs text-slate-400">No notes yet</p>
         ) : (
           <ul className="max-h-28 space-y-1.5 overflow-y-auto pr-1">
-            {savedNotes.map((note) => (
+            {previousNotes.map((note) => (
               <li
                 key={note.id}
                 className="rounded-md border border-slate-100 bg-slate-50 px-2.5 py-2 text-xs leading-snug text-slate-700"
               >
                 <p className="font-medium text-slate-800">{note.content}</p>
                 <p className="mt-1 text-[11px] text-slate-400">
-                  {formatNoteTimestamp(note.created_at)}
-                  {note.created_by_name ? ` · ${note.created_by_name}` : ''}
+                  {note.id < 0
+                    ? 'Saved on this week'
+                    : formatNoteTimestamp(note.created_at)}
+                  {note.created_by_name && note.id >= 0
+                    ? ` · ${note.created_by_name}`
+                    : ''}
                 </p>
               </li>
             ))}
@@ -1087,13 +1120,22 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     setNoteSaveError(null);
     try {
       const { data } = await getFarmerNotes(farmerId);
+      const results = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.results)
+          ? data.results
+          : [];
       setFarmerNotes((prev) => ({
         ...prev,
-        [farmerId]: Array.isArray(data.results) ? data.results : [],
+        [farmerId]: results,
       }));
     } catch {
+      // Keep any notes already shown from local session; only show load hint.
       setNoteSaveError('Could not load notes for this farmer.');
-      setFarmerNotes((prev) => ({ ...prev, [farmerId]: [] }));
+      setFarmerNotes((prev) => ({
+        ...prev,
+        [farmerId]: prev[farmerId] ?? [],
+      }));
     } finally {
       setNotesLoading(false);
     }
@@ -1137,23 +1179,66 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     action: ActionTaken,
     farmerId: string,
   ) => {
+    const noteText = value.trim();
     setActions((prev) => ({ ...prev, [key]: action }));
     setSavingNote(true);
     setNoteSaveError(null);
 
     try {
-      if (value.trim()) {
-        if (isPlanetEyeDemoUser()) {
-          setNotes((prev) => ({ ...prev, [key]: value.trim() }));
-        } else {
-          await createFarmerNote(farmerId, value.trim());
-          await loadFarmerNotes(farmerId);
-          setNotes((prev) => ({ ...prev, [key]: value.trim() }));
-        }
+      // Notes API requires content — do not close as "saved" with an empty note.
+      if (!noteText) {
+        setNoteSaveError('Please add a note before saving.');
+        return;
       }
+
+      if (isPlanetEyeDemoUser()) {
+        setNotes((prev) => ({ ...prev, [key]: noteText }));
+        handleNoteOpen(null, null);
+        return;
+      }
+
+      const token = getAuthToken();
+      if (!token || isPlanetEyeDemoToken(token)) {
+        setNoteSaveError('Please log in again to save notes.');
+        return;
+      }
+
+      const created = await createFarmerNote(farmerId, noteText);
+      const createdNote = created?.data;
+      await loadFarmerNotes(farmerId);
+      // If GET returns empty (or fails), still keep the note we just posted.
+      if (createdNote?.content) {
+        setFarmerNotes((prev) => {
+          const existing = prev[farmerId] ?? [];
+          const hasIt = existing.some(
+            (n) =>
+              n.id === createdNote.id ||
+              (n.content ?? '').trim() === createdNote.content.trim(),
+          );
+          if (hasIt) return prev;
+          return {
+            ...prev,
+            [farmerId]: [createdNote, ...existing],
+          };
+        });
+      }
+      setNotes((prev) => ({ ...prev, [key]: noteText }));
       handleNoteOpen(null, null);
-    } catch {
-      setNoteSaveError('Could not save note. Please try again.');
+    } catch (err: any) {
+      const status = err?.response?.status;
+      const detail =
+        err?.response?.data?.detail ||
+        err?.response?.data?.message ||
+        err?.message;
+      if (status === 401 || status === 403) {
+        setNoteSaveError(
+          'Session expired or not allowed to save notes. Please log in again.',
+        );
+      } else if (typeof detail === 'string' && detail.trim()) {
+        setNoteSaveError(detail);
+      } else {
+        setNoteSaveError('Could not save note. Please try again.');
+      }
     } finally {
       setSavingNote(false);
     }
