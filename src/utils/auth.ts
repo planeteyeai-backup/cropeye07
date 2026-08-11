@@ -101,17 +101,42 @@ export const clearAuthData = (): void => {
 };
 
 // Clear ALL localStorage and sessionStorage (used on logout - no local cache remains)
+// Keep progress timeline notes/actions so they survive logout → login on the same browser.
+export const PROGRESS_LOCAL_STORAGE_PREFIX = "cropeye_progress_";
+
 export const clearAllLocalStorage = (): void => {
   try {
     clearAllAppCache();
   } catch (e) {
     // Ignore cache clear errors
   }
+
+  const preserved: Record<string, string> = {};
+  try {
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(PROGRESS_LOCAL_STORAGE_PREFIX)) {
+        const value = localStorage.getItem(key);
+        if (value != null) preserved[key] = value;
+      }
+    }
+  } catch {
+    // Ignore storage read errors
+  }
+
   try {
     localStorage.clear();
     sessionStorage.clear();
   } catch (e) {
     // Ignore if storage is disabled (e.g. private mode)
+  }
+
+  try {
+    for (const [key, value] of Object.entries(preserved)) {
+      localStorage.setItem(key, value);
+    }
+  } catch {
+    // Ignore restore errors
   }
 };
 

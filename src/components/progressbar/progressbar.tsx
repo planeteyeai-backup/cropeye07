@@ -17,9 +17,12 @@ import {
 import { sanitizeYieldReadings } from './yieldReadingUtils';
 import {
   getAuthToken,
+  getUserData,
   isPlanetEyeDemoToken,
   isPlanetEyeDemoUser,
+  PROGRESS_LOCAL_STORAGE_PREFIX,
 } from '../../utils/auth';
+
 import type { FactoryId } from './factoryProgressTypes';
 import type { FarmerProgressConfig } from './progressData';
 import {
@@ -96,10 +99,20 @@ const isPastWeek = (node: TimelineNode): boolean => {
   return nodeDate <= today;
 };
 
-/** Survive page refresh — API notes often 401; actions are not stored on backend. */
-const PROGRESS_NOTES_STORAGE_KEY = 'cropeye_progress_notes_v1';
-const PROGRESS_ACTIONS_STORAGE_KEY = 'cropeye_progress_actions_v1';
-const PROGRESS_FARMER_NOTES_STORAGE_KEY = 'cropeye_progress_farmer_notes_v1';
+/** Survive page refresh + logout/login — scoped per user id. */
+const PROGRESS_NOTES_BASE = `${PROGRESS_LOCAL_STORAGE_PREFIX}notes_v1`;
+const PROGRESS_ACTIONS_BASE = `${PROGRESS_LOCAL_STORAGE_PREFIX}actions_v1`;
+const PROGRESS_FARMER_NOTES_BASE = `${PROGRESS_LOCAL_STORAGE_PREFIX}farmer_notes_v1`;
+
+function progressStorageUserId(): string {
+  const user = getUserData();
+  const id = user?.id ?? user?.user_id ?? user?.pk ?? null;
+  return id != null && `${id}`.trim() !== '' ? String(id) : 'anon';
+}
+
+function progressStorageKey(base: string): string {
+  return `${base}__${progressStorageUserId()}`;
+}
 
 function readJsonStorage<T>(key: string, fallback: T): T {
   try {
@@ -120,14 +133,28 @@ function writeJsonStorage(key: string, value: unknown): void {
   }
 }
 
-const loadStoredNotes = (): Record<string, string> =>
-  readJsonStorage(PROGRESS_NOTES_STORAGE_KEY, {});
+/** Migrate legacy unscoped keys into the current user bucket once. */
+function migrateLegacyProgressKey(legacyKey: string, scopedKey: string): void {
+  try {
+    if (localStorage.getItem(scopedKey)) return;
+    const legacy = localStorage.getItem(legacyKey);
+    if (!legacy) return;
+    localStorage.setItem(scopedKey, legacy);
+  } catch {
+    /* ignore */
+  }
+}
+
+const loadStoredNotes = (): Record<string, string> => {
+  const scoped = progressStorageKey(PROGRESS_NOTES_BASE);
+  migrateLegacyProgressKey('cropeye_progress_notes_v1', scoped);
+  return readJsonStorage(scoped, {});
+};
 
 const loadStoredActions = (): Record<string, ActionTaken> => {
-  const raw = readJsonStorage<Record<string, string>>(
-    PROGRESS_ACTIONS_STORAGE_KEY,
-    {},
-  );
+  const scoped = progressStorageKey(PROGRESS_ACTIONS_BASE);
+  migrateLegacyProgressKey('cropeye_progress_actions_v1', scoped);
+  const raw = readJsonStorage<Record<string, string>>(scoped, {});
   const next: Record<string, ActionTaken> = {};
   for (const [key, value] of Object.entries(raw)) {
     if (value === 'yes' || value === 'no') next[key] = value;
@@ -135,17 +162,20 @@ const loadStoredActions = (): Record<string, ActionTaken> => {
   return next;
 };
 
-const loadStoredFarmerNotes = (): Record<string, FarmerNote[]> =>
-  readJsonStorage(PROGRESS_FARMER_NOTES_STORAGE_KEY, {});
+const loadStoredFarmerNotes = (): Record<string, FarmerNote[]> => {
+  const scoped = progressStorageKey(PROGRESS_FARMER_NOTES_BASE);
+  migrateLegacyProgressKey('cropeye_progress_farmer_notes_v1', scoped);
+  return readJsonStorage(scoped, {});
+};
 
 const persistNotes = (notes: Record<string, string>) =>
-  writeJsonStorage(PROGRESS_NOTES_STORAGE_KEY, notes);
+  writeJsonStorage(progressStorageKey(PROGRESS_NOTES_BASE), notes);
 
 const persistActions = (actions: Record<string, ActionTaken>) =>
-  writeJsonStorage(PROGRESS_ACTIONS_STORAGE_KEY, actions);
+  writeJsonStorage(progressStorageKey(PROGRESS_ACTIONS_BASE), actions);
 
 const persistFarmerNotes = (farmerNotes: Record<string, FarmerNote[]>) =>
-  writeJsonStorage(PROGRESS_FARMER_NOTES_STORAGE_KEY, farmerNotes);
+  writeJsonStorage(progressStorageKey(PROGRESS_FARMER_NOTES_BASE), farmerNotes);
 
 const buildInitialActions = (
   _farmerId: string,
