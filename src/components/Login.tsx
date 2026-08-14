@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 import { Satellite, Leaf, Mail, Lock, Eye, EyeOff } from 'lucide-react';
-import { setAuthData, setRefreshToken } from '../utils/auth';
+import { setAuthData, setRefreshToken, resolveAppUserRole } from '../utils/auth';
 import { login, setAuthToken as setApiAuthToken } from '../api';
 
 export type UserRole = "manager" | "admin" | "fieldofficer" | "farmer" | "owner" | "planeteye";
@@ -226,34 +226,9 @@ const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
 
       const userData = result.user;
 
-      // Role id wins over role name: PlanetEye is id 5 but the API names it "admin".
-      const roleMap: { [key: number]: UserRole } = {
-        1: 'farmer',
-        2: 'fieldofficer',
-        3: 'manager',
-        4: 'owner',
-        5: 'planeteye',
-      };
+      // Backend role id 5 is named "admin" but is the PlanetEye progress portals.
+      const userRole = resolveAppUserRole(userData);
 
-      const roleId =
-        typeof userData.role === 'object' && typeof userData.role?.id === 'number'
-          ? userData.role.id
-          : typeof userData.role_id === 'number'
-            ? userData.role_id
-            : null;
-
-      const roleName =
-        typeof userData.role === 'object' && userData.role?.name
-          ? String(userData.role.name)
-          : typeof userData.role === 'string'
-            ? userData.role
-            : '';
-
-      const userRole: UserRole =
-        (roleId != null ? roleMap[roleId] : undefined) ??
-        ((roleName.toLowerCase() as UserRole) || 'farmer');
-
-      // Real Django planeteye users are also allowed.
       if (
         !userRole ||
         !['manager', 'admin', 'fieldofficer', 'farmer', 'owner', 'planeteye'].includes(

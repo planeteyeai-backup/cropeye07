@@ -18,6 +18,7 @@ import {
   setAuthData,
   isValidToken,
   getUserData,
+  resolveAppUserRole,
 } from "../utils/auth";
 import { getCurrentUser } from "../api";
 import { initializeTokenRefresh } from "../utils/tokenManager";
@@ -111,52 +112,8 @@ const AppRoutesContent: React.FC = () => {
       const response = await getCurrentUser();
       const userData = response.data;
 
-      // Handle both string roles and numeric role_id
-      let normalizedRole: UserRole;
-
-      // Create role mapping
-      const roleMap: { [key: number]: UserRole } = {
-        1: "farmer",
-        2: "fieldofficer",
-        3: "manager",
-        4: "owner",
-        5: "planeteye",
-      };
-
-      // Role id wins over role name: PlanetEye is id 5 but the API names it "admin".
-      const roleIdFromUser =
-        userData.role && typeof userData.role === "object" && typeof userData.role.id === "number"
-          ? userData.role.id
-          : typeof userData.role_id === "number"
-            ? userData.role_id
-            : null;
-
-      if (roleIdFromUser != null && roleMap[roleIdFromUser]) {
-        normalizedRole = roleMap[roleIdFromUser];
-      } else if (
-        userData.role &&
-        typeof userData.role === "object" &&
-        userData.role.name
-      ) {
-        // If role is an object with name property, use the name
-        normalizedRole = userData.role.name.toLowerCase() as UserRole;
-      } else if (userData.role && typeof userData.role === "string") {
-        // If role is a string, use it directly
-        normalizedRole = userData.role.toLowerCase() as UserRole;
-      } else if (userData.role_id && typeof userData.role_id === "number") {
-        // If role_id is a number, map it to role string
-        normalizedRole = roleMap[userData.role_id] || "farmer";
-      } else {
-        // Fallback: check if role is already a number
-        const roleId = userData.role || userData.role_id;
-        if (typeof roleId === "number") {
-          normalizedRole = roleMap[roleId] || "farmer";
-        } else {
-          // Invalid role, logout
-          handleLogout();
-          return;
-        }
-      }
+      // Backend role id 5 is named "admin" but is the PlanetEye progress portals.
+      const normalizedRole = resolveAppUserRole(userData);
 
       if (
         normalizedRole &&
@@ -189,7 +146,6 @@ const AppRoutesContent: React.FC = () => {
       }
     } catch (error: any) {
       const status = error.response?.status;
-      const errorMessage = error.response?.data?.detail || error.message;
       
       // Handle 401/403 - Token expired or invalid
       if (status === 401 || status === 403) {
@@ -199,8 +155,22 @@ const AppRoutesContent: React.FC = () => {
       
       // Handle network errors - keep user logged in with cached credentials
       if (!error.response || error.code === 'ECONNABORTED' || error.message?.includes('Network Error')) {
-        setUserRole(role);
+        // Old sessions may have stored role "admin" for PlanetEye — remap from username.
+        const cached = getUserData() ?? {};
+        const fallbackRole = resolveAppUserRole({
+          ...cached,
+          username: cached.username || "",
+          role: cached.role ?? { name: role },
+        });
+        const safeRole =
+          String(cached.username ?? "").toLowerCase() === "planeteye"
+            ? "planeteye"
+            : fallbackRole || role;
+        setUserRole(safeRole);
         setIsAuthenticated(true);
+        if (safeRole !== role) {
+          setAuthData(token, safeRole, cached);
+        }
         setLoading(false);
         return;
       }

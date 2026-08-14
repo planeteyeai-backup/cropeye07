@@ -172,3 +172,65 @@ export const isDemoOnlySession = (): boolean => {
   const token = getAuthToken();
   return !token || !isValidToken(token);
 };
+
+export type AppUserRole =
+  | "manager"
+  | "admin"
+  | "fieldofficer"
+  | "farmer"
+  | "owner"
+  | "planeteye";
+
+const ROLE_ID_MAP: Record<number, AppUserRole> = {
+  1: "farmer",
+  2: "fieldofficer",
+  3: "manager",
+  4: "owner",
+  // Backend labels id 5 as "admin", but that account is PlanetEye progress portals.
+  5: "planeteye",
+};
+
+/**
+ * Resolve the app role from a Django user payload.
+ * Role id wins over role name; username "planeteye" always maps to planeteye.
+ */
+export const resolveAppUserRole = (userData: any): AppUserRole => {
+  const username = String(userData?.username ?? "")
+    .trim()
+    .toLowerCase();
+  if (username === "planeteye") {
+    return "planeteye";
+  }
+
+  const rawId =
+    userData?.role && typeof userData.role === "object"
+      ? userData.role.id
+      : userData?.role_id ?? userData?.role;
+  const roleId = Number(rawId);
+  if (Number.isFinite(roleId) && ROLE_ID_MAP[roleId]) {
+    return ROLE_ID_MAP[roleId];
+  }
+
+  const roleName = String(
+    (userData?.role && typeof userData.role === "object"
+      ? userData.role.name
+      : typeof userData?.role === "string"
+        ? userData.role
+        : "") ?? "",
+  )
+    .trim()
+    .toLowerCase();
+
+  if (
+    roleName === "manager" ||
+    roleName === "admin" ||
+    roleName === "fieldofficer" ||
+    roleName === "farmer" ||
+    roleName === "owner" ||
+    roleName === "planeteye"
+  ) {
+    return roleName;
+  }
+
+  return "farmer";
+};

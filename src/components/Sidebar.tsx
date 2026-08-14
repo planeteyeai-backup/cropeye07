@@ -39,9 +39,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   // Get current user data
   const currentUser = getUserData();
-  const currentUserRole = getUserRole();
+  // Prefer the role prop (already remapped for PlanetEye) over stale localStorage.
+  const currentUserRole = userRole || getUserRole();
   const username = currentUser?.username || currentUser?.first_name || 'User';
-  const displayRole = currentUserRole || userRole || '';
+  const displayRole = currentUserRole || '';
 
   // Effect to expand a specific menu when expandedMenu prop changes
   React.useEffect(() => {

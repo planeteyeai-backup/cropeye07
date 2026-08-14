@@ -48,6 +48,7 @@ import HarvestDashboard from "./components/HarvestDashboard";
 import Chatbot from "./components/Chatbot";
 import MyProfile from "./components/MyProfile";
 import { MessageCircle } from "lucide-react";
+import { getUserData } from "./utils/auth";
 
 enum View {
   Home = "home",
@@ -101,6 +102,13 @@ interface AppProps {
 const VIEW_CACHE_SIZE = 5;
 
 const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
+  // Backend labels PlanetEye as role name "admin" — map by username so menus + home match.
+  const effectiveRole =
+    userRole === "admin" &&
+    String(getUserData()?.username ?? "").toLowerCase() === "planeteye"
+      ? "planeteye"
+      : userRole;
+
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [currentView, setCurrentView] = useState<View>(View.Home);
   const [cachedViews, setCachedViews] = useState<View[]>([View.Home]);
@@ -501,7 +509,7 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
   };
 
   const renderHomeGrid = () => {
-    switch (userRole) {
+    switch (effectiveRole) {
       case "manager":
         return (
           <ManagerHomeGrid
@@ -524,6 +532,8 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
         return (
           <ProgressBarDashboard key={progressNavKey} navKey={progressNavKey} />
         );
+      case "admin":
+        return <OwnerHomeGrid onMenuClick={handleMenuSelect} />;
       default:
         return <div>Invalid user role: {userRole}</div>;
     }
@@ -544,7 +554,7 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
             onMenuSelect={handleMenuSelect}
             onHomeClick={handleHomeClick}
             onLogout={onLogout}
-            userRole={userRole}
+            userRole={effectiveRole}
             expandedMenu={expandedSidebarMenu}
           />
         </div>
@@ -561,7 +571,7 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
 
             {cachedViews.includes(View.Dashboard) && activeSubmenu && (
               <div style={{ display: currentView === View.Dashboard ? 'block' : 'none' }}>
-                <DashboardGrid submenu={activeSubmenu} userRole={userRole} onClose={() => setActiveSubmenu(null)} />
+                <DashboardGrid submenu={activeSubmenu} userRole={effectiveRole} onClose={() => setActiveSubmenu(null)} />
               </div>
             )}
 
@@ -814,7 +824,7 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
       <Chatbot 
         isOpen={isChatbotOpen} 
         onClose={() => setIsChatbotOpen(false)}
-        userRole={userRole}
+        userRole={effectiveRole}
       />
 
       {/* Floating Button - Only show when chatbot is closed */}
