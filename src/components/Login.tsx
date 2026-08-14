@@ -267,9 +267,14 @@ const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
         console.error('Server error response:', { status, data });
         
         if (status === 400) {
-          setError('Invalid phone_number or password. Please check your credentials.');
+          // Backend only accepts a phone number here — a username always fails.
+          setError(
+            data?.detail ||
+              data?.message ||
+              'Login needs your 10-digit phone number (not a username) and password.',
+          );
         } else if (status === 401) {
-          setError('Authentication failed. Please check your phone_number and password.');
+          setError('Authentication failed. Please check your phone number and password.');
         } else if (status === 403) {
           setError('Access denied. Please contact your administrator.');
         } else if (status >= 500) {
@@ -365,8 +370,10 @@ const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
                       <div className="flex items-center border border-gray-300 rounded-lg px-3 py-3 bg-white focus-within:ring-2 focus-within:ring-emerald-500 focus-within:border-emerald-500">
                         <Mail className="w-5 h-5 mr-3 text-gray-500" />
                         <input
-                          type="text"
-                      placeholder="Phone number or username"
+                          type="tel"
+                      inputMode="numeric"
+                      autoComplete="tel"
+                      placeholder="Phone number (10 digits)"
                       value={phone_number}
                       onChange={(e) => setPhoneNumber(e.target.value)}
                           className="w-full outline-none text-gray-700"
