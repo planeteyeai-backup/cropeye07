@@ -18,8 +18,7 @@ import { sanitizeYieldReadings } from './yieldReadingUtils';
 import {
   getAuthToken,
   getUserData,
-  isPlanetEyeDemoToken,
-  isPlanetEyeDemoUser,
+  isDemoOnlySession,
   PROGRESS_LOCAL_STORAGE_PREFIX,
 } from '../../utils/auth';
 
@@ -148,7 +147,15 @@ function migrateLegacyProgressKey(legacyKey: string, scopedKey: string): void {
 const loadStoredNotes = (): Record<string, string> => {
   const scoped = progressStorageKey(PROGRESS_NOTES_BASE);
   migrateLegacyProgressKey('cropeye_progress_notes_v1', scoped);
-  return readJsonStorage(scoped, {});
+  const raw = readJsonStorage<Record<string, string>>(scoped, {});
+  const next: Record<string, string> = { ...raw };
+  for (const [key, value] of Object.entries(raw)) {
+    const match = key.match(/^([^-]+)-\1-api-/);
+    if (!match || !value?.trim()) continue;
+    const stable = `${match[1]}-live-latest`;
+    if (!next[stable]?.trim()) next[stable] = value;
+  }
+  return next;
 };
 
 const loadStoredActions = (): Record<string, ActionTaken> => {
@@ -158,6 +165,13 @@ const loadStoredActions = (): Record<string, ActionTaken> => {
   const next: Record<string, ActionTaken> = {};
   for (const [key, value] of Object.entries(raw)) {
     if (value === 'yes' || value === 'no') next[key] = value;
+  }
+  // Remap old unstable live keys (`{id}-{id}-api-...`) → `{id}-live-latest`
+  for (const [key, value] of Object.entries(next)) {
+    const match = key.match(/^([^-]+)-\1-api-/);
+    if (!match) continue;
+    const stable = `${match[1]}-live-latest`;
+    if (!next[stable]) next[stable] = value;
   }
   return next;
 };
@@ -463,7 +477,7 @@ const ActionEditPanel: React.FC<{
                 <p className="font-medium text-slate-800">{note.content}</p>
                 <p className="mt-1 text-[11px] text-slate-400">
                   {note.id < 0
-                    ? 'Saved on this week'
+                    ? 'Saved on this device (not synced)'
                     : formatNoteTimestamp(note.created_at)}
                   {note.created_by_name && note.id >= 0
                     ? ` · ${note.created_by_name}`
@@ -890,6 +904,10 @@ const FarmerRow: React.FC<{
 }) => {
   const getActionForNode = (nodeKey: string) => actions[nodeKey] ?? null;
 
+  /** Week/dot note only — do not fall back to farmer-level API notes (breaks live hierarchy). */
+  const getNoteForNode = (nodeKey: string, fallback = '') =>
+    notes[nodeKey] ?? fallback;
+
   /** Green line only grows for consecutive "yes" from week 1 — skipping ahead does not fill the track. */
   let lastConsecutiveYesIndex = -1;
   for (let i = 0; i < visibleNodes.length; i++) {
@@ -914,7 +932,6 @@ const FarmerRow: React.FC<{
   const hasHoverTooltip =
     Boolean(activeNode?.startsWith(`${farmer.farmerId}-`)) && !hasOpenPanel;
   const isSingleDot = visibleNodes.length === 1;
-  const latestSavedNote = savedNotes[0]?.content ?? '';
   const hasAnyYieldOnTimeline = visibleNodes.some(
     (node) =>
       Boolean(node.yield) &&
@@ -1028,8 +1045,7 @@ const FarmerRow: React.FC<{
 
           {visibleNodes.map((node, dotIndex) => {
             const nodeKey = `${farmer.farmerId}-${node.id}`;
-            const noteValue =
-              notes[nodeKey] ?? latestSavedNote ?? node.note;
+            const noteValue = getNoteForNode(nodeKey, node.note);
             const actionTaken = getActionForNode(nodeKey);
             const past = isPastWeek(node);
 
@@ -1067,7 +1083,7 @@ const FarmerRow: React.FC<{
               <div className="pointer-events-auto">
                 <ActionEditPanel
                   node={openNode}
-                  noteValue={notes[openNodeKey] ?? latestSavedNote ?? openNode.note}
+                  noteValue={getNoteForNode(openNodeKey, openNode.note)}
                   actionTaken={getActionForNode(openNodeKey)}
                   savedNotes={savedNotes}
                   notesLoading={notesLoading}
@@ -1201,9 +1217,11 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
   }, [farmerConfigs]);
 
   const loadFarmerNotes = useCallback(async (farmerId: string) => {
-    if (isPlanetEyeDemoUser()) {
+    // With no token at all a 401 would force a logout redirect — stay local instead.
+    if (!getAuthToken()) {
       setFarmerNotes((prev) => {
-        const next = { ...prev, [farmerId]: prev[farmerId] ?? [] };
+        const cached = prev[farmerId] ?? loadStoredFarmerNotes()[farmerId] ?? [];
+        const next = { ...prev, [farmerId]: cached };
         persistFarmerNotes(next);
         return next;
       });
@@ -1282,6 +1300,8 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     farmerId: string,
   ) => {
     const noteText = value.trim();
+    // /notes/ requires content, so a Yes/No with no typed note still gets a body.
+    const serverContent = noteText || `Action taken: ${action === 'yes' ? 'Yes' : 'No'}`;
     setSavingNote(true);
     setNoteSaveError(null);
 
@@ -1290,31 +1310,28 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     persistActions(nextActions);
 
     try {
-      if (!noteText) {
-        // Action Yes/No still persists locally so refresh keeps the green check.
-        handleNoteOpen(null, null);
-        return;
-      }
-
       const localNote: FarmerNote = {
         id: -Date.now(),
         farmer: Number(farmerId) || 0,
         farmer_name: '',
-        content: noteText,
+        content: serverContent,
         created_by: 0,
         created_by_name: 'This device',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
 
-      const nextNotes = { ...notes, [key]: noteText };
-      setNotes(nextNotes);
-      persistNotes(nextNotes);
+      // Keep the dot tooltip showing only what the user actually typed.
+      if (noteText) {
+        const nextNotes = { ...notes, [key]: noteText };
+        setNotes(nextNotes);
+        persistNotes(nextNotes);
+      }
 
       setFarmerNotes((prev) => {
         const existing = prev[farmerId] ?? [];
         const withoutDup = existing.filter(
-          (n) => (n.content ?? '').trim() !== noteText,
+          (n) => (n.content ?? '').trim() !== serverContent,
         );
         const next = {
           ...prev,
@@ -1324,65 +1341,61 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
         return next;
       });
 
-      if (isPlanetEyeDemoUser()) {
-        handleNoteOpen(null, null);
-        return;
-      }
-
-      const token = getAuthToken();
-      if (!token || isPlanetEyeDemoToken(token)) {
-        // Local save already done — still close; warn once.
+      // With no token at all a 401 would force a logout redirect — stay local instead.
+      if (!getAuthToken()) {
         setNoteSaveError(
-          'Saved on this device. Log in again to sync notes to the server.',
+          'Not logged in — note saved on this device only.',
         );
-        handleNoteOpen(null, null);
         return;
       }
 
-      try {
-        const created = await createFarmerNote(farmerId, noteText);
-        const createdNote = created?.data;
-        await loadFarmerNotes(farmerId);
-        if (createdNote?.content) {
-          setFarmerNotes((prev) => {
-            const existing = prev[farmerId] ?? [];
-            const hasIt = existing.some(
-              (n) =>
-                n.id === createdNote.id ||
-                (n.content ?? '').trim() === createdNote.content.trim(),
-            );
-            if (hasIt) {
-              persistFarmerNotes(prev);
-              return prev;
-            }
-            const next = {
-              ...prev,
-              [farmerId]: [createdNote, ...existing],
-            };
-            persistFarmerNotes(next);
-            return next;
-          });
-        }
-      } catch (err: any) {
-        // Keep local persistence so refresh still shows the note.
-        const status = err?.response?.status;
-        if (status === 401 || status === 403) {
-          setNoteSaveError(
-            'Saved on this device. Server sync failed — please log in again later.',
+      // Every Save hits POST /api/notes/ — including a bare Yes/No — so the
+      // attempt is always visible in the Network tab.
+      const created = await createFarmerNote(farmerId, serverContent);
+      const createdNote = created?.data;
+      await loadFarmerNotes(farmerId);
+      if (createdNote?.content) {
+        setFarmerNotes((prev) => {
+          const existing = prev[farmerId] ?? [];
+          const hasIt = existing.some(
+            (n) =>
+              n.id === createdNote.id ||
+              (n.content ?? '').trim() === createdNote.content.trim(),
           );
-        }
+          if (hasIt) {
+            persistFarmerNotes(prev);
+            return prev;
+          }
+          const next = {
+            ...prev,
+            [farmerId]: [createdNote, ...existing],
+          };
+          persistFarmerNotes(next);
+          return next;
+        });
       }
 
       handleNoteOpen(null, null);
     } catch (err: any) {
+      const status = err?.response?.status;
       const detail =
         err?.response?.data?.detail ||
         err?.response?.data?.message ||
         err?.message;
-      if (typeof detail === 'string' && detail.trim()) {
-        setNoteSaveError(detail);
+      // Local note already saved — keep panel open so the real API failure is visible.
+      const suffix = status ? ` (HTTP ${status})` : '';
+      if (status === 401 || status === 403) {
+        setNoteSaveError(
+          isDemoOnlySession()
+            ? `Demo login has no backend account, so /notes/ returned ${status}. Saved on this device only.`
+            : `Server rejected the note${suffix} — login token missing/expired. Saved on this device only.`,
+        );
+      } else if (typeof detail === 'string' && detail.trim()) {
+        setNoteSaveError(`${detail}${suffix}`);
       } else {
-        setNoteSaveError('Could not save note. Please try again.');
+        setNoteSaveError(
+          `Could not sync note to server${suffix}. Saved on this device only.`,
+        );
       }
     } finally {
       setSavingNote(false);

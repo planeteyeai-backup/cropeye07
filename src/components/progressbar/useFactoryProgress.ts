@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { fetchIndustrialYieldByOwner, fetchPublicFactoryFarmers } from '../../api';
-import { getUserData, getUserRole, isPlanetEyeDemoUser } from '../../utils/auth';
+import { getUserData, getUserRole } from '../../utils/auth';
 import type { FactoryId, PublicFactory, PublicFactoryFarmer } from './factoryProgressTypes';
 import type { IndustrialYieldByOwnerResponse, IndustrialYieldFactory, IndustrialYieldFarmer } from './industrialYieldTypes';
 import { loadPublicFactoryFarmersForFactory } from './loadPublicFactoryFarmersForFactory';
@@ -28,7 +28,7 @@ export function resolveProgressOwnerId(): number {
   const envOwner = parseOwnerId(import.meta.env.VITE_PROGRESS_OWNER_ID);
   if (envOwner) return envOwner;
 
-  if (isPlanetEyeDemoUser() || getUserRole()?.toLowerCase() === 'planeteye') {
+  if (getUserRole()?.toLowerCase() === 'planeteye') {
     return FALLBACK_PROGRESS_OWNER_ID;
   }
 

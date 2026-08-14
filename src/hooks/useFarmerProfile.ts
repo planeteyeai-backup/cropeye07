@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { getFarmerProfile, getFarmerMyProfile } from '../api';
-import { getAuthToken, isValidToken, getUserRole, isPlanetEyeDemoUser } from '../utils/auth';
+import { getAuthToken, isValidToken, getUserRole } from '../utils/auth';
 import { getCache, setCache, removeCache } from '../utils/cache';
 import {
   PLOT_BOUNDARY_UPDATED_EVENT,
@@ -258,8 +258,7 @@ export const useFarmerProfile = () => {
     if (
       !token ||
       !isValidToken(token) ||
-      userRole !== 'farmer' ||
-      isPlanetEyeDemoUser()
+      userRole !== 'farmer'
     ) {
       setLoading(false);
       setError(null);

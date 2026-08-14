@@ -48,7 +48,6 @@ import HarvestDashboard from "./components/HarvestDashboard";
 import Chatbot from "./components/Chatbot";
 import MyProfile from "./components/MyProfile";
 import { MessageCircle } from "lucide-react";
-import { getUserData, isPlanetEyeDemoUser } from "./utils/auth";
 
 enum View {
   Home = "home",
@@ -131,16 +130,6 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
 
   // NEW: Get user from JWT token
   useEffect(() => {
-    if (isPlanetEyeDemoUser()) {
-      const demoUser = getUserData();
-      setCurrentUser({
-        id: 0,
-        role: "planeteye",
-        name: demoUser?.username || "planeteye",
-      });
-      return;
-    }
-
     const token = localStorage.getItem("token");
 
     if (token) {
