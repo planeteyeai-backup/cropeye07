@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { Store } from 'lucide-react';
 import { addVendor } from '../api'; // adjust path if necessary
