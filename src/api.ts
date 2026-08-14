@@ -9,8 +9,6 @@ import {
   getUserRole,
   getFastApiToken,
   setFastApiToken,
-  isPlanetEyeDemoToken,
-  //isPlanetEyeDemoUser,
 } from "./utils/auth";
 import { checkAndRefreshToken, isTokenExpired } from "./utils/tokenManager";
 import {
@@ -170,8 +168,7 @@ export const sefApi = axios.create({
 api.interceptors.request.use(
   async (config) => {
     const token = getAuthToken();
-    // PlanetEye demo uses public progress APIs only — never send the fake session token.
-    if (!token || isPlanetEyeDemoToken(token)) {
+    if (!token) {
       return config;
     }
 
@@ -180,7 +177,7 @@ api.interceptors.request.use(
     }
 
     const currentToken = getAuthToken();
-    if (currentToken && !isPlanetEyeDemoToken(currentToken)) {
+    if (currentToken) {
       config.headers.Authorization = `Bearer ${currentToken}`;
     }
     return config;
@@ -222,91 +219,70 @@ api.interceptors.response.use(
       return Promise.reject(error);
     }
 
-    // Handle token refresh for 401 errors
+    // Handle token refresh for 401 errors (expired/missing access token).
+    // Retry whenever a refresh token exists — not only when detail mentions "token"
+    // (Django often returns "Authentication credentials were not provided.").
     if (error.response?.status === 401 && !originalRequest._retry) {
-      // Demo login — do not wipe session or redirect; dashboards use public endpoints.
-      if (isPlanetEyeDemoToken(getAuthToken())) {
-        return Promise.reject(error);
+      if (isRefreshing) {
+        return new Promise((resolve, reject) => {
+          failedQueue.push({ resolve, reject });
+        })
+          .then((token) => {
+            originalRequest.headers.Authorization = `Bearer ${token}`;
+            return api(originalRequest);
+          })
+          .catch((err) => {
+            return Promise.reject(err);
+          });
       }
 
-      // Check if it's a token validation error
-      const errorData = error.response?.data;
-      const isTokenError =
-        errorData?.code === "token_not_valid" ||
-        errorData?.detail?.includes("token") ||
-        errorData?.messages;
+      originalRequest._retry = true;
+      isRefreshing = true;
 
-      if (isTokenError) {
-        if (isRefreshing) {
-          // If already refreshing, queue this request
-          return new Promise((resolve, reject) => {
-            failedQueue.push({ resolve, reject });
-          })
-            .then((token) => {
-              originalRequest.headers.Authorization = `Bearer ${token}`;
-              return api(originalRequest);
-            })
-            .catch((err) => {
-              return Promise.reject(err);
-            });
-        }
+      const refreshToken = getRefreshToken();
 
-        originalRequest._retry = true;
-        isRefreshing = true;
+      if (refreshToken) {
+        try {
+          const response = await axios.post(`${API_BASE_URL}/token/refresh/`, {
+            refresh: refreshToken,
+          });
 
-        const refreshToken = getRefreshToken();
+          const { access, refresh: newRefreshToken } = response.data;
 
-        if (refreshToken) {
-          try {
-            // Try to refresh the token
-            const response = await axios.post(
-              `${API_BASE_URL}/token/refresh/`,
-              {
-                refresh: refreshToken,
-              },
-            );
+          if (access) {
+            setAuthTokenUtil(access);
 
-            const { access, refresh: newRefreshToken } = response.data;
-
-            if (access) {
-              setAuthTokenUtil(access);
-
-              // Update refresh token if a new one is provided
-              if (newRefreshToken) {
-                setRefreshToken(newRefreshToken);
-              }
-
-              originalRequest.headers.Authorization = `Bearer ${access}`;
-
-              // Process queued requests
-              processQueue(null, access);
-              isRefreshing = false;
-
-              return api(originalRequest);
+            if (newRefreshToken) {
+              setRefreshToken(newRefreshToken);
             }
-          } catch (refreshError: any) {
-            // Refresh failed - clear all storage and redirect to login
-            processQueue(refreshError, null);
+
+            originalRequest.headers.Authorization = `Bearer ${access}`;
+
+            processQueue(null, access);
             isRefreshing = false;
-            clearAllLocalStorage();
 
-            // Redirect to login page
-            if (window.location.pathname !== "/login") {
-              window.location.href = "/login";
-            }
-
-            return Promise.reject(refreshError);
+            return api(originalRequest);
           }
-        } else {
-          // No refresh token - clear all storage and redirect
-          processQueue(error, null);
+        } catch (refreshError: any) {
+          processQueue(refreshError, null);
           isRefreshing = false;
           clearAllLocalStorage();
 
           if (window.location.pathname !== "/login") {
             window.location.href = "/login";
           }
+
+          return Promise.reject(refreshError);
         }
+      }
+
+      // No refresh token — clear session and redirect
+      processQueue(error, null);
+      isRefreshing = false;
+      clearAllLocalStorage();
+
+      if (window.location.pathname !== "/login") {
+        window.location.href = "/login";
       }
     }
 
@@ -336,7 +312,7 @@ api.interceptors.response.use(
 //Login function - backend expects phone_number field
 // Uses publicApi since login doesn't require authentication
 export const login = (phone_number: string, password: string) => {
-  return publicApi.post("/login/", { phone_number, password });
+  return publicApi.post("/users/login/", { phone_number, password });
 };
 
 // Token refresh function
@@ -587,12 +563,18 @@ export const getFarmsWithFarmerDetailsPaginated = async (
 
 /** Owner/manager-safe: paginate through all farms with nested farmer (recent-farmers is FO-only).
  *  Cached + single-flight so Harvest / prefetch / re-renders do not re-paginate. */
-export const getAllFarmsWithFarmerDetails = async (): Promise<any[]> => {
-  const cached = getCache(FARMS_ALL_CACHE_KEY, FARMS_ALL_TTL_MS);
-  if (Array.isArray(cached) && cached.length > 0) {
-    return cached;
+export const getAllFarmsWithFarmerDetails = async (
+  options?: { force?: boolean },
+): Promise<any[]> => {
+  if (options?.force) {
+    removeCache(FARMS_ALL_CACHE_KEY);
+  } else {
+    const cached = getCache(FARMS_ALL_CACHE_KEY, FARMS_ALL_TTL_MS);
+    if (Array.isArray(cached) && cached.length > 0) {
+      return cached;
+    }
+    if (farmsAllInFlight) return farmsAllInFlight;
   }
-  if (farmsAllInFlight) return farmsAllInFlight;
 
   // Larger page_size → fewer round-trips (main manager Harvest delay).
   farmsAllInFlight = getFarmsWithFarmerDetailsPaginated(30, 100)
@@ -2357,17 +2339,24 @@ export const patchUserMyProfile = (data: {
  * Update logged-in farmer's farm/plot data (partial update).
  */
 export const patchFarmMyProfile = (data: {
+  farm_id?: number | string;
+  plot_id?: number | string;
+  gat_number?: string;
+  plot_number?: string;
   address?: string;
   area_size?: string;
   plantation_date?: string;
   crop_variety?: string;
   variety_type?: string;
   variety_subtype?: string;
+  plantation_type?: string;
+  planting_method?: string;
   spacing_a?: string;
   spacing_b?: string;
   row_spacing?: string;
   plant_spacing?: string;
   irrigation_type?: string;
+  irrigation_type_name?: string;
   flow_rate_liter_per_hour?: string;
   emitters_per_plant?: number;
   motor_horsepower?: number;
@@ -2586,10 +2575,21 @@ export const getFarmerNotes = (farmerId: number | string) =>
   });
 
 /** POST /api/notes/ — add a visit note for a farmer. */
-export const createFarmerNote = (farmerId: number | string, content: string) =>
-  api.post<FarmerNote>("/notes/", {
-    farmer: Number(farmerId),
-    content,
+export const createFarmerNote = (farmerId: number | string, content: string) => {
+  const farmer = Number(farmerId);
+  if (!Number.isFinite(farmer) || farmer <= 0) {
+    return Promise.reject(
+      new Error(`Invalid farmer id for notes: ${farmerId}`),
+    );
+  }
+  const text = content.trim();
+  if (!text) {
+    return Promise.reject(new Error("Note content is required."));
+  }
+  return api.post<FarmerNote>("/notes/", {
+    farmer,
+    content: text,
   });
+};
 
 export default api;

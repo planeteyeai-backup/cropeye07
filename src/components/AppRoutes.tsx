@@ -18,7 +18,6 @@ import {
   setAuthData,
   isValidToken,
   getUserData,
-  isPlanetEyeDemoToken,
 } from "../utils/auth";
 import { getCurrentUser } from "../api";
 import { initializeTokenRefresh } from "../utils/tokenManager";
@@ -29,6 +28,7 @@ import {
   prefetchFieldOfficerAgroStats,
   prefetchManagerFieldOfficers,
 } from "../services/prefetchService";
+import { pruneAppCache } from "../utils/cache";
 
 export type UserRole =
   | "manager"
@@ -47,6 +47,12 @@ const AppRoutesContent: React.FC = () => {
 
   useEffect(() => {
     let cancelled = false;
+    // Drop expired / excess cropeye_cache_* keys so Local Storage does not grow forever.
+    try {
+      pruneAppCache();
+    } catch {
+      // non-critical
+    }
 
     // Check authentication status on app start
     const token = getAuthToken();
@@ -60,16 +66,6 @@ const AppRoutesContent: React.FC = () => {
     const loadingGuard = window.setTimeout(finishLoading, 12000);
 
     if (token && savedRole) {
-      if (isPlanetEyeDemoToken(token)) {
-        setAuthData(token, "planeteye", getUserData());
-        setUserRole("planeteye");
-        setIsAuthenticated(true);
-        finishLoading();
-        window.clearTimeout(loadingGuard);
-        return () => {
-          cancelled = true;
-        };
-      }
       // Validate token with backend
       void validateToken(token, savedRole).finally(() => {
         window.clearTimeout(loadingGuard);
@@ -86,9 +82,9 @@ const AppRoutesContent: React.FC = () => {
     };
   }, []);
 
-  // Initialize token refresh when authenticated (skip demo session)
+  // Initialize token refresh when authenticated
   useEffect(() => {
-    if (isAuthenticated && userRole && !isPlanetEyeDemoToken(getAuthToken())) {
+    if (isAuthenticated && userRole) {
       // Set up automatic token refresh
       const cleanup = initializeTokenRefresh();
       
@@ -102,14 +98,6 @@ const AppRoutesContent: React.FC = () => {
       // Check if token exists and is valid format
       if (!token || token.trim() === "") {
         handleLogout();
-        return;
-      }
-
-      if (isPlanetEyeDemoToken(token)) {
-        setAuthData(token, "planeteye", getUserData());
-        setUserRole("planeteye");
-        setIsAuthenticated(true);
-        setLoading(false);
         return;
       }
 
@@ -132,22 +120,26 @@ const AppRoutesContent: React.FC = () => {
         2: "fieldofficer",
         3: "manager",
         4: "owner",
+        5: "planeteye",
       };
 
-      if (
+      // Role id wins over role name: PlanetEye is id 5 but the API names it "admin".
+      const roleIdFromUser =
+        userData.role && typeof userData.role === "object" && typeof userData.role.id === "number"
+          ? userData.role.id
+          : typeof userData.role_id === "number"
+            ? userData.role_id
+            : null;
+
+      if (roleIdFromUser != null && roleMap[roleIdFromUser]) {
+        normalizedRole = roleMap[roleIdFromUser];
+      } else if (
         userData.role &&
         typeof userData.role === "object" &&
         userData.role.name
       ) {
         // If role is an object with name property, use the name
         normalizedRole = userData.role.name.toLowerCase() as UserRole;
-      } else if (
-        userData.role &&
-        typeof userData.role === "object" &&
-        userData.role.id
-      ) {
-        // If role is an object with id property, map the id
-        normalizedRole = roleMap[userData.role.id] || "farmer";
       } else if (userData.role && typeof userData.role === "string") {
         // If role is a string, use it directly
         normalizedRole = userData.role.toLowerCase() as UserRole;
@@ -222,6 +214,11 @@ const AppRoutesContent: React.FC = () => {
   };
 
   const triggerPrefetch = (role: UserRole | null) => {
+    try {
+      pruneAppCache();
+    } catch {
+      // non-critical
+    }
     // Pre-fetch all commonly used data on login/app load (non-blocking)
     // Loads complete data and stores in cache for fast representation
     prefetchAllData(setCached, null, role)
@@ -235,21 +232,13 @@ const AppRoutesContent: React.FC = () => {
 
   const handleLoginSuccess = async (role: UserRole, token: string) => {
     const normalizedRole = role.toLowerCase() as UserRole;
-    const isDemoLogin = isPlanetEyeDemoToken(token);
 
-    if (!isDemoLogin) {
-      // Store authentication data using utility function
-      setAuthData(token, normalizedRole);
-    }
+    // Store authentication data using utility function
+    setAuthData(token, normalizedRole);
 
     // Update state
     setUserRole(normalizedRole);
     setIsAuthenticated(true);
-
-    if (isDemoLogin) {
-      navigate("/dashboard?view=progressdashboard");
-      return;
-    }
 
     // For farmer: await profile prefetch before navigate so dashboard loads fast (no "Loading farmer profile...")
     if (normalizedRole === "farmer") {
@@ -272,6 +261,12 @@ const AppRoutesContent: React.FC = () => {
 
     // Pre-fetch rest of data in background (non-blocking)
     triggerPrefetch(normalizedRole);
+
+    // PlanetEye users land on Progress dashboard
+    if (normalizedRole === "planeteye") {
+      navigate("/dashboard?view=progressdashboard");
+      return;
+    }
 
     navigate("/dashboard");
   };

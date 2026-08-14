@@ -2,13 +2,7 @@
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 import { Satellite, Leaf, Mail, Lock, Eye, EyeOff } from 'lucide-react';
-import {
-  matchesPlanetEyeDemoLogin,
-  PLANETEYE_DEMO_TOKEN,
-  PLANETEYE_DEMO_USERNAME,
-  setAuthData,
-  setRefreshToken,
-} from '../utils/auth';
+import { setAuthData, setRefreshToken } from '../utils/auth';
 import { login, setAuthToken as setApiAuthToken } from '../api';
 
 export type UserRole = "manager" | "admin" | "fieldofficer" | "farmer" | "owner" | "planeteye";
@@ -219,22 +213,7 @@ const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
       const identifier = phone_number.trim();
       const pass = password.trim();
 
-      if (matchesPlanetEyeDemoLogin(identifier, pass)) {
-        const userDataToStore = {
-          first_name: 'Planet',
-          last_name: 'Eye',
-          phone_number: '',
-          username: PLANETEYE_DEMO_USERNAME,
-          id: 'demo-planeteye',
-          isPlanetEyeDemo: true,
-        };
-
-        setAuthData(PLANETEYE_DEMO_TOKEN, 'planeteye', userDataToStore);
-        onLoginSuccess('planeteye', PLANETEYE_DEMO_TOKEN);
-        return;
-      }
-
-      // Keep existing login exactly as-is (phone_number + password on Django).
+      // All roles (including PlanetEye) authenticate on Django: POST /api/users/login/.
       const response = await login(identifier, pass);
       const result = response.data;
 
@@ -247,24 +226,41 @@ const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
 
       const userData = result.user;
 
-      let userRole: UserRole;
+      // Role id wins over role name: PlanetEye is id 5 but the API names it "admin".
+      const roleMap: { [key: number]: UserRole } = {
+        1: 'farmer',
+        2: 'fieldofficer',
+        3: 'manager',
+        4: 'owner',
+        5: 'planeteye',
+      };
 
-      if (userData.role && typeof userData.role === 'object' && userData.role.name) {
-        userRole = userData.role.name.toLowerCase() as UserRole;
-      } else if (userData.role && typeof userData.role === 'object' && userData.role.id) {
-        const roleMap: { [key: number]: UserRole } = {
-          1: 'farmer',
-          2: 'fieldofficer',
-          3: 'manager',
-          4: 'owner'
-        };
-        userRole = roleMap[userData.role.id] || 'farmer';
-      } else {
-        userRole = 'farmer';
-      }
+      const roleId =
+        typeof userData.role === 'object' && typeof userData.role?.id === 'number'
+          ? userData.role.id
+          : typeof userData.role_id === 'number'
+            ? userData.role_id
+            : null;
 
-      if (!userRole || !['manager', 'admin', 'fieldofficer', 'farmer', 'owner'].includes(userRole)) {
-        throw new Error('Invalid user role');
+      const roleName =
+        typeof userData.role === 'object' && userData.role?.name
+          ? String(userData.role.name)
+          : typeof userData.role === 'string'
+            ? userData.role
+            : '';
+
+      const userRole: UserRole =
+        (roleId != null ? roleMap[roleId] : undefined) ??
+        ((roleName.toLowerCase() as UserRole) || 'farmer');
+
+      // Real Django planeteye users are also allowed.
+      if (
+        !userRole ||
+        !['manager', 'admin', 'fieldofficer', 'farmer', 'owner', 'planeteye'].includes(
+          userRole,
+        )
+      ) {
+        throw new Error(`Invalid user role: ${userRole || 'unknown'}`);
       }
 
       const userDataToStore = {
