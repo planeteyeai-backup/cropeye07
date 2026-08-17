@@ -1,50 +1,9 @@
-/** Prefix for all app cache keys - enables clearing all caches on logout */
-const CACHE_PREFIX = "cropeye_cache_";
-
-function prefixedKey(key) {
-  return key.startsWith(CACHE_PREFIX) ? key : CACHE_PREFIX + key;
-}
-
-export function setCache(key, data) {
-  const payload = {
-    data,
-    timestamp: Date.now(),
-  };
-  localStorage.setItem(prefixedKey(key), JSON.stringify(payload));
-}
-
-export function getCache(key, maxAgeMs = 10 * 60 * 1000) {
-  // default 10 min
-  const raw = localStorage.getItem(prefixedKey(key));
-  if (!raw) return null;
-  try {
-    const { data, timestamp } = JSON.parse(raw);
-    if (Date.now() - timestamp > maxAgeMs) {
-      localStorage.removeItem(prefixedKey(key));
-      return null;
-    }
-    return data;
-  } catch {
-    localStorage.removeItem(prefixedKey(key));
-    return null;
-  }
-}
-
-/** Clear all app caches (call on logout - manual or automatic) */
-export function clearAllAppCache() {
-  try {
-    const keysToRemove = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && key.startsWith(CACHE_PREFIX)) {
-        keysToRemove.push(key);
-      }
-    }
-    keysToRemove.forEach((k) => localStorage.removeItem(k));
-    if (keysToRemove.length > 0) {
-      console.log("🗑️ Cleared app cache:", keysToRemove.length, "entries");
-    }
-  } catch (e) {
-    console.warn("Failed to clear app cache:", e);
-  }
-}
+/** Re-export shared localStorage cache (single implementation in utils/cache.js). */
+export {
+  getCache,
+  setCache,
+  removeCache,
+  removeCachesMatchingPlot,
+  clearAllAppCache,
+  pruneAppCache,
+} from "../../utils/cache";
