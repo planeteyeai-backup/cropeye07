@@ -77,19 +77,26 @@ function globalWeekIndexFromReading(plantation: Date, readingDate: Date): number
 }
 
 function readingToNode(
-  farmerId: string,
-  sectionStartWeek: number,
+  _farmerId: string,
+  _sectionStartWeek: number,
   reading: YieldReading,
-  index: number,
+  readingIndex: number,
   plantation: Date,
   isLatest: boolean,
   isExpectedYield = false,
 ): SectionTimelineNode {
   const readingDate = new Date(reading.date);
   const globalWeek = globalWeekIndexFromReading(plantation, readingDate);
+  // Stable ids so Yes/No + notes survive live/history data refresh.
+  // Farmer id is added later as nodeKey (`${farmerId}-${id}`).
+  const id = isLatest
+    ? `live-latest`
+    : readingIndex > 0
+      ? `w${globalWeek}-r${readingIndex}`
+      : `w${globalWeek}`;
 
   return {
-    id: `${farmerId}-api-${sectionStartWeek}-${reading.date}-${index}`,
+    id,
     day: getLocalWeekNumber(globalWeek),
     date: formatTimelineDate(readingDate),
     monthRange: getMonthRangeForWeek(globalWeek),
@@ -172,7 +179,7 @@ export function buildSectionTimelineNodes(
           farmerId,
           sectionStartWeek,
           reading,
-          localIndex * 100 + readingIndex,
+          readingIndex,
           plantation,
           false,
         ),
@@ -265,7 +272,7 @@ export function buildLiveTimelineNode(
   return [
     {
       ...latestPast,
-      id: `${farmerId}-live-latest`,
+      id: `live-latest`,
       isLatest: true,
     },
   ];

@@ -256,6 +256,69 @@ export function groupFarmersByChartTopRanges(
   });
 }
 
+/** Normalize API date strings to YYYY-MM-DD for snapshot keys. */
+export function normalizeYieldDateKey(raw: string | null | undefined): string | null {
+  if (!raw?.trim()) return null;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    const m = raw.trim().match(/^(\d{4}-\d{2}-\d{2})/);
+    return m?.[1] ?? null;
+  }
+  const y = parsed.getFullYear();
+  const mo = String(parsed.getMonth() + 1).padStart(2, '0');
+  const d = String(parsed.getDate()).padStart(2, '0');
+  return `${y}-${mo}-${d}`;
+}
+
+/**
+ * Latest yield on or before `asOfDate` (YYYY-MM-DD).
+ * Returns null when the farmer had no reading by that date.
+ */
+export function yieldAsOfDate(
+  readings: { yield: number; date: string }[] | null | undefined,
+  asOfDate: string,
+): { yield: number; date: string } | null {
+  if (!readings?.length) return null;
+  const asOf = normalizeYieldDateKey(asOfDate);
+  if (!asOf) return null;
+
+  let best: { yield: number; date: string; key: string } | null = null;
+  for (const reading of readings) {
+    const key = normalizeYieldDateKey(reading.date);
+    if (!key || key > asOf) continue;
+    const tons = Number(reading.yield);
+    if (!Number.isFinite(tons) || tons <= 0) continue;
+    if (!best || key > best.key) {
+      best = { yield: tons, date: reading.date, key };
+    }
+  }
+  return best ? { yield: best.yield, date: best.date } : null;
+}
+
+/** Unique yield reading dates across farmers, newest first (for Past dropdown). */
+export function collectYieldSnapshotDates(
+  farmers: Array<{ yieldReadings?: { yield: number; date: string }[] | null }>,
+): string[] {
+  const keys = new Set<string>();
+  for (const farmer of farmers) {
+    for (const reading of farmer.yieldReadings ?? []) {
+      const key = normalizeYieldDateKey(reading.date);
+      if (key) keys.add(key);
+    }
+  }
+  return [...keys].sort((a, b) => b.localeCompare(a));
+}
+
+export function formatYieldSnapshotLabel(dateKey: string): string {
+  const parsed = new Date(`${dateKey}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return dateKey;
+  return parsed.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+}
+
 /** Wider bins for few farmers; finer bins when API returns many records. */
 export function pickDynamicBinSize(farmerCount: number): number {
   if (farmerCount <= 25) return 25;
