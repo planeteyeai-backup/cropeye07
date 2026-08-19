@@ -2,9 +2,34 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+/** leaflet-draw uses global `L` and has no ESM default export — both break edit tools in production. */
+function leafletDrawViteFix() {
+  return {
+    name: "leaflet-draw-vite-fix",
+    transform(code: string, id: string) {
+      const normalized = id.replace(/\\/g, "/");
+      if (!normalized.includes("/leaflet-draw/dist/leaflet.draw.js")) return null;
+      if (code.includes("__cropeyeLeafletDrawFix")) return null;
+      return {
+        code:
+          'import L from "leaflet";\n' +
+          "if (typeof window !== \"undefined\") { window.L = L; }\n" +
+          "const __cropeyeLeafletDrawFix = true;\n" +
+          `${code}\nexport default L;\n`,
+        map: null,
+      };
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), leafletDrawViteFix()],
   assetsInclude: ["**/*.geojson"],
+
+  // leaflet-draw has no ESM default export; prebundle so production edit tools load.
+  optimizeDeps: {
+    include: ["leaflet", "leaflet-draw", "react-leaflet-draw"],
+  },
 
   // Ensure single React instance (fixes "isElement" undefined errors with chunking)
   resolve: {
@@ -15,6 +40,9 @@ export default defineConfig({
     sourcemap: false,
     minify: "esbuild",       // esbuild: safe for React; terser mangling was breaking React.isElement
     outDir: "dist",
+    commonjsOptions: {
+      transformMixedEsModules: true,
+    },
     rollupOptions: {
       output: {
         chunkFileNames: "assets/[name]-[hash].js",
@@ -28,6 +56,32 @@ export default defineConfig({
             return `${base}.${ext}`;
           }
           return name.replace(/[^a-zA-Z0-9-_]/g, "-").toLowerCase();
+        },
+        // Split heavy libraries so Home does not download map/charts/excel/pdf up front.
+        // React stays in the main graph (dedupe above) to avoid "isElement" chunk bugs.
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return;
+          if (id.includes("leaflet")) return "leaflet";
+          if (id.includes("recharts") || id.includes("/d3-") || id.includes("\\d3-")) {
+            return "charts";
+          }
+          if (
+            id.includes("xlsx") ||
+            id.includes("papaparse") ||
+            id.includes("file-saver")
+          ) {
+            return "excel";
+          }
+          if (id.includes("jspdf") || id.includes("html2canvas")) return "pdf";
+          if (
+            id.includes("@turf") ||
+            id.includes("shapefile") ||
+            id.includes("shpjs")
+          ) {
+            return "geo";
+          }
+          if (id.includes("framer-motion")) return "motion";
+          if (id.includes("lodash")) return "lodash";
         },
       },
       external: [],

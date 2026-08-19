@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { MapContainer, TileLayer, FeatureGroup, useMap, Marker } from "react-leaflet";
+import "../utils/leafletDrawSetup";
 import { EditControl } from "react-leaflet-draw";
 import { AlertCircle, Crosshair, Loader2, MapPin, Pencil, Save, Trash2, X } from "lucide-react";
 import L from "leaflet";
@@ -511,7 +512,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
 
   const modal = (
     <div
-      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/55 p-3 sm:p-4 notranslate"
+      className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/55 p-3 sm:p-4 notranslate skiptranslate"
       translate="no"
     >
       <div className="flex max-h-[calc(100vh-1.5rem)] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
@@ -641,7 +642,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
               }}
             >
               <TileLayer
-                url="http://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
+                url="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
                 attribution="© Google"
                 maxZoom={21}
               />

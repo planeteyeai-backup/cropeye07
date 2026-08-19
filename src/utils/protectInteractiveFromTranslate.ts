@@ -25,9 +25,13 @@ function markNoTranslate(el: Element): void {
 function unwrapGoogleFontTags(root: ParentNode = document): void {
   root
     .querySelectorAll(
-      "select font, option font, .leaflet-container font, .leaflet-draw font, [data-no-translate] font",
+      "button font, a font, select font, option font",
     )
     .forEach((font) => {
+      // Unwrapping Leaflet nodes while the user drags handles breaks edit on deployed HTTPS.
+      if ((font as Element).closest?.(".leaflet-container, .plot-boundary-editor-map")) {
+        return;
+      }
       const parent = font.parentNode;
       if (!parent) return;
       while (font.firstChild) parent.insertBefore(font.firstChild, font);

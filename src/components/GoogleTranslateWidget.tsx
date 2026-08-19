@@ -251,7 +251,16 @@ export const GoogleTranslateWidget: React.FC = () => {
       raf = requestAnimationFrame(() => hideGoogleTranslateTopBar());
     };
 
-    const obs = new MutationObserver(schedule);
+    const skipProtect = ".leaflet-container, .plot-boundary-editor-map, [data-no-translate]";
+    const obs = new MutationObserver((mutations) => {
+      const outsideMap = mutations.some((mutation) => {
+        const target = mutation.target;
+        if (!(target instanceof Element)) return true;
+        return !target.closest(skipProtect);
+      });
+      if (!outsideMap) return;
+      schedule();
+    });
     obs.observe(document.documentElement, { childList: true, subtree: true });
 
     const burst = window.setInterval(() => hideGoogleTranslateTopBar(), 600);
