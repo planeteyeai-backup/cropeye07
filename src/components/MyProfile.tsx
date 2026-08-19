@@ -411,7 +411,12 @@ function collectFarmChoices(data: any): FarmChoice[] {
     const plotRec = plot ?? farm?.plot ?? null;
     const gat = String(plotRec?.gat_number ?? farm?.gat_number ?? "").trim();
     const plotNum = String(plotRec?.plot_number ?? farm?.plot_number ?? "").trim();
-    const plotId = plotRec?.id ?? farm?.plot_id ?? "";
+    const plotId =
+      plotRec?.id ??
+      plotRec?.plot_id ??
+      farm?.plot_id ??
+      farm?.plot?.id ??
+      "";
     const fastapi = String(plotRec?.fastapi_plot_id ?? farm?.farm_uid ?? "").trim();
     const gatPlot = [gat, plotNum].filter(Boolean).join("/");
     choices.push({
@@ -706,15 +711,22 @@ function ensureIrrigationPayloadBlock(
 }
 
 function plotMetaFromChoice(choice: FarmChoice) {
-  const plot = choice.plot;
-  const plotId = plot?.id ?? (choice.plotId || null);
+  const plot = choice.plot ?? choice.farm?.plot ?? null;
+  const farm = choice.farm;
+  const plotId =
+    plot?.id ??
+    plot?.plot_id ??
+    farm?.plot_id ??
+    farm?.plot?.id ??
+    (choice.plotId || null) ??
+    (choice.farmId || null);
   const gat = choice.gatNumber;
   const plotNum = choice.plotNumber;
   const gatPlot = gat && plotNum ? `${gat}/${plotNum}` : gat || plotNum || "";
   const fastapi = plot?.fastapi_plot_id != null ? String(plot.fastapi_plot_id).trim() : "";
   const primaryKey = plotKeyFromRecord(plot) || gatPlot || String(plotId ?? "");
   return {
-    plotId,
+    plotId: plotId != null && String(plotId).trim() !== "" ? String(plotId) : choice.farmId || "my-profile",
     plotLabel: primaryKey || gatPlot,
     plotKeys: [
       primaryKey,
@@ -722,9 +734,16 @@ function plotMetaFromChoice(choice: FarmChoice) {
       gatPlot,
       gat && plotNum ? `${gat}_${plotNum}` : "",
       plotId != null ? String(plotId) : "",
+      choice.farmId,
     ].filter(Boolean),
-    boundary: resolvePlotBoundary(plot),
-    location: resolveGeoJsonPoint(plot),
+    boundary:
+      resolvePlotBoundary(plot) ??
+      resolvePlotBoundary(farm?.plot) ??
+      resolvePlotBoundary(farm),
+    location:
+      resolveGeoJsonPoint(plot) ??
+      resolveGeoJsonPoint(farm?.plot) ??
+      resolveGeoJsonPoint(farm),
   };
 }
 
@@ -853,31 +872,11 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
   const [showBoundaryEditor, setShowBoundaryEditor] = useState(false);
   const [boundaryMsg, setBoundaryMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [cropTypes, setCropTypes] = useState<CropTypeRecord[]>([]);
-  const editBoundaryBtnRef = useRef<HTMLButtonElement | null>(null);
 
   const openBoundaryEditor = () => {
-    if (!plotBoundaryMeta.plotId) {
-      setBoundaryMsg({
-        type: "error",
-        text: t("plotBoundary.plotIdMissing"),
-      });
-      return;
-    }
     setBoundaryMsg(null);
     setShowBoundaryEditor(true);
   };
-
-  useEffect(() => {
-    const el = editBoundaryBtnRef.current;
-    if (!el) return;
-    const onClick = (event: Event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      openBoundaryEditor();
-    };
-    el.addEventListener("click", onClick, true);
-    return () => el.removeEventListener("click", onClick, true);
-  });
 
   useEffect(() => {
     let cancelled = false;
@@ -1488,27 +1487,36 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
                       : t("plotBoundary.noBoundary")}
                   </p>
                 </div>
-                <button
-                  ref={editBoundaryBtnRef}
-                  type="button"
-                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium rounded-xl transition-all notranslate skiptranslate relative z-[100000]"
+                <div
+                  role="button"
+                  tabIndex={0}
+                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium rounded-xl transition-all cursor-pointer notranslate skiptranslate relative z-[100000]"
                   translate="no"
                   data-no-translate=""
-                  onClick={openBoundaryEditor}
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    openBoundaryEditor();
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      openBoundaryEditor();
+                    }
+                  }}
                 >
                   <Map size={14} aria-hidden />
                   <span translate="no">{t("plotBoundary.editButton")}</span>
-                </button>
+                </div>
               </div>
             </div>
           </div>
         </div>
 
-        {plotBoundaryMeta.plotId != null && (
-          <EditPlotBoundaryModal
+        <EditPlotBoundaryModal
             open={showBoundaryEditor}
             onClose={() => setShowBoundaryEditor(false)}
-            plotId={plotBoundaryMeta.plotId}
+            plotId={plotBoundaryMeta.plotId || selectedFarmId || "my-profile"}
             plotLabel={plotBoundaryMeta.plotLabel}
             plotKeys={plotBoundaryMeta.plotKeys}
             initialBoundary={plotBoundaryMeta.boundary}
@@ -1564,7 +1572,6 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
               setTimeout(() => setBoundaryMsg(null), 4000);
             }}
           />
-        )}
 
       </div>
     </div>
