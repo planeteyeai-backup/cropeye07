@@ -83,9 +83,14 @@ body {
   position: relative !important;
 }
 
+/* Production: Google Translate injects iframes that sit on top of buttons and steal clicks. */
 iframe.goog-te-banner-frame,
+iframe.goog-te-menu-frame,
+iframe.skiptranslate,
+body > iframe.skiptranslate,
 .goog-te-banner-frame,
-body > .skiptranslate.goog-te-banner-frame {
+body > .skiptranslate.goog-te-banner-frame,
+.goog-te-spinner-pos {
   display: none !important;
   visibility: hidden !important;
   height: 0 !important;

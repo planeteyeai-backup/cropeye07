@@ -201,6 +201,39 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
   }, [open, initialBoundary, initialLocation, plotId]);
 
   useEffect(() => {
+    if (!open || !isEditing) return;
+
+    const enableVertexEdit = () => {
+      const layer = polygonLayerRef.current as L.Polygon & {
+        editing?: { enabled?: () => boolean; enable?: () => void };
+      } | null;
+      if (!layer?.editing) return false;
+      if (!layer.editing.enabled?.()) layer.editing.enable?.();
+      return true;
+    };
+
+    if (enableVertexEdit()) return undefined;
+
+    const poll = window.setInterval(() => {
+      if (enableVertexEdit()) window.clearInterval(poll);
+    }, 80);
+    const stop = window.setTimeout(() => window.clearInterval(poll), 4000);
+
+    const editTool = window.setTimeout(() => {
+      const btn = document.querySelector(
+        ".plot-boundary-editor-map .leaflet-draw-edit-edit",
+      ) as HTMLElement | null;
+      if (btn && !btn.classList.contains("leaflet-disabled")) btn.click();
+    }, 250);
+
+    return () => {
+      window.clearInterval(poll);
+      window.clearTimeout(stop);
+      window.clearTimeout(editTool);
+    };
+  }, [open, isEditing, mapReady]);
+
+  useEffect(() => {
     if (!open || !mapReady) return;
 
     let cancelled = false;
@@ -512,8 +545,9 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
 
   const modal = (
     <div
-      className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/55 p-3 sm:p-4 notranslate skiptranslate"
+      className="plot-boundary-modal fixed inset-0 z-[100000] flex items-center justify-center bg-black/55 p-3 sm:p-4 notranslate skiptranslate"
       translate="no"
+      data-no-translate=""
     >
       <div className="flex max-h-[calc(100vh-1.5rem)] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
         <div className="flex shrink-0 items-center justify-between border-b border-gray-100 bg-[#1B5E20] px-4 py-4 sm:px-5">
@@ -730,12 +764,20 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
             {!isEditing ? (
               <button
                 type="button"
+                onPointerUp={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setIsEditing(true);
+                  setLocationError(null);
+                  setError(null);
+                }}
                 onClick={() => {
                   setIsEditing(true);
                   setLocationError(null);
                   setError(null);
                 }}
-                className="inline-flex items-center gap-2 rounded-xl bg-[#1B5E20] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[#145218]"
+                className="inline-flex items-center gap-2 rounded-xl bg-[#1B5E20] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[#145218] notranslate skiptranslate"
+                translate="no"
               >
                 <Pencil size={14} />
                 {t("plotBoundary.editPlot")}
@@ -768,6 +810,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
         }
         .plot-boundary-editor-map .leaflet-draw-toolbar a {
           background-color: #fff;
+          pointer-events: auto !important;
         }
       `}</style>
     </div>

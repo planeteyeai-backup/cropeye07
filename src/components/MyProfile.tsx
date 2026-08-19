@@ -853,6 +853,31 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
   const [showBoundaryEditor, setShowBoundaryEditor] = useState(false);
   const [boundaryMsg, setBoundaryMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [cropTypes, setCropTypes] = useState<CropTypeRecord[]>([]);
+  const editBoundaryBtnRef = useRef<HTMLButtonElement | null>(null);
+
+  const openBoundaryEditor = () => {
+    if (!plotBoundaryMeta.plotId) {
+      setBoundaryMsg({
+        type: "error",
+        text: t("plotBoundary.plotIdMissing"),
+      });
+      return;
+    }
+    setBoundaryMsg(null);
+    setShowBoundaryEditor(true);
+  };
+
+  useEffect(() => {
+    const el = editBoundaryBtnRef.current;
+    if (!el) return;
+    const onClick = (event: Event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openBoundaryEditor();
+    };
+    el.addEventListener("click", onClick, true);
+    return () => el.removeEventListener("click", onClick, true);
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -1464,23 +1489,15 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
                   </p>
                 </div>
                 <button
+                  ref={editBoundaryBtnRef}
                   type="button"
-                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium rounded-xl transition-all notranslate"
+                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium rounded-xl transition-all notranslate skiptranslate relative z-[100000]"
                   translate="no"
-                  onClick={() => {
-                    if (!plotBoundaryMeta.plotId) {
-                      setBoundaryMsg({
-                        type: "error",
-                        text: t("plotBoundary.plotIdMissing"),
-                      });
-                      return;
-                    }
-                    setBoundaryMsg(null);
-                    setShowBoundaryEditor(true);
-                  }}
+                  data-no-translate=""
+                  onClick={openBoundaryEditor}
                 >
                   <Map size={14} aria-hidden />
-                  {t("plotBoundary.editButton")}
+                  <span translate="no">{t("plotBoundary.editButton")}</span>
                 </button>
               </div>
             </div>

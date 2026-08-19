@@ -24,12 +24,13 @@ function markNoTranslate(el: Element): void {
 
 function unwrapGoogleFontTags(root: ParentNode = document): void {
   root
-    .querySelectorAll(
-      "button font, a font, select font, option font",
-    )
+    .querySelectorAll("select font, option font")
     .forEach((font) => {
-      // Unwrapping Leaflet nodes while the user drags handles breaks edit on deployed HTTPS.
-      if ((font as Element).closest?.(".leaflet-container, .plot-boundary-editor-map")) {
+      if (
+        (font as Element).closest?.(
+          ".leaflet-container, .plot-boundary-editor-map, .plot-boundary-modal, [data-no-translate]",
+        )
+      ) {
         return;
       }
       const parent = font.parentNode;

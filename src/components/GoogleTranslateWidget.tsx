@@ -251,7 +251,8 @@ export const GoogleTranslateWidget: React.FC = () => {
       raf = requestAnimationFrame(() => hideGoogleTranslateTopBar());
     };
 
-    const skipProtect = ".leaflet-container, .plot-boundary-editor-map, [data-no-translate]";
+    const skipProtect =
+      ".leaflet-container, .plot-boundary-editor-map, .plot-boundary-modal, [data-no-translate]";
     const obs = new MutationObserver((mutations) => {
       const outsideMap = mutations.some((mutation) => {
         const target = mutation.target;
