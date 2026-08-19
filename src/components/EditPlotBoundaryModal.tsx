@@ -10,6 +10,7 @@ import { refreshApiEndpoints, updatePlotBoundary } from "../api";
 import {
   notifyPlotBoundaryUpdated,
 } from "../utils/plotBoundarySync";
+import { useI18nLite } from "../i18nLite";
 import {
   boundaryToLeafletCoords,
   calculateAreaMetricsFromGeometry,
@@ -137,6 +138,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
   initialLocation,
   onSaved,
 }) => {
+  const { t } = useI18nLite();
   const featureGroupRef = useRef<L.FeatureGroup>(null);
   const polygonLayerRef = useRef<L.Polygon | null>(null);
 
@@ -256,13 +258,13 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
   const applyGeometry = useCallback((geometry: GeoJsonPolygon) => {
     const metrics = calculateAreaMetricsFromGeometry(geometry);
     if (!metrics) {
-      setError("Could not calculate area for this shape. Please redraw.");
+      setError(t("plotBoundary.areaError"));
       return;
     }
     setError(null);
     setCurrentBoundary(geometry);
     setAreaAcres(metrics.acres);
-  }, []);
+  }, [t]);
 
   const handleDrawCreated = (event: any) => {
     const layer = event.layer as L.Polygon;
@@ -299,10 +301,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
    * Does NOT call the API — backend rejects null boundary/location.
    */
   const handleClearForRedraw = () => {
-    const confirmed = window.confirm(
-      "Clear this boundary from the map so you can draw a new one?\n\n" +
-        "After drawing, click Save Boundary. The server does not allow removing a boundary without replacing it.",
-    );
+    const confirmed = window.confirm(t("plotBoundary.clearConfirm"));
     if (!confirmed) return;
 
     handleDrawDeleted();
@@ -358,11 +357,11 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
     const lat = Number(latInput);
     const lng = Number(lngInput);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-      setLocationError("Enter valid latitude and longitude.");
+      setLocationError(t("plotBoundary.invalidLatLng"));
       return;
     }
     if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-      setLocationError("Latitude must be -90 to 90 and longitude -180 to 180.");
+      setLocationError(t("plotBoundary.latLngRange"));
       return;
     }
 
@@ -372,7 +371,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
 
   const handleUseCurrentLocation = () => {
     if (!navigator.geolocation) {
-      setLocationError("Geolocation is not supported by this browser.");
+      setLocationError(t("plotBoundary.geoUnsupported"));
       return;
     }
 
@@ -390,13 +389,9 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
       (err) => {
         setLocating(false);
         if (err.code === err.PERMISSION_DENIED) {
-          setLocationError(
-            "Location permission denied. Allow location access in browser settings, then try again.",
-          );
+          setLocationError(t("plotBoundary.geoDenied"));
         } else {
-          setLocationError(
-            "Unable to get your current location. Enter coordinates manually or try again.",
-          );
+          setLocationError(t("plotBoundary.geoFailed"));
         }
       },
       {
@@ -430,7 +425,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
 
   const formatBoundaryError = (e: any) => {
     if (e.response?.status === 403) {
-      return "You do not have permission to update this plot boundary. Please contact your field officer or support.";
+      return t("plotBoundary.permissionDenied");
     }
 
     const data = e.response?.data;
@@ -443,14 +438,14 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
       (typeof locationMsg === "string" &&
         locationMsg.toLowerCase().includes("cannot remove"))
     ) {
-      return "The server does not allow deleting a plot boundary. Clear the map, draw a new shape, then click Save Boundary.";
+      return t("plotBoundary.cannotDelete");
     }
 
     return (
       data?.detail ||
       data?.message ||
       (typeof data === "object" ? JSON.stringify(data) : e.message) ||
-      "Failed to save plot boundary."
+      t("plotBoundary.saveFailed")
     );
   };
 
@@ -459,7 +454,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
 
     if (!boundaryToSave?.coordinates?.[0]?.length) {
       setError(
-        "Please draw the plot boundary on the map first, then click Save Boundary.",
+        t("plotBoundary.drawFirst"),
       );
       return;
     }
@@ -473,7 +468,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
         : ring.length;
 
     if (uniquePoints < 3) {
-      setError("A plot boundary needs at least 3 corner points.");
+      setError(t("plotBoundary.minCorners"));
       return;
     }
 
@@ -483,7 +478,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
 
       const locationToSave = resolveLocationForSave(boundaryToSave);
       if (!locationToSave) {
-        setError("Could not resolve plot location. Enter lat/long or redraw the boundary.");
+        setError(t("plotBoundary.locationMissing"));
         return;
       }
 
@@ -515,20 +510,25 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
     boundaryToLeafletCoords(currentBoundary ?? initialBoundary).length >= 3;
 
   const modal = (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/55 p-3 sm:p-4">
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/55 p-3 sm:p-4 notranslate"
+      translate="no"
+    >
       <div className="flex max-h-[calc(100vh-1.5rem)] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
         <div className="flex shrink-0 items-center justify-between border-b border-gray-100 bg-[#1B5E20] px-4 py-4 sm:px-5">
           <div>
-            <h3 className="text-lg font-bold text-white">Plot Boundary</h3>
+            <h3 className="text-lg font-bold text-white">{t("plotBoundary.title")}</h3>
             <p className="mt-0.5 text-xs text-green-100">
-              {plotLabel ? `Plot ${plotLabel}` : "View or edit your farm boundary"}
+              {plotLabel
+                ? `${t("plotBoundary.plotPrefix")} ${plotLabel}`
+                : t("plotBoundary.subtitleDefault")}
             </p>
           </div>
           <button
             type="button"
             onClick={onClose}
             className="rounded-full p-2 transition-colors hover:bg-white/15"
-            aria-label="Close"
+            aria-label={t("plotBoundary.close")}
           >
             <X size={18} className="text-white" />
           </button>
@@ -539,47 +539,37 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
             <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
               {hasDrawnBoundary ? (
                 <p>
-                  <strong>How to edit:</strong> Click the <strong>square edit tool</strong> (top-right),
-                  drag corners to resize, then click <strong>Save Boundary</strong> below. Use{" "}
-                  <strong>Delete / Clear</strong> to remove the shape and draw a new one (server requires a
-                  replacement boundary — empty is not allowed).
+                  <strong>{t("plotBoundary.howToEdit")}</strong> {t("plotBoundary.howToEditBody")}
                 </p>
               ) : (
                 <ol className="list-decimal space-y-1 pl-4">
-                  <li>
-                    Optionally tap <strong>Use My Current Location</strong> to center the map on you.
-                  </li>
-                  <li>
-                    Click the <strong>pentagon icon</strong> on the top-right of the map.
-                  </li>
-                  <li>Click each corner of your plot on the satellite image.</li>
-                  <li>Click the first point again (or double-click) to close the shape.</li>
-                  <li>
-                    Check the calculated area, then click <strong>Save Boundary</strong>.
-                  </li>
+                  <li>{t("plotBoundary.drawStep1")}</li>
+                  <li>{t("plotBoundary.drawStep2")}</li>
+                  <li>{t("plotBoundary.drawStep3")}</li>
+                  <li>{t("plotBoundary.drawStep4")}</li>
+                  <li>{t("plotBoundary.drawStep5")}</li>
                 </ol>
               )}
             </div>
           ) : (
             <div className="rounded-xl border border-slate-200 bg-slate-100 px-4 py-3 text-sm text-slate-700">
-              Viewing plot boundary. Tap <strong>Edit Plot</strong> to make changes, or{" "}
-              <strong>Delete</strong> to clear and redraw.
+              {t("plotBoundary.viewingHint")}
             </div>
           )}
 
           <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
             <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-              Plot center (lat / long)
+              {t("plotBoundary.plotCenter")}
             </p>
             <p className="mt-1 text-xs text-gray-500">
               {isEditing
-                ? "Enter coordinates to move the map. Tap the map tools to draw or re-draw the boundary."
-                : "Enter coordinates to move the map. Tap Edit Plot to draw or re-draw the boundary."}
+                ? t("plotBoundary.coordsHintEdit")
+                : t("plotBoundary.coordsHintView")}
             </p>
             <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
               <input
                 type="text"
-                placeholder="Latitude"
+                placeholder={t("plotBoundary.latitude")}
                 value={latInput}
                 onChange={(e) => setLatInput(e.target.value)}
                 disabled={!isEditing}
@@ -587,7 +577,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
               />
               <input
                 type="text"
-                placeholder="Longitude"
+                placeholder={t("plotBoundary.longitude")}
                 value={lngInput}
                 onChange={(e) => setLngInput(e.target.value)}
                 disabled={!isEditing}
@@ -599,7 +589,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
                 disabled={!isEditing}
                 className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                Go to location
+                {t("plotBoundary.goToLocation")}
               </button>
             </div>
 
@@ -615,7 +605,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
                 ) : (
                   <Crosshair size={16} />
                 )}
-                {locating ? "Getting your location…" : "Use My Current Location"}
+                {locating ? t("plotBoundary.gettingLocation") : t("plotBoundary.useMyLocation")}
               </button>
             )}
 
@@ -631,10 +621,14 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
             </div>
           )}
 
-          <div className="plot-boundary-editor-map relative overflow-hidden rounded-xl border border-gray-200">
+          <div
+            className="plot-boundary-editor-map relative overflow-hidden rounded-xl border border-gray-200 notranslate"
+            data-no-translate=""
+            translate="no"
+          >
             {!isEditing && (
               <div className="pointer-events-none absolute inset-x-0 top-0 z-[1000] bg-slate-200/95 px-3 py-2 text-center text-xs font-medium text-slate-700">
-                Viewing plot boundary. Tap &apos;Edit Plot&apos; to make changes.
+                {t("plotBoundary.viewingOverlay")}
               </div>
             )}
             <MapContainer
@@ -685,15 +679,16 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
           </div>
 
           {isEditing && !hasDrawnBoundary && areaAcres == null && (
-            <p className="text-xs text-gray-500">
-              No shape on the map yet. Use the pentagon tool (top-right) to draw your plot.
-            </p>
+            <p className="text-xs text-gray-500">{t("plotBoundary.noShapeYet")}</p>
           )}
 
           {areaAcres != null && (
             <div className="flex items-center gap-2 text-sm text-gray-700">
               <MapPin size={14} className="text-green-600" />
-              Calculated area: <strong>{areaAcres.toFixed(2)} acres</strong>
+              {t("plotBoundary.calculatedArea")}{" "}
+              <strong>
+                {areaAcres.toFixed(2)} {t("plotBoundary.acres")}
+              </strong>
             </div>
           )}
         </div>
@@ -708,7 +703,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
                 className="inline-flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 transition-colors hover:bg-red-100 disabled:opacity-60"
               >
                 <Trash2 size={14} />
-                Delete Boundary
+                {t("plotBoundary.deleteBoundary")}
               </button>
               {isEditing && hasDrawnBoundary && (
                 <button
@@ -717,7 +712,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
                   disabled={saving}
                   className="inline-flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800 transition-colors hover:bg-amber-100 disabled:opacity-60"
                 >
-                  Clear to redraw
+                  {t("plotBoundary.clearToRedraw")}
                 </button>
               )}
             </div>
@@ -729,7 +724,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
               onClick={onClose}
               className="rounded-xl border border-gray-300 px-4 py-2 text-sm text-gray-600 transition-colors hover:bg-white"
             >
-              Cancel
+              {t("plotBoundary.cancel")}
             </button>
             {!isEditing ? (
               <button
@@ -742,7 +737,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
                 className="inline-flex items-center gap-2 rounded-xl bg-[#1B5E20] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[#145218]"
               >
                 <Pencil size={14} />
-                Edit Plot
+                {t("plotBoundary.editPlot")}
               </button>
             ) : (
               <button
@@ -756,7 +751,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
                 ) : (
                   <Save size={14} />
                 )}
-                Save Boundary
+                {t("plotBoundary.saveBoundary")}
               </button>
             )}
           </div>

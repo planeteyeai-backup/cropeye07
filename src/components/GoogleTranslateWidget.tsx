@@ -1,6 +1,7 @@
 import React, { useEffect, useId } from "react";
 import { Languages } from "lucide-react";
 import "./GoogleTranslateWidget.css";
+import { protectInteractiveFromTranslate } from "../utils/protectInteractiveFromTranslate";
 import { protectAllManagerFarmDashRoots } from "../utils/protectManagerDashFromTranslate";
 
 declare global {
@@ -69,6 +70,14 @@ const protectNumericTextNodes = () => {
   });
 };
 
+/**
+ * Lock only maps / form controls. KML modal titles and "Edit Plot Boundary"
+ * must remain translatable (Hindi / Marathi / Kannada).
+ */
+const protectMapsAndKmlEditorsFromTranslate = () => {
+  protectInteractiveFromTranslate();
+};
+
 /** Hide Google Website Translator banner/top overlays to keep only our controls. */
 const hideGoogleTranslateTopBar = () => {
   document.querySelectorAll("iframe.goog-te-banner-frame").forEach((node) => {
@@ -125,10 +134,9 @@ const hideGoogleTranslateTopBar = () => {
   });
 
   protectNumericTextNodes();
-  // Manager Farm Dashboard must stay untranslated in production (Kannada GT breaks selects).
-  if (import.meta.env.PROD) {
-    protectAllManagerFarmDashRoots();
-  }
+  protectMapsAndKmlEditorsFromTranslate();
+  // Selects + maps on Manager dash — same break in Hindi / Marathi / Kannada.
+  protectAllManagerFarmDashRoots();
 };
 
 const GOOGTRANS = "googtrans";

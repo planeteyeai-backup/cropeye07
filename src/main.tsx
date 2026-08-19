@@ -2,7 +2,10 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import AppWrapper from './components/AppWrapper';
 import { AppErrorBoundary } from './components/AppErrorBoundary';
+import { installGoogleTranslateDomPatch } from './utils/protectInteractiveFromTranslate';
 import './index.css';
+
+installGoogleTranslateDomPatch();
 
 function showBootstrapError(message: string) {
   const root = document.getElementById('root');
