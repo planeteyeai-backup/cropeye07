@@ -879,6 +879,21 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
   };
 
   useEffect(() => {
+    const onOpen = (event: Event) => {
+      const target = event.target as HTMLElement | null;
+      if (!target?.closest?.("[data-open-kml-editor='true']")) return;
+      setBoundaryMsg(null);
+      setShowBoundaryEditor(true);
+    };
+    document.addEventListener("click", onOpen, true);
+    document.addEventListener("pointerup", onOpen, true);
+    return () => {
+      document.removeEventListener("click", onOpen, true);
+      document.removeEventListener("pointerup", onOpen, true);
+    };
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     getCropTypes()
       .then((res) => {
@@ -1487,27 +1502,16 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
                       : t("plotBoundary.noBoundary")}
                   </p>
                 </div>
-                <div
-                  role="button"
-                  tabIndex={0}
-                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium rounded-xl transition-all cursor-pointer notranslate skiptranslate relative z-[100000]"
+                <button
+                  type="button"
+                  data-open-kml-editor="true"
+                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 mb-20 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium rounded-xl transition-all notranslate skiptranslate relative z-[100000]"
                   translate="no"
-                  data-no-translate=""
-                  onPointerDown={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    openBoundaryEditor();
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      openBoundaryEditor();
-                    }
-                  }}
+                  onClick={openBoundaryEditor}
                 >
                   <Map size={14} aria-hidden />
                   <span translate="no">{t("plotBoundary.editButton")}</span>
-                </div>
+                </button>
               </div>
             </div>
           </div>

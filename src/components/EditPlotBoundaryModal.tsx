@@ -195,8 +195,9 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
       boundaryToLeafletCoords(initialBoundary ?? null).length >= 3;
     setMapFocus(hasBoundaryOnOpen ? null : locationLatLng);
     setLocationError(null);
-    // View mode when boundary exists; edit mode when drawing a new one.
-    setIsEditing(!hasBoundaryOnOpen);
+    // Always start in edit mode on production — the inner Edit Plot button is
+    // often unclickable after Google Translate wraps the page.
+    setIsEditing(true);
     setLocating(false);
   }, [open, initialBoundary, initialLocation, plotId]);
 
@@ -816,7 +817,20 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
     </div>
   );
 
-  return createPortal(modal, document.body);
+  return createPortal(modal, getKmlModalRoot());
 };
+
+function getKmlModalRoot(): HTMLElement {
+  const id = "cropeye-kml-modal-root";
+  let el = document.getElementById(id);
+  if (!el) {
+    el = document.createElement("div");
+    el.id = id;
+    el.className = "notranslate skiptranslate";
+    el.setAttribute("translate", "no");
+    document.documentElement.appendChild(el);
+  }
+  return el;
+}
 
 export default EditPlotBoundaryModal;
