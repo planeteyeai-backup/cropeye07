@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { CloudRain, Droplets, Gauge, Wind } from "lucide-react";
+import { CloudRain, Droplets, Gauge } from "lucide-react";
 import { useAppContext } from "../../../context/AppContext";
 import { useFarmerProfile } from "../../../hooks/useFarmerProfile";
+import { fetchSoilMoistureForPlot } from "../../../utils/soilMoistureApi";
 
 interface MoistureData {
   date: string;
@@ -16,22 +17,6 @@ interface MoistureData {
 
 interface SoilMoistureTrendCardProps {
   selectedPlotName?: string | null;
-}
-
-// New API response (9006) types
-interface SoilMoistureStackItem {
-  day: string; // e.g. "2025-09-24"
-  soil_moisture: number; // percentage value 0-100
-  rainfall_mm_yesterday: number;
-  rainfall_provisional: boolean;
-  et_mean_mm_yesterday: number;
-}
-
-interface SoilMoistureStackResponse {
-  plot_name: string;
-  latitude: number;
-  longitude: number;
-  soil_moisture_stack: SoilMoistureStackItem[];
 }
 
 const SoilMoistureTrendCard: React.FC<SoilMoistureTrendCardProps> = ({
@@ -60,14 +45,9 @@ const SoilMoistureTrendCard: React.FC<SoilMoistureTrendCardProps> = ({
   useEffect(() => {
     if (selectedPlotName) {
       setPlotName(selectedPlotName);
-      console.log(
-        "SoilMoistureTrendCard: Using selected plot:",
-        selectedPlotName,
-      );
       return;
     }
     if (profile && !profileLoading) {
-      // Priority order: fastapi_plot_id -> gat_number_plot_number -> first available farms[].farm_uid
       const plots = profile.plots || [];
       const fastapi = plots.find((p) => p.fastapi_plot_id)?.fastapi_plot_id;
       const gatCombo =
@@ -85,92 +65,24 @@ const SoilMoistureTrendCard: React.FC<SoilMoistureTrendCardProps> = ({
         ""
       ).toString();
       setPlotName(resolved);
-      console.log(
-        "SoilMoistureTrendCard: Resolved plot name:",
-        resolved,
-        "from profile",
-      );
     }
   }, [profile, profileLoading, selectedPlotName]);
 
-  // New endpoint utilities
-  const fetchSoilMoistureStack = async (
-    plot: string,
-  ): Promise<SoilMoistureStackResponse> => {
-    const base = "https://sef-cropeye.up.railway.app";
-    const attempts: Array<{ url: string; init?: RequestInit; note: string }> = [
-      {
-        url: `${base}/soil-moisture/${encodeURIComponent(plot)}`,
-        note: "GET path param",
-      },
-      {
-        url: `${base}/soil-moisture/${encodeURIComponent(plot)}/`,
-        note: "GET path param trailing slash",
-      },
-      {
-        url: `${base}/soil-moisture?plot_name=${encodeURIComponent(plot)}`,
-        note: "GET query param",
-      },
-      {
-        url: `${base}/soil-moisture/${encodeURIComponent(plot)}`,
-        init: {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-        },
-        note: "POST path param",
-      },
-      {
-        url: `${base}/soil-moisture`,
-        init: {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ plot_name: plot }),
-        },
-        note: "POST body JSON",
-      },
-    ];
-
-    let lastErr: any = null;
-    for (const attempt of attempts) {
-      try {
-        console.log("Fetching soil moisture stack:", attempt.note, attempt.url);
-        const resp = await fetch(attempt.url, attempt.init);
-        if (!resp.ok) {
-          const body = await resp.text().catch(() => "");
-          console.warn("Attempt failed:", attempt.note, resp.status, body);
-          lastErr = new Error(
-            `HTTP ${resp.status}: ${body || resp.statusText}`,
-          );
-          continue;
-        }
-        const json = await resp.json();
-        console.log(
-          "Soil moisture raw response (via",
-          attempt.note,
-          "):",
-          json,
-        );
-        return json;
-      } catch (e) {
-        console.warn("Attempt exception:", attempt.note, e);
-        lastErr = e;
-      }
-    }
-    throw lastErr || new Error("All soil moisture fetch attempts failed");
-  };
-
-  // Get current date in YYYY-MM-DD format
   const getCurrentDate = (): string => {
     return new Date().toISOString().split("T")[0];
   };
 
-  // Map new endpoint response to chart data
   const mapStackToWeekData = (
-    stack: SoilMoistureStackItem[],
+    stack: Array<{
+      day: string;
+      soil_moisture: number;
+      rainfall_mm_yesterday?: number;
+      rainfall_provisional?: boolean;
+      et_mean_mm_yesterday?: number;
+    }>,
   ): MoistureData[] => {
     const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const todayStr = getCurrentDate();
-    // Keep only last 7 records; ensure sorted by day asc
     const sorted = [...stack]
       .sort((a, b) => a.day.localeCompare(b.day))
       .slice(-7);
@@ -198,41 +110,33 @@ const SoilMoistureTrendCard: React.FC<SoilMoistureTrendCardProps> = ({
       setLoading(true);
       setError(null);
 
-      // Fetch from new 9006 endpoint
       if (!plotName) throw new Error("Missing plot name");
-      const apiResp = await fetchSoilMoistureStack(plotName);
-      console.log("SoilMoisture API response:", apiResp);
-      if (
-        !apiResp?.soil_moisture_stack ||
-        !Array.isArray(apiResp.soil_moisture_stack)
-      ) {
-        throw new Error("Invalid API shape: soil_moisture_stack missing");
-      }
-      const weekData = mapStackToWeekData(apiResp.soil_moisture_stack);
-      console.log("Mapped week data:", weekData);
+      const apiResp = await fetchSoilMoistureForPlot(plotName, profile?.plots);
+      const weekData = mapStackToWeekData(apiResp.stack);
 
       setAppState((prev: any) => ({
         ...prev,
         soilMoistureTrendData: weekData,
+        moisturePercent: apiResp.currentMoisture,
+        currentSoilMoisture: apiResp.currentMoisture,
       }));
 
       setCached(`soilMoistureTrend_${plotName}`, weekData);
 
-      // kick animations after data render
       setAnimateIn(false);
       requestAnimationFrame(() => {
         requestAnimationFrame(() => setAnimateIn(true));
       });
 
-      // Set current date moisture for the header indicator
       const todayStr = getCurrentDate();
-      const todayItem = apiResp.soil_moisture_stack.find(
-        (item) => item.day === todayStr,
+      const todayItem = apiResp.stack.find((item) => item.day === todayStr);
+      const latest = apiResp.stack[apiResp.stack.length - 1];
+      setCurrentDateMoisture(
+        parseFloat(
+          (todayItem?.soil_moisture ?? latest?.soil_moisture ?? apiResp.currentMoisture).toFixed(2),
+        ),
       );
-      if (todayItem)
-        setCurrentDateMoisture(parseFloat(todayItem.soil_moisture.toFixed(2)));
     } catch (err: any) {
-      console.error("Failed to fetch moisture trend data:", err);
       setError(`Unable to load soil moisture trend: ${err?.message || err}`);
     } finally {
       setLoading(false);
@@ -242,7 +146,8 @@ const SoilMoistureTrendCard: React.FC<SoilMoistureTrendCardProps> = ({
   useEffect(() => {
     if (!plotName) return;
     fetchWeeklyTrend();
-  }, [plotName]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plotName, profile?.plots]);
 
   const chartWidth = 1200;
   const chartHeight = 320;
@@ -477,10 +382,24 @@ const SoilMoistureTrendCard: React.FC<SoilMoistureTrendCardProps> = ({
                 </span>
               ) : null}
             </span>
-            {/* <span className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-white/70 px-2 py-1 text-xs font-semibold text-gray-800">
-              <Wind className="h-4 w-4 text-indigo-600" />
-              {(todayPoint?.etMm ?? 0).toFixed(1)} ET
-            </span> */}
+            <span className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-white/70 px-2 py-1 text-xs font-semibold text-gray-800">
+              ET {(todayPoint?.etMm ?? 0).toFixed(1)}
+              <span
+                className={`ml-1 rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                  (todayPoint?.etMm ?? 0) <= 3
+                    ? "bg-green-100 text-green-800"
+                    : (todayPoint?.etMm ?? 0) <= 5.5
+                      ? "bg-orange-100 text-orange-800"
+                      : "bg-red-100 text-red-800"
+                }`}
+              >
+                {(todayPoint?.etMm ?? 0) <= 3
+                  ? "Low"
+                  : (todayPoint?.etMm ?? 0) <= 5.5
+                    ? "Medium"
+                    : "High"}
+              </span>
+            </span>
           </div>
         </div>
 
