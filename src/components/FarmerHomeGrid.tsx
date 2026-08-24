@@ -109,7 +109,7 @@ function FarmerHomeGrid() {
                 <div className="flex-1 min-h-0 rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden">
                   <FieldHealthAnalysis fieldAnalysisData={fieldAnalysisData} compact />
                 </div>
-                <div className="flex-1 min-h-0 rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden">
+                <div className="flex-1 min-h-0 rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-auto">
                   <SoilMoistureCard optimalRange={[40, 60]} compact />
                 </div>
               </div>

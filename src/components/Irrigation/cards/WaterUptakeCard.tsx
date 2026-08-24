@@ -9,8 +9,18 @@ const WaterUptakeCard: React.FC = () => {
   const { appState, getCached, setCached } = useAppContext();
 
   const irrigationSchedule = appState.irrigationScheduleData || [];
-  const todayData = irrigationSchedule.find((day: any) => day.isToday);
-  const waterReqLiters = todayData?.waterRequired ?? 0;
+  const todayData =
+    irrigationSchedule.find((day: any) => day.isToday) ||
+    irrigationSchedule[irrigationSchedule.length - 1];
+  // Prefer today's ETo loss (water needed); fall back to |remain| / volume
+  const waterReqLiters = Math.abs(
+    Number(
+      todayData?.etoLossLiters ??
+        todayData?.waterRequired ??
+        todayData?.waterRemainLiters ??
+        0,
+    ) || 0,
+  );
   const { profile, loading: profileLoading } = useFarmerProfile();
   const storedPlot = typeof window !== 'undefined' ? localStorage.getItem('selectedPlot') : null;
   const plotName = (appState.plotName && appState.plotName.trim())
