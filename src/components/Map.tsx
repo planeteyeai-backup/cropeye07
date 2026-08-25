@@ -14,6 +14,7 @@ import {
   fetchAnalysisTimeline,
   sortedRebinDatesForLayer,
   latestRebinDateAcrossAllLayers,
+  latestRebinDateForLayer,
   type AnalysisTimelineResponse,
 } from "../services/analysisTimeline";
 import {
@@ -724,7 +725,15 @@ const CropEyeMap: React.FC<MapProps> = ({
     [timelinePayload],
   );
 
-  /** Snap once per plot/timeline to global latest rebin date — not on layer tab change (avoids redundant fetches). */
+  /** Latest image date for the selected layer only (Growth / Water / Soil / Pest). */
+  const latestRebinForActiveLayer = useMemo(
+    () =>
+      latestRebinDateForLayer(timelinePayload?.timeline, activeLayer) ||
+      latestRebinOverall,
+    [timelinePayload, activeLayer, latestRebinOverall],
+  );
+
+  /** Snap once per plot/timeline to that plot’s overall latest image date. */
   useEffect(() => {
     if (!selectedPlotName?.trim() || !latestRebinOverall) return;
     const snapKey = `${selectedPlotName}|${latestRebinOverall}`;
@@ -733,18 +742,41 @@ const CropEyeMap: React.FC<MapProps> = ({
     setCurrentEndDate(latestRebinOverall);
   }, [selectedPlotName, latestRebinOverall]);
 
-  /** Share active map imagery date with the green header (FarmerHomeGrid). */
+  /**
+   * When the layer tab changes, use that layer’s latest date from analysis_timeline.
+   * Do not keep another layer’s date (e.g. 23 Aug from Soil) if Growth has a different latest.
+   */
   useEffect(() => {
+    if (!selectedPlotName?.trim() || !latestRebinForActiveLayer) return;
+    if (!mapRebinDates.length) return;
+    if (mapRebinDates.includes(currentEndDate)) return;
+    setCurrentEndDate(latestRebinForActiveLayer);
+  }, [
+    activeLayer,
+    selectedPlotName,
+    latestRebinForActiveLayer,
+    mapRebinDates,
+    currentEndDate,
+  ]);
+
+  /** Share active layer’s map imagery date with the green header (FarmerHomeGrid). */
+  useEffect(() => {
+    const layerLatest = latestRebinForActiveLayer || null;
+    const viewing =
+      currentEndDate && mapRebinDates.includes(currentEndDate)
+        ? currentEndDate
+        : layerLatest;
     setAppState((prev) => ({
       ...prev,
-      mapImageDate: currentEndDate || null,
-      mapLatestImageDate: latestRebinOverall || null,
+      mapImageDate: viewing || null,
+      mapLatestImageDate: layerLatest,
       mapImageLayer: activeLayer,
       mapImagePlot: selectedPlotName || null,
     }));
   }, [
     currentEndDate,
-    latestRebinOverall,
+    latestRebinForActiveLayer,
+    mapRebinDates,
     activeLayer,
     selectedPlotName,
     setAppState,
@@ -2439,6 +2471,12 @@ const CropEyeMap: React.FC<MapProps> = ({
                     setActiveLayer(layer);
                     setLayerChangeKey((k) => k + 1);
                     setPlotFitNonce((n) => n + 1);
+                    // Snap ribbon/header to this layer’s latest analysis_timeline date.
+                    const layerLatest = latestRebinDateForLayer(
+                      timelinePayload?.timeline,
+                      layer,
+                    );
+                    if (layerLatest) setCurrentEndDate(layerLatest);
                   }}
                   className={activeLayer === layer ? "active" : ""}
                   disabled={loading}

@@ -54,14 +54,15 @@ export const Header: React.FC<HeaderFarmProps> = () => {
 
   const mapImageNote = useMemo(() => {
     if (!mapImageDate) return null;
+    // Only show "Latest map image" when the viewed date equals this layer’s timeline latest.
     if (isLatestMapImage) {
       return `Latest map image: ${mapImageDate}`;
     }
     if (mapLatestImageDate) {
-      return `Map image: ${mapImageDate} · Latest: ${mapLatestImageDate}`;
+      return `Map image: ${mapImageDate} · Latest (${mapImageLayer || "layer"}): ${mapLatestImageDate}`;
     }
     return `Map image: ${mapImageDate}`;
-  }, [mapImageDate, mapLatestImageDate, isLatestMapImage]);
+  }, [mapImageDate, mapLatestImageDate, isLatestMapImage, mapImageLayer]);
 
   return (
     <header className="bg-green-800 py-2.5 shadow-md">
