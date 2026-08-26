@@ -1,8 +1,15 @@
 import React, { useEffect, useState } from "react";
-import { Download, Info, Satellite } from "lucide-react";
+import { Download, Info, Satellite, FlaskConical, Leaf, Beaker } from "lucide-react";
 import { useAppContext } from "../context/AppContext";
 import { useFarmerProfile } from "../hooks/useFarmerProfile";
 import { RefreshCw } from "lucide-react";
+import {
+  fetchMittisenseRecommendation,
+  fetchMittisenseSoilAnalysis,
+  mittisenseNutrientNumeric,
+  type MittisenseRecommendation,
+  type MittisenseSoilAnalysis,
+} from "../utils/mittisenseNpkApi";
 
 interface NutrientData {
   name: string;
@@ -12,6 +19,8 @@ interface NutrientData {
   optimalRange: string;
   level: "very-low" | "low" | "medium" | "optimal" | "very-high" | "unknown";
   percentage: number;
+  /** Optional apply-line shown inside this card (e.g. K + MOP headline). */
+  applyHeadline?: string;
 }
 
 interface SoilAnalysisProps {
@@ -74,18 +83,48 @@ interface ApiSoilData {
   soilK?: number;
 }
 
+/** Fixed pH used under Recommendation (Humic Acid / Lime stage). */
+const RECOMMENDATION_PH = 6.8;
+
+const SOIL_CACHE_TTL_MS = 30 * 60 * 1000;
+
+/**
+ * Shared per-URL promises so two mounted SoilAnalysis panels (dashboard grid +
+ * detail page) reuse one request instead of hitting main-cropeye twice.
+ */
+const soilRequestsInFlight = new Map<string, Promise<Response>>();
+
+function dedupedSoilFetch(url: string, init: RequestInit): Promise<Response> {
+  const existing = soilRequestsInFlight.get(url);
+  if (existing) return existing.then((response) => response.clone());
+
+  const pending = fetch(url, init).finally(() => {
+    soilRequestsInFlight.delete(url);
+  });
+
+  soilRequestsInFlight.set(url, pending);
+  return pending.then((response) => response.clone());
+}
+
 const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
   plotName,
   phValue,
   phStatistics,
   compact = false,
 }) => {
-  const { appState, setAppState, setCached, selectedPlotName } = useAppContext();
+  const { appState, setAppState, getCached, setCached, selectedPlotName } =
+    useAppContext();
   const { profile, loading: profileLoading } = useFarmerProfile();
   const soilData = appState.soilData || null;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [npkUnavailable, setNpkUnavailable] = useState(false);
+  const [reportTab, setReportTab] = useState<"recommendation" | "analysis" | "chemical">("analysis");
+  const [showDetailCards, setShowDetailCards] = useState(true);
+  const [mittiRec, setMittiRec] = useState<MittisenseRecommendation | null>(null);
+  const [mittiSoil, setMittiSoil] = useState<MittisenseSoilAnalysis | null>(null);
+  const [mittiLoading, setMittiLoading] = useState(false);
+  const [mittiError, setMittiError] = useState<string | null>(null);
   // Use global selectedPlotName if available, otherwise fall back to prop
   const activePlotName = selectedPlotName || plotName;
   const [currentPlotName, setCurrentPlotName] = useState<string | null>(
@@ -129,17 +168,16 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
       return;
     }
 
-    // Check cache
     const cacheKey = `soilData_${currentPlotName}`;
-    // Comment out these lines to disable cache for testing
-    // if (cached) {
-    //   setAppState((prev: any) => ({
-    //     ...prev,
-    //     soilData: cached,
-    //   }));
-    //   setLoading(false);
-    //   return;
-    // }
+    const cached = getCached(cacheKey, SOIL_CACHE_TTL_MS);
+    if (cached) {
+      setAppState((prev: any) => ({
+        ...prev,
+        soilData: cached,
+      }));
+      setLoading(false);
+      return;
+    }
 
     const fetchSoilData = async (retryCount = 0) => {
       if (!currentPlotName || currentPlotName.trim() === "") {
@@ -161,78 +199,30 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
       setNpkUnavailable(false);
 
       try {
-        // NPK / analyze-npk: calendar today only — not Sentinel/image end_date.
+        // analyze-npk: pH / CEC / other soil stats (N/P/K come from mittisense soil-analysis)
         const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
         const currentDate = new Date(Date.now() - tzOffsetMs)
           .toISOString()
           .slice(0, 10);
 
-        // required-n: soil N/P/K — show ONLY when this API returns 200 (Mandya often 500).
-        const soilNPKUrl = `https://main-cropeye.up.railway.app/required-n/${encodeURIComponent(
-          currentPlotName
-        )}?end_date=${currentDate}`;
-
-        let soilNPKData: {
-          soilN?: number;
-          soilP?: number;
-          soilK?: number;
-        } | null = null;
-        let requiredNFailed = false;
-        try {
-          const npkController = new AbortController();
-          const npkTimeoutId = setTimeout(() => npkController.abort(), 15000);
-
-          const soilNPKResponse = await fetch(soilNPKUrl, {
-            method: "POST",
-            headers: {
-              Accept: "application/json",
-            },
-            signal: npkController.signal,
-          });
-
-          clearTimeout(npkTimeoutId);
-
-          if (soilNPKResponse.ok) {
-            const json = await soilNPKResponse.json();
-            if (
-              json?.soilN !== undefined &&
-              json?.soilP !== undefined &&
-              json?.soilK !== undefined
-            ) {
-              soilNPKData = json;
-            } else {
-              requiredNFailed = true;
-            }
-          } else {
-            requiredNFailed = true;
-            console.warn(
-              `required-n ${soilNPKResponse.status} for ${currentPlotName} @ ${currentDate} — soil NPK will not be shown`,
-            );
-          }
-        } catch (soilNPKError: any) {
-          requiredNFailed = true;
-          console.warn("required-n failed — soil NPK will not be shown", soilNPKError);
-        }
-
-        // analyze-npk: pH / CEC / other soil stats (separate from soil NPK cards)
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 30000);
-
         const apiUrl = `https://main-cropeye.up.railway.app/analyze-npk/${encodeURIComponent(
           currentPlotName
         )}?end_date=${currentDate}&days_back=7`;
 
-        const response = await fetch(apiUrl, {
+        const analyzeController = new AbortController();
+        const analyzeTimeoutId = setTimeout(() => analyzeController.abort(), 30000);
+
+        const response = await dedupedSoilFetch(apiUrl, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Accept: "application/json",
           },
           mode: "cors",
-          signal: controller.signal,
+          signal: analyzeController.signal,
         });
 
-        clearTimeout(timeoutId);
+        clearTimeout(analyzeTimeoutId);
 
         if (!response.ok) {
           const errorText = await response.text();
@@ -251,7 +241,7 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
           const fertilizerRequire = npkAnalysis.fertilizer_require_perAcre;
           const finalDisplayedDose = npkAnalysis.final_displayed_dose;
 
-          // Do NOT map estimated uptake into soil N/P/K — those come only from required-n.
+          // Soil N/P/K for cards come from mittisense soil-analysis (not required-n / uptake).
           soilDataToSet = {
             recommended_nitrogen: recommendedDose?.N || 0,
             recommended_phosphorus: recommendedDose?.P || 0,
@@ -324,25 +314,12 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
           };
         }
 
-        // Soil N/P/K cards: only when required-n returned a real payload (no zeros/fallback).
-        if (soilNPKData) {
-          soilDataToSet = {
-            ...soilDataToSet,
-            soilN: soilNPKData.soilN,
-            soilP: soilNPKData.soilP,
-            soilK: soilNPKData.soilK,
-          };
-        }
-
         if (soilDataToSet) {
           setAppState((prev: any) => ({
             ...prev,
             soilData: soilDataToSet,
           }));
           setCached(cacheKey, soilDataToSet);
-          if (requiredNFailed) {
-            setNpkUnavailable(true);
-          }
         } else {
           throw new Error(
             "Unexpected API response structure. Could not find soil statistics."
@@ -392,6 +369,49 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
 
     fetchSoilData();
   }, [currentPlotName]);
+
+  // Mittisense: recommendation (Recommendation + In-chemical) + soil-analysis (Soil Analysis tab)
+  useEffect(() => {
+    if (!currentPlotName || currentPlotName.trim() === "") {
+      setMittiRec(null);
+      setMittiSoil(null);
+      setMittiError(null);
+      return;
+    }
+
+    let cancelled = false;
+    const load = async () => {
+      setMittiLoading(true);
+      setMittiError(null);
+      try {
+        const [rec, soil] = await Promise.all([
+          fetchMittisenseRecommendation(currentPlotName, profile?.plots ?? null),
+          fetchMittisenseSoilAnalysis(currentPlotName, profile?.plots ?? null),
+        ]);
+        if (cancelled) return;
+        setMittiRec(rec);
+        setMittiSoil(soil);
+        // Soil Analysis N/P/K come from mittisense soil-analysis only
+        setNpkUnavailable(!soil || (soil.N == null && soil.P == null && soil.K == null));
+        if (!rec && !soil) {
+          setMittiError("Mittisense data is not available for this plot.");
+        }
+      } catch (err: any) {
+        if (cancelled) return;
+        setMittiRec(null);
+        setMittiSoil(null);
+        setNpkUnavailable(true);
+        setMittiError(err?.message || "Failed to load mittisense data.");
+      } finally {
+        if (!cancelled) setMittiLoading(false);
+      }
+    };
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentPlotName, profile?.plots]);
 
   function getPHLevel(
     pHValue: number | null
@@ -548,52 +568,41 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
       ? phStatistics.phh2o_0_5cm_mean_mean
       : null;
 
+  // Soil Analysis tab N/P/K: mittisense soil-analysis only (required-n removed)
+  const analysisNDisplay = mittiSoil?.N ?? null;
+  const analysisPDisplay = mittiSoil?.P ?? null;
+  const analysisKDisplay = mittiSoil?.K ?? null;
+  const analysisNNum = mittisenseNutrientNumeric(mittiSoil?.N);
+  const analysisPNum = mittisenseNutrientNumeric(mittiSoil?.P);
+  const analysisKNum = mittisenseNutrientNumeric(mittiSoil?.K);
+
   const metrics: NutrientData[] = [
     {
       name: "Nitrogen",
       symbol: "N",
-      // Only from required-n (soilN). No fallback to uptake / zeros.
-      value: soilData?.soilN ?? null,
+      value: analysisNDisplay,
       unit: "Kg/acre",
       optimalRange: "50 - 150",
-      level: getNitrogenLevel(soilData?.soilN ?? null),
-      percentage: calculatePercentage(
-        soilData?.soilN ?? null,
-        50,
-        150,
-        10,
-        200
-      ),
+      level: getNitrogenLevel(analysisNNum),
+      percentage: calculatePercentage(analysisNNum, 50, 150, 10, 200),
     },
     {
       name: "Phosphorus",
       symbol: "P",
-      value: soilData?.soilP ?? null,
+      value: analysisPDisplay,
       unit: "Kg/acre",
       optimalRange: "25 - 75",
-      level: getPhosphorusLevel(soilData?.soilP ?? null),
-      percentage: calculatePercentage(
-        soilData?.soilP ?? null,
-        25,
-        75,
-        5,
-        100
-      ),
+      level: getPhosphorusLevel(analysisPNum),
+      percentage: calculatePercentage(analysisPNum, 25, 75, 5, 100),
     },
     {
       name: "Potassium",
       symbol: "K",
-      value: soilData?.soilK ?? null,
+      value: analysisKDisplay,
       unit: "Kg/acre",
       optimalRange: "20 - 100",
-      level: getPotassiumLevel(soilData?.soilK ?? null),
-      percentage: calculatePercentage(
-        soilData?.soilK ?? null,
-        20,
-        100,
-        5,
-        150
-      ),
+      level: getPotassiumLevel(analysisKNum),
+      percentage: calculatePercentage(analysisKNum, 20, 100, 5, 150),
     },
     {
       name: "Soil pH",
@@ -696,43 +705,377 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
         1.5,
         3.5,
         0.5,
-        4.0
+        4.0,
       ),
     },
   ];
 
-  const getLevelColor = (level: string): string => {
+  // ── Recommendation (N / P / K cards) ─────────────────────────────────────
+  // Parse products from API headline. Map each product onto N/P/K cards:
+  //   DAP → N + P | MOP → K | SSP → P | FYM → N only | 19:19:19 → N
+  //   35:00:52 (N+K) → K | Urea → N
+  // Card value = product qty from headline (NOT API N/P/K nutrient totals).
+  // If inchemical_N/P/K is 0 → that Recommendation card stays empty.
+  const mittiHeadlineText =
+    (mittiRec?.headline && String(mittiRec.headline).trim()) ||
+    (mittiRec?.note && String(mittiRec.note).trim()) ||
+    "";
+
+  type RecProduct = { product: string; kg: number };
+
+  const parseHeadlineProducts = (text: string): RecProduct[] => {
+    if (!text) return [];
+    const out: RecProduct[] = [];
+    const re = /(\d+(?:\.\d+)?)\s*kg\s+([A-Za-z0-9:]+)/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) {
+      const kg = Number(m[1]);
+      const product = String(m[2]).trim();
+      if (!product || !Number.isFinite(kg) || kg <= 0) continue;
+      out.push({ product, kg });
+    }
+    return out;
+  };
+
+  const recommendationProducts: RecProduct[] = (() => {
+    const fromHeadline = parseHeadlineProducts(mittiHeadlineText);
+    if (fromHeadline.length) return fromHeadline;
+
+    const doses = mittiRec?.product_doses ?? [];
+    const fromDoses = doses
+      .filter((d) => d.kg > 0 && String(d.product ?? "").trim())
+      .map((d) => ({
+        product: String(d.product).trim(),
+        kg: d.kg,
+      }));
+    if (fromDoses.length) return fromDoses;
+
+    const fields: Array<[string, number | undefined]> = [
+      ["Urea", mittiRec?.urea_kg],
+      ["DAP", mittiRec?.dap_kg],
+      ["FYM", mittiRec?.fym_kg],
+      ["SSP", mittiRec?.ssp_kg],
+      ["MOP", mittiRec?.mop_kg],
+      ["19:19:19", mittiRec?.fert_191919_kg],
+      ["35:00:52", undefined],
+      ["13:00:45", mittiRec?.fert_130045_kg],
+    ];
+    return fields
+      .filter(([, kg]) => kg != null && kg > 0)
+      .map(([product, kg]) => ({ product, kg: kg as number }));
+  })();
+
+  /** Which Recommendation N/P/K cards a headline product belongs on. */
+  const cardsForHeadlineProduct = (product: string): Array<"N" | "P" | "K"> => {
+    const p = product.trim().toLowerCase();
+    if (/urea/.test(p)) return ["N"];
+    if (/dap/.test(p)) return ["N", "P"];
+    if (/ssp|super\s*phos/.test(p)) return ["P"];
+    if (/mop|potash/.test(p)) return ["K"];
+    if (/fym/.test(p)) return ["N"];
+    if (/19\s*:\s*19\s*:\s*19/.test(p)) return ["N"];
+    // N+K complex → K card only (e.g. 35:00:52, 13:00:45)
+    if (/35\s*:\s*00\s*:\s*52|13\s*:\s*00\s*:\s*45/.test(p)) return ["K"];
+    return [];
+  };
+
+  const formatHeadlineApply = (row: RecProduct): string => {
+    if (/fym/i.test(row.product)) {
+      const tons = Number((row.kg / 1000).toFixed(2));
+      return `Apply ${tons} tons/acre FYM`;
+    }
+    return `Apply ${row.kg} kg ${row.product}`;
+  };
+
+  type RecSlot = {
+    /** Headline product qty for the card (not NPK nutrient). */
+    value: number | null;
+    unit: string;
+    applyLines: string[];
+    /** Product labels for card title (e.g. Urea) — not Nitrogen/P/K when product exists. */
+    productNames: string[];
+  };
+
+  const recommendationSlots: Record<"N" | "P" | "K", RecSlot> = {
+    N: { value: null, unit: "kg", applyLines: [], productNames: [] },
+    P: { value: null, unit: "kg", applyLines: [], productNames: [] },
+    K: { value: null, unit: "kg", applyLines: [], productNames: [] },
+  };
+
+  for (const row of recommendationProducts) {
+    const targets = cardsForHeadlineProduct(row.product);
+    if (!targets.length) continue;
+    const apply = formatHeadlineApply(row);
+    const isFym = /fym/i.test(row.product);
+    const displayValue = isFym ? Number((row.kg / 1000).toFixed(2)) : row.kg;
+    const displayUnit = isFym ? "tons/acre" : "kg";
+    const productLabel = String(row.product).trim();
+    for (const symbol of targets) {
+      const slot = recommendationSlots[symbol];
+      // First headline product that lands on this card sets the shown qty + title
+      if (slot.value == null) {
+        slot.value = displayValue;
+        slot.unit = displayUnit;
+      }
+      if (productLabel && !slot.productNames.includes(productLabel)) {
+        slot.productNames.push(productLabel);
+      }
+      if (!slot.applyLines.includes(apply)) slot.applyLines.push(apply);
+    }
+  }
+
+  const inChemicalN = mittiRec?.inchemical_N ?? 0;
+  const inChemicalP = mittiRec?.inchemical_P ?? 0;
+  const inChemicalK = mittiRec?.inchemical_K ?? 0;
+
+  const nutrientFallbackName = (symbol: "N" | "P" | "K") =>
+    symbol === "N" ? "Nitrogen" : symbol === "P" ? "Phosphorus" : "Potassium";
+
+  /** Card title = product (Urea/MOP/…) when present; else Nitrogen/P/K. */
+  const recommendationCardName = (
+    symbol: "N" | "P" | "K",
+    products: string[],
+  ): string => {
+    if (products.length) return products.join(" · ");
+    return nutrientFallbackName(symbol);
+  };
+
+  const recommendationMetrics: NutrientData[] = (["N", "P", "K"] as const).map(
+    (symbol) => {
+      const inChem =
+        symbol === "N" ? inChemicalN : symbol === "P" ? inChemicalP : inChemicalK;
+      const slot = recommendationSlots[symbol];
+      const name = recommendationCardName(symbol, slot.productNames);
+
+      // Gate: if In-chemical nutrient is 0 → nothing on Recommendation card
+      if (!(inChem > 0)) {
+        return {
+          name: nutrientFallbackName(symbol),
+          symbol,
+          value: null,
+          unit: "",
+          optimalRange: "",
+          level: "unknown" as const,
+          percentage: 0,
+          applyHeadline: undefined,
+        };
+      }
+
+      if (slot.value == null || !slot.applyLines.length) {
+        return {
+          name: nutrientFallbackName(symbol),
+          symbol,
+          value: null,
+          unit: "",
+          optimalRange: "",
+          level: "unknown" as const,
+          percentage: 0,
+          applyHeadline: undefined,
+        };
+      }
+
+      return {
+        name,
+        symbol,
+        value: slot.value,
+        unit: slot.unit,
+        optimalRange: "",
+        level: "optimal" as const,
+        percentage: 0,
+        applyHeadline: slot.applyLines.join(" | "),
+      };
+    },
+  );
+
+  // Soil Analysis tab: reuse Recommendation apply lines (first product per nutrient)
+  const applyHeadlineBySymbol = (
+    symbol: "N" | "P" | "K",
+  ): string | undefined => {
+    const card = recommendationMetrics.find((m) => m.symbol === symbol);
+    return card?.applyHeadline;
+  };
+
+  // In-chemical: N / P / K from inchemical_* only (not product cards).
+  // Card title = product (Urea/MOP/…) when available; else Nitrogen/P/K.
+  // Apply under a card only when that nutrient’s product is in the advisory.
+  // Fill remaining slots with soil metrics to keep a full 9-card grid.
+  const chemicalProductLabel = (symbol: "N" | "P" | "K"): string | undefined => {
+    if (!mittiRec) return undefined;
+    if (symbol === "N") {
+      const ureaKg = mittiRec.urea_kg ?? 0;
+      if (ureaKg > 0 || (mittiRec.products ?? []).some((p) => /urea/i.test(String(p)))) {
+        return "Urea";
+      }
+      if (recommendationSlots.N.productNames.length) {
+        return recommendationSlots.N.productNames[0];
+      }
+      return undefined;
+    }
+    if (symbol === "P") {
+      if (recommendationSlots.P.productNames.length) {
+        return recommendationSlots.P.productNames[0];
+      }
+      const dapKg = mittiRec.dap_kg ?? 0;
+      const sspKg = mittiRec.ssp_kg ?? 0;
+      if (dapKg > 0 || (mittiRec.products ?? []).some((p) => /dap/i.test(String(p)))) {
+        return "DAP";
+      }
+      if (sspKg > 0 || (mittiRec.products ?? []).some((p) => /ssp/i.test(String(p)))) {
+        return "SSP";
+      }
+      return undefined;
+    }
+    const mopKg = mittiRec.mop_kg ?? 0;
+    if (mopKg > 0 || (mittiRec.products ?? []).some((p) => /mop/i.test(String(p)))) {
+      return "MOP";
+    }
+    if (recommendationSlots.K.productNames.length) {
+      return recommendationSlots.K.productNames[0];
+    }
+    return undefined;
+  };
+
+  const chemicalNpkApply = (symbol: "N" | "P" | "K"): string | undefined => {
+    if (!mittiRec) return undefined;
+    // No Apply under P on In-chemical
+    if (symbol === "P") return undefined;
+    if (symbol === "N") {
+      const ureaKg = mittiRec.urea_kg ?? 0;
+      if (ureaKg > 0 || (mittiRec.products ?? []).some((p) => /urea/i.test(String(p)))) {
+        return ureaKg > 0 ? `Apply ${ureaKg} kg Urea` : "Apply Urea";
+      }
+      return undefined;
+    }
+    const mopKg = mittiRec.mop_kg ?? 0;
+    if (mopKg > 0 || (mittiRec.products ?? []).some((p) => /mop/i.test(String(p)))) {
+      return mopKg > 0 ? `Apply ${mopKg} kg MOP` : "Apply MOP";
+    }
+    return undefined;
+  };
+
+  const chemicalMetrics: NutrientData[] = (["N", "P", "K"] as const).map(
+    (symbol) => {
+      const value =
+        symbol === "N"
+          ? mittiRec?.inchemical_N ?? 0
+          : symbol === "P"
+            ? mittiRec?.inchemical_P ?? 0
+            : mittiRec?.inchemical_K ?? 0;
+      const levelFn =
+        symbol === "N"
+          ? getNitrogenLevel
+          : symbol === "P"
+            ? getPhosphorusLevel
+            : getPotassiumLevel;
+      const productName = chemicalProductLabel(symbol);
+      return {
+        name: productName || nutrientFallbackName(symbol),
+        symbol,
+        value,
+        unit: "Kg/acre",
+        optimalRange: "",
+        level: levelFn(typeof value === "number" ? value : null),
+        percentage: 0,
+        applyHeadline: chemicalNpkApply(symbol),
+      };
+    },
+  );
+
+  const soilMetricsWithoutNpk = metrics.filter(
+    (metric) => metric.symbol !== "N" && metric.symbol !== "P" && metric.symbol !== "K",
+  );
+  const recommendationSoilMetrics = soilMetricsWithoutNpk.map((metric) => {
+    const base =
+      metric.symbol !== "pH"
+        ? metric
+        : {
+            ...metric,
+            value: RECOMMENDATION_PH,
+            level: getPHLevel(RECOMMENDATION_PH),
+            percentage: calculatePHPercentage(RECOMMENDATION_PH),
+          };
+    return {
+      ...base,
+      optimalRange: "",
+      percentage: 0,
+    };
+  });
+
+  // Soil Analysis N/P/K: keep soil values, put apply headline under matching cards (like Recommendation)
+  const analysisMetrics: NutrientData[] = metrics.map((metric) => {
+    if (metric.symbol === "N" || metric.symbol === "P" || metric.symbol === "K") {
+      return {
+        ...metric,
+        applyHeadline: applyHeadlineBySymbol(metric.symbol),
+      };
+    }
+    return metric;
+  });
+
+  // NPK first; pad with soil metrics up to 9 cards
+  const chemicalCardMetrics = (() => {
+    const chem = chemicalMetrics;
+    if (chem.length >= 9) return chem.slice(0, 9);
+    return [...chem, ...soilMetricsWithoutNpk].slice(0, 9);
+  })();
+  const detailCardMetrics =
+    reportTab === "recommendation"
+      ? [...recommendationMetrics, ...recommendationSoilMetrics].slice(0, 9)
+      : reportTab === "chemical"
+        ? chemicalCardMetrics
+        : analysisMetrics;
+
+  const presentMonthLabel = new Date().toLocaleString("en-GB", {
+    month: "long",
+    year: "numeric",
+  });
+
+  const reportTabs = [
+    { id: "recommendation" as const, label: "Recommendation", icon: Leaf },
+    { id: "analysis" as const, label: "Soil Analysis", icon: Beaker },
+    { id: "chemical" as const, label: "In-chemical", icon: FlaskConical },
+  ];
+
+  const getLevelLabel = (level: string): string => {
     switch (level) {
       case "very-low":
-        return "bg-red-500";
+        return "Very Low";
       case "low":
-        return "bg-orange-400";
+        return "Low";
       case "medium":
-        return "bg-yellow-400";
+        return "Medium";
       case "optimal":
-        return "bg-green-500";
+        return "Optimal";
       case "very-high":
-        return "bg-green-700";
+        return "Very High";
       default:
-        return "bg-gray-400";
+        return "—";
     }
   };
 
-  const getLevelBorderColor = (level: string): string => {
-    switch (level) {
-      case "very-low":
-        return "border-red-200";
-      case "low":
-        return "border-orange-200";
-      case "medium":
-        return "border-yellow-200";
-      case "optimal":
-        return "border-green-200";
-      case "very-high":
-        return "border-green-300";
-      default:
-        return "border-gray-200";
+  const formatMetricValue = (metric: NutrientData): string => {
+    if (metric.value === null) return "—";
+    if (typeof metric.value === "number") {
+      if (
+        (reportTab === "recommendation" || reportTab === "chemical") &&
+        Number.isInteger(metric.value)
+      ) {
+        return String(metric.value);
+      }
+      // FYM tons / fractional kg — keep up to 2 decimals, trim trailing zeros
+      const fixed = metric.value.toFixed(2).replace(/\.?0+$/, "");
+      return fixed || "0";
     }
+    return String(metric.value);
+  };
+
+  const getMetricTooltip = (metric: NutrientData): string => {
+    const valueText = formatMetricValue(metric);
+    const unit = metric.unit?.trim() ? ` ${metric.unit.trim()}` : "";
+    if (reportTab === "recommendation" || !metric.optimalRange) {
+      return `${metric.name} (${metric.symbol}): ${valueText}${unit} · ${getLevelLabel(metric.level)}`;
+    }
+    return `${metric.name} (${metric.symbol}): ${valueText}${unit} · ${getLevelLabel(metric.level)} · Optimal: ${metric.optimalRange}`;
   };
 
   const hasLoadedReport =
@@ -740,33 +1083,89 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
 
   return (
     <div className="w-full max-w-full min-w-0">
-      <div className="rounded-2xl border border-gray-200/80 bg-white shadow-sm overflow-hidden">
-        {/* Header — full width, aligned like reference */}
-        <div className={`flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 bg-white ${compact ? "px-3 py-2" : "px-4 py-3 sm:px-5 sm:py-4"}`}>
+      <div className="overflow-hidden rounded-3xl border border-emerald-900/10 bg-[linear-gradient(180deg,#f7fbf7_0%,#ffffff_42%,#ffffff_100%)] shadow-[0_12px_40px_-24px_rgba(6,78,59,0.35)]">
+        {/* Header */}
+        <div className={`flex flex-wrap items-center justify-between gap-3 border-b border-emerald-900/5 bg-white/70 backdrop-blur ${compact ? "px-3 py-2.5" : "px-4 py-4 sm:px-6 sm:py-5"}`}>
           <div className="flex flex-wrap items-center gap-2 sm:gap-3 min-w-0">
-            <h2 className={`${compact ? "text-2xl" : "text-base sm:text-2xl"} font-bold text-gray-900 tracking-tight`}>
+            <h2 className={`${compact ? "text-xl" : "text-lg sm:text-2xl"} font-bold tracking-tight text-emerald-950`}>
               Soil Analysis Report
             </h2>
             {plotDisplayName && (
-              <span className="shrink-0 text-xs font-semibold bg-blue-100 text-blue-800 px-2.5 py-1 rounded-md border border-blue-200/60">
-                Plot: {plotDisplayName}
+              <span className="shrink-0 rounded-full bg-emerald-700 px-2.5 py-1 text-[11px] font-semibold text-white">
+                Plot {plotDisplayName}
               </span>
             )}
+            <span className="shrink-0 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200">
+              {presentMonthLabel}
+            </span>
           </div>
-          <button
-            type="button"
-            title="Download report"
-            className={`shrink-0 inline-flex items-center justify-center rounded-lg bg-blue-600 text-white shadow-sm transition hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${compact ? "p-1.5" : "p-2"}`}
-          >
-            <Download className="w-4 h-4" aria-hidden />
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={showDetailCards}
+              aria-label="Show detail cards"
+              onClick={() => setShowDetailCards((v) => !v)}
+              className="inline-flex h-9 items-center gap-2 rounded-full border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-1"
+            >
+              <span
+                className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+                  showDetailCards ? "bg-emerald-600" : "bg-slate-300"
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
+                    showDetailCards ? "left-4" : "left-0.5"
+                  }`}
+                />
+              </span>
+              <span className="leading-none">Detail cards</span>
+            </button>
+            <button
+              type="button"
+              title="Download report"
+              className={`shrink-0 inline-flex items-center justify-center rounded-full bg-emerald-700 text-white shadow-sm transition hover:bg-emerald-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 ${compact ? "p-1.5" : "p-2"}`}
+            >
+              <Download className="w-4 h-4" aria-hidden />
+            </button>
+          </div>
         </div>
 
-        <div className={`${compact ? "px-3 py-3" : "px-4 py-4 sm:px-5 sm:py-5"}`}>
+        <div className={`${compact ? "px-3 py-3" : "px-4 py-4 sm:px-6 sm:py-5"}`}>
+          <div className={`${compact ? "mb-3" : "mb-5"}`}>
+            <div
+              className="grid grid-cols-3 gap-1 rounded-2xl bg-emerald-950/[0.04] p-1"
+              role="tablist"
+              aria-label="Soil report view"
+            >
+              {reportTabs.map((tab) => {
+                const Icon = tab.icon;
+                const active = reportTab === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    onClick={() => setReportTab(tab.id)}
+                    className={`flex min-w-0 cursor-pointer items-center justify-center gap-1.5 rounded-xl px-2 py-2.5 text-center text-[11px] sm:text-sm font-semibold transition ${
+                      active
+                        ? "bg-white text-emerald-800 shadow-sm ring-1 ring-emerald-900/10"
+                        : "bg-transparent text-slate-700 hover:bg-white/70 hover:text-emerald-800"
+                    }`}
+                  >
+                    <Icon className={`${compact ? "h-3.5 w-3.5" : "h-4 w-4"} shrink-0`} />
+                    <span className="truncate">{tab.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           {loading && (
-            <div className="flex items-center justify-center gap-2 py-10 text-sm text-gray-600">
-              <RefreshCw className="h-5 w-5 animate-spin text-blue-600" />
-              Loading soil data...
+            <div className="flex flex-col items-center justify-center py-12 text-gray-600">
+              <Satellite className="w-10 h-10 mb-3 text-blue-500 animate-spin" />
+              <p className="text-sm font-medium">Loading soil analysis…</p>
             </div>
           )}
 
@@ -776,11 +1175,12 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
             </div>
           )}
 
-          {npkUnavailable && !error && (
+          {npkUnavailable &&
+            !error &&
+            reportTab === "analysis" && (
             <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-center text-sm text-amber-800">
-              Soil NPK (N/P/K) is not available for this plot from the server.
-              Values are shown only when the API returns data. Other soil metrics
-              below may still be available.
+              Soil NPK (N/P/K) is not available for this plot from mittisense.
+              Other soil metrics below may still be available.
             </div>
           )}
 
@@ -801,141 +1201,92 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
             </div>
           )}
 
-          {currentPlotName && loading && (
-            <div className="flex flex-col items-center justify-center py-12 text-gray-600">
-              <Satellite className="w-10 h-10 mb-3 text-blue-500 animate-spin" />
-              <p className="text-sm font-medium">Loading soil analysis…</p>
-              <p className="mt-2 max-w-sm text-center text-xs text-gray-400">
-                This may take up to 30 seconds.
-              </p>
-            </div>
-          )}
-
           {hasLoadedReport && (
             <div className={`${compact ? "space-y-3" : "space-y-6 sm:space-y-8"}`}>
-              {/* Summary: 9 equal columns — vertical bars + symbol labels */}
-              <div className="w-full overflow-x-auto pb-1 [-webkit-overflow-scrolling:touch]">
-                <div className={`mx-auto ${compact ? "min-w-[520px]" : "min-w-[600px]"} sm:min-w-0 max-w-[90rem]`}>
-                  <div className={`grid grid-cols-9 ${compact ? "gap-1.5" : "gap-1.5 sm:gap-3"}`}>
-                    {metrics.map((metric, idx) => {
-                      const pct = Math.max(8, Math.min(100, metric.percentage));
-                      return (
-                      <div
-                        key={idx}
-                        className={`flex min-h-0 flex-col items-stretch rounded-lg border bg-gray-50/80 ${getLevelBorderColor(
-                          metric.level
-                        )} overflow-hidden`}
-                      >
-                        <div className={`relative mx-auto w-full ${compact ? "max-w-[28px] pt-1" : "max-w-[24px] px-0.5 pt-2 sm:max-w-[50px] sm:px-1"}`}>
-                          <div
-                            className={`relative ${compact ? "h-[64px]" : "h-[100px] sm:h-[120px]"} w-full overflow-hidden rounded-t bg-gray-200/90`}
-                            aria-hidden
-                          >
-                            <div
-                              className={`absolute bottom-0 left-0 right-0 rounded-t ${getLevelColor(
-                                metric.level
-                              )} transition-all duration-300`}
-                              style={{ height: `${pct}%` }}
-                            />
-                          </div>
-                        </div>
-                        <div className={`border-t border-gray-100 bg-white px-0.5 text-center ${compact ? "py-1" : "py-1.5"}`}>
-                          <span className={`${compact ? "text-[9px]" : "text-[10px] sm:text-xs"} font-bold text-gray-800`}>
-                            {metric.symbol}
-                          </span>
-                        </div>
-                      </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
+              {(reportTab === "chemical" || reportTab === "analysis") &&
+                mittiError &&
+                !mittiLoading && (
+                <p className="mb-2 text-center text-xs text-amber-700">{mittiError}</p>
+              )}
 
-              {/* Legend — matches reference (high → low) */}
-              <div className={`flex flex-wrap items-center justify-center ${compact ? "gap-x-3 gap-y-1" : "gap-x-4 gap-y-2 sm:gap-x-6"}`}>
-                <div className="flex items-center gap-1.5">
-                  <span className="h-3 w-3 shrink-0 rounded-sm bg-green-700" />
-                  <span className={`${compact ? "text-[10px]" : "text-xs"} text-gray-600`}>Very High</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="h-3 w-3 shrink-0 rounded-sm bg-green-500" />
-                  <span className={`${compact ? "text-[10px]" : "text-xs"} text-gray-600`}>Optimal</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="h-3 w-3 shrink-0 rounded-sm bg-yellow-400" />
-                  <span className={`${compact ? "text-[10px]" : "text-xs"} text-gray-600`}>Medium</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="h-3 w-3 shrink-0 rounded-sm bg-orange-400" />
-                  <span className={`${compact ? "text-[10px]" : "text-xs"} text-gray-600`}>Low</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="h-3 w-3 shrink-0 rounded-sm bg-red-500" />
-                  <span className={`${compact ? "text-[10px]" : "text-xs"} text-gray-600`}>Very Low</span>
-                </div>
-              </div>
+              {reportTab === "recommendation" && mittiError && !mittiLoading && (
+                <p className="text-center text-xs text-amber-700">{mittiError}</p>
+              )}
 
-              {/* Detail cards — 3×3 grid, centered content */}
-              <div className={`grid grid-cols-1 ${compact ? "gap-2" : "gap-3 sm:gap-4"} sm:grid-cols-2 lg:grid-cols-3`}>
-                {metrics.map((metric, index) => (
+              {showDetailCards && (
+              <div className={`grid grid-cols-1 ${compact ? "gap-3" : "gap-4"} sm:grid-cols-2 lg:grid-cols-3`}>
+                {detailCardMetrics.map((metric, index) => {
+                  const isNpkOrCec =
+                    metric.symbol === "N" ||
+                    metric.symbol === "P" ||
+                    metric.symbol === "K" ||
+                    metric.symbol === "CEC";
+                  const hasApply = Boolean(metric.applyHeadline);
+                  return (
                   <div
-                    key={index}
-                    className={`flex flex-col rounded-xl border bg-white text-center shadow-sm ${getLevelBorderColor(
-                      metric.level
-                    )} overflow-hidden ${compact ? "" : "transition-shadow hover:shadow-md"}`}
+                    key={`${metric.symbol}-${metric.name}-${index}`}
+                    className={`group relative flex min-h-[148px] flex-col rounded-2xl border border-slate-200/90 bg-white p-4 text-center shadow-[0_8px_24px_-18px_rgba(15,23,42,0.35)] sm:min-h-[168px] sm:p-5 ${
+                      hasApply ? "ring-1 ring-emerald-600/15" : ""
+                    } ${
+                      isNpkOrCec ? "overflow-visible" : "overflow-hidden"
+                    } ${compact ? "" : "transition duration-200 hover:-translate-y-0.5 hover:shadow-[0_16px_32px_-20px_rgba(15,23,42,0.4)]"}`}
                   >
-                    <div className="h-1.5 w-full shrink-0 bg-gray-200">
-                      <div
-                        className={`h-full ${getLevelColor(metric.level)}`}
-                        style={{
-                          width: `${Math.max(4, Math.min(100, metric.percentage))}%`,
-                        }}
-                      />
+                    {isNpkOrCec && (
+                      <div className="absolute right-3 top-3 z-20">
+                        <button
+                          type="button"
+                          className="peer inline-flex rounded-full p-1 text-slate-300 hover:bg-slate-50 hover:text-emerald-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                          aria-label={getMetricTooltip(metric)}
+                        >
+                          <Info className="h-3.5 w-3.5" />
+                        </button>
+                        <div
+                          role="tooltip"
+                          className="pointer-events-none absolute right-0 top-full z-50 mt-1.5 w-max max-w-[220px] rounded-xl bg-slate-900 px-3 py-2 text-left text-xs text-white opacity-0 shadow-xl transition-opacity peer-hover:opacity-100 peer-focus:opacity-100"
+                        >
+                          <p className="font-semibold">{metric.name}</p>
+                          <p className="mt-1 text-slate-300">{getMetricTooltip(metric)}</p>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="mb-3 flex items-center justify-center">
+                      <span className="inline-flex h-8 min-w-8 items-center justify-center rounded-full bg-emerald-50 px-2.5 text-xs font-bold tracking-wide text-emerald-800 ring-1 ring-emerald-700/10">
+                        {metric.symbol}
+                      </span>
                     </div>
-                    <div
-                      className={`flex flex-1 flex-col items-center justify-between ${
-                        compact ? "gap-1 px-2 py-1.5" : "gap-2 px-3 py-3 sm:px-4 sm:py-4"
-                      }`}
-                    >
-                      <div>
-                        <h3 className={`${compact ? "text-[16px]" : "text-sm"} font-semibold text-gray-900`}>
-                          {metric.name}
-                        </h3>
-                        <p className={`${compact ? "text-[14px]" : "text-xs"} text-gray-500`}>({metric.symbol})</p>
-                      </div>
-                      <div className="w-full">
-                        {metric.value === null ? (
-                          <p className={`${compact ? "text-[20px]" : "text-xl"} font-bold text-gray-400`}>N/A</p>
-                        ) : (
-                          <>
-                            <p
-                              className={`${
-                                compact ? "text-[18px]" : "text-xl sm:text-2xl"
-                              } font-bold tabular-nums text-gray-900 leading-tight`}
-                            >
-                              {typeof metric.value === "number"
-                                ? metric.value.toFixed(2)
-                                : metric.value}
-                            </p>
-                            {metric.unit ? (
-                              <p className={`${compact ? "mt-0 text-[14px]" : "mt-0.5 text-xs"} font-medium text-gray-500`}>
-                                {metric.unit.trim()}
-                              </p>
-                            ) : null}
-                          </>
-                        )}
-                      </div>
+
+                    <p className={`${compact ? "text-[13px]" : "text-sm"} font-medium text-slate-500`}>
+                      {metric.name}
+                    </p>
+
+                    <div className="mt-2 flex flex-1 flex-col items-center justify-center">
                       <p
-                        className={`w-full rounded-md bg-gray-100 px-2 ${
-                          compact ? "py-0.5 text-[13px]" : "py-1.5 text-[11px]"
-                        } font-medium text-gray-600 leading-tight`}
+                        className={`${
+                          compact ? "text-[28px]" : "text-[32px] sm:text-[36px]"
+                        } font-bold leading-none tracking-tight text-emerald-950 tabular-nums`}
                       >
-                        Range: {metric.optimalRange}
+                        {formatMetricValue(metric)}
                       </p>
+                      {metric.unit?.trim() ? (
+                        <p className="mt-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                          {metric.unit.trim()}
+                        </p>
+                      ) : null}
                     </div>
+
+                    {hasApply ? (
+                      <div className="mt-4 w-full cursor-default rounded-xl bg-emerald-700 px-3 py-2.5 text-sm font-semibold text-white shadow-sm">
+                        {metric.applyHeadline}
+                      </div>
+                    ) : (
+                      <div className="mt-4 h-8" aria-hidden />
+                    )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
+              )}
             </div>
           )}
         </div>

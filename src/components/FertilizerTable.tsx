@@ -1,9 +1,15 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { useFarmerProfile } from "../hooks/useFarmerProfile";
 import { useAppContext } from "../context/AppContext";
+import { getUserData, PROGRESS_LOCAL_STORAGE_PREFIX } from "../utils/auth";
 import budData from "./bud.json";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
+import {
+  buildFertilizerScheduleFromMittisense,
+  fetchMittisenseRecommendation,
+  type FertilizerScheduleMittisense,
+} from "../utils/mittisenseNpkApi";
 
 interface FertilizerEntry {
   date: string;
@@ -20,6 +26,17 @@ interface FertilizerEntry {
   organic_inputs?: string[];
 }
 
+/** One checklist row = nutrient + chemical + organic line for that stage/date. */
+type FertilizerCheckRow = "N" | "P" | "K";
+
+type FertilizerChecklistState = Record<FertilizerCheckRow, boolean>;
+
+const EMPTY_CHECKLIST: FertilizerChecklistState = {
+  N: false,
+  P: false,
+  K: false,
+};
+
 // Plantation type to months mapping
 const PLANTATION_TYPE_MONTHS: Record<string, number> = {
   Suru: 10,
@@ -28,6 +45,119 @@ const PLANTATION_TYPE_MONTHS: Record<string, number> = {
   Ratoon: 9,
 };
 
+function fertilizerChecklistStorageKey(
+  plotKey: string,
+  stage: string,
+  startDate: string,
+  endDate: string,
+): string {
+  const user = getUserData();
+  const uid = user?.id ?? user?.user_id ?? "anon";
+  const safe = (v: string) =>
+    String(v || "none")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, "_")
+      .replace(/[^a-z0-9_\-/]/g, "");
+  return `${PROGRESS_LOCAL_STORAGE_PREFIX}fertilizer_checklist_v1__${uid}__${safe(plotKey)}__${safe(stage)}__${safe(startDate)}__${safe(endDate)}`;
+}
+
+function loadFertilizerChecklist(key: string): FertilizerChecklistState {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return { ...EMPTY_CHECKLIST };
+    const parsed = JSON.parse(raw) as Partial<FertilizerChecklistState>;
+    return {
+      N: Boolean(parsed.N),
+      P: Boolean(parsed.P),
+      K: Boolean(parsed.K),
+    };
+  } catch {
+    return { ...EMPTY_CHECKLIST };
+  }
+}
+
+function parsePlantationDateToLocal(plantationDate: string): Date | null {
+  const raw = String(plantationDate || "").trim();
+  if (!raw) return null;
+
+  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) {
+    const date = new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  const dmy = raw.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/);
+  if (dmy) {
+    const date = new Date(Number(dmy[3]), Number(dmy[2]) - 1, Number(dmy[1]));
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
+}
+
+function addDaysLocal(date: Date, days: number): Date {
+  const next = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function formatDateEnGb(date: Date): string {
+  return date.toLocaleDateString("en-GB");
+}
+
+function parseStageDayRange(days: string | undefined): { min: number; max: number } | null {
+  if (!days) return null;
+  const normalized = String(days).replace(/[–-]/g, "-");
+  const [minRaw, maxRaw] = normalized.split("-").map((part) => parseInt(part.trim(), 10));
+  if (!Number.isFinite(minRaw) || !Number.isFinite(maxRaw)) return null;
+  return { min: minRaw, max: maxRaw };
+}
+
+function saveFertilizerChecklist(
+  key: string,
+  state: FertilizerChecklistState,
+): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(state));
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
+/** Clickable status: Pending until checked → Done (inputs applied for stage/date). */
+const FertilizerRowStatus: React.FC<{
+  done: boolean;
+  onToggle: () => void;
+  label: string;
+  title: string;
+}> = ({ done, onToggle, label, title }) => (
+  <label
+    className="inline-flex flex-col items-center gap-1.5 cursor-pointer select-none"
+    title={title}
+  >
+    <input
+      type="checkbox"
+      checked={done}
+      onChange={onToggle}
+      className="h-5 w-5 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500 cursor-pointer"
+      aria-label={label}
+    />
+    <span
+      className={[
+        "rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+        done
+          ? "bg-emerald-100 text-emerald-700"
+          : "bg-amber-100 text-amber-700",
+      ].join(" ")}
+    >
+      {done ? "Done" : "Pending"}
+    </span>
+  </label>
+);
+
 const FertilizerTable: React.FC = () => {
   const [data, setData] = useState<FertilizerEntry[]>([]);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -35,6 +165,8 @@ const FertilizerTable: React.FC = () => {
   const [monthsCompleted, setMonthsCompleted] = useState<number | null>(null);
   const [noFertilizerRequired, setNoFertilizerRequired] =
     useState<boolean>(false);
+  const [checklist, setChecklist] =
+    useState<FertilizerChecklistState>(EMPTY_CHECKLIST);
   const tableRef = useRef<HTMLDivElement>(null);
   const {
     profile,
@@ -42,6 +174,61 @@ const FertilizerTable: React.FC = () => {
     error: profileError,
   } = useFarmerProfile();
   const { selectedPlotName, setAppState } = useAppContext();
+  const [mittiSchedule, setMittiSchedule] =
+    useState<FertilizerScheduleMittisense | null>(null);
+
+  const scheduleKey = useMemo(() => {
+    if (!data.length) return null;
+    const stage = data[0].stage || "stage";
+    const startDate = data[0].date || "";
+    const endDate = data[data.length - 1]?.date || startDate;
+    const plot = selectedPlotName || "no-plot";
+    return fertilizerChecklistStorageKey(plot, stage, startDate, endDate);
+  }, [data, selectedPlotName]);
+
+  useEffect(() => {
+    if (!scheduleKey) {
+      setChecklist({ ...EMPTY_CHECKLIST });
+      return;
+    }
+    setChecklist(loadFertilizerChecklist(scheduleKey));
+  }, [scheduleKey]);
+
+  // Mittisense recommendation → Fertilizer Schedule (same headline map as Soil Recommendation)
+  useEffect(() => {
+    const plotKey = selectedPlotName?.trim();
+    if (!plotKey) {
+      setMittiSchedule(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const rec = await fetchMittisenseRecommendation(
+          plotKey,
+          profile?.plots ?? null,
+        );
+        if (cancelled) return;
+        setMittiSchedule(buildFertilizerScheduleFromMittisense(rec));
+      } catch {
+        if (!cancelled) setMittiSchedule(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPlotName, profile?.plots]);
+
+  const toggleChecklistRow = (row: FertilizerCheckRow) => {
+    if (!scheduleKey) return;
+    setChecklist((prev) => {
+      const next = { ...prev, [row]: !prev[row] };
+      saveFertilizerChecklist(scheduleKey, next);
+      return next;
+    });
+  };
+
+  const allInputsDone = checklist.N && checklist.P && checklist.K;
 
   // Helper function to calculate months since plantation
   const calculateMonthsSincePlantation = (plantationDate: string): number => {
@@ -213,27 +400,31 @@ const FertilizerTable: React.FC = () => {
     plantationDate: string,
     fertilizerSchedule: any
   ): FertilizerEntry[] => {
+    const plantation = parsePlantationDateToLocal(plantationDate);
     const daysSincePlantation = calculateDaysSincePlantation(plantationDate);
+    const currentStage = getCurrentStage(
+      daysSincePlantation,
+      fertilizerSchedule.stages
+    );
+    const stageRange = parseStageDayRange(currentStage?.days);
+
+    // Date column = this plot's current stage window from plantation date
+    // (not calendar today+7). Updating plantation date on plot A only changes A.
+    const startDate =
+      plantation && stageRange
+        ? addDaysLocal(plantation, stageRange.min)
+        : addDaysLocal(new Date(), 0);
+    const endDate =
+      plantation && stageRange
+        ? addDaysLocal(plantation, stageRange.max)
+        : addDaysLocal(new Date(), 6);
 
     const sevenDaysData: FertilizerEntry[] = [];
-    const currentDate = new Date();
-
     for (let i = 0; i < 7; i++) {
-      const targetDate = new Date(currentDate);
-      targetDate.setDate(currentDate.getDate() + i);
-
-      // Calculate days from plantation for this specific day
-      const targetDays = daysSincePlantation + i;
-
-      const currentStage = getCurrentStage(
-        targetDays,
-        fertilizerSchedule.stages
-      );
-
       sevenDaysData.push({
-        date: targetDate.toLocaleDateString("en-GB"),
+        date: formatDateEnGb(i === 0 ? startDate : i === 6 ? endDate : startDate),
         stage: currentStage.stage,
-        days: `${targetDays}`,
+        days: currentStage.days || `${daysSincePlantation}`,
         N_kg_acre: currentStage.N_kg_acre,
         P_kg_acre: currentStage.P_kg_acre,
         K_kg_acre: currentStage.K_kg_acre,
@@ -811,9 +1002,17 @@ const FertilizerTable: React.FC = () => {
             <div ref={tableRef} className="overflow-x-auto flex-1 min-h-[350px] flex flex-col">
               <div className="mb-3 flex-shrink-0">
                 <h3 className="text-lg font-semibold text-gray-700 mb-2">
-                  Next 7 Days Fertilizer Schedule
+                  {/* Next 7 Days Fertilizer Schedule */}
                 </h3>
-                {/* <p className="text-sm text-gray-600">Showing first and last day (same values for all 7 days)</p> */}
+                {allInputsDone && (
+                  <p className="text-sm font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2">
+                    All inputs for{" "}
+                    <span className="font-semibold">{data[0].stage}</span> (
+                    {data[0].date}
+                    {data.length > 1 ? ` – ${data[data.length - 1].date}` : ""})
+                    are marked done — nutrients, chemical, and organic inputs are workable.
+                  </p>
+                )}
               </div>
               <div className="flex-1 flex flex-col">
                 <table className="fertilizer-schedule-table min-w-full h-full bg-green-400 border border-gray-200 border-collapse table-fixed">
@@ -834,12 +1033,15 @@ const FertilizerTable: React.FC = () => {
                     <th className="px-4 py-4 text-left text-lg font-semibold text-gray-800 border-b border-gray-300">
                       Organic Inputs(kg/acre)
                     </th>
+                    <th className="px-3 py-4 text-center text-lg font-semibold text-gray-800 border-b border-gray-300 w-28">
+                      Status
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {/* First row - show actual data */}
+                  {/* First row - N / Urea / FYM (mittisense when available) */}
                   {data.length > 0 && (
-                    <tr className="bg-white">
+                    <tr className={checklist.N ? "bg-emerald-50" : "bg-amber-50/40"}>
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
                         {data[0].date}
                       </td>
@@ -847,32 +1049,69 @@ const FertilizerTable: React.FC = () => {
                         {/* {data[0].stage} */}
                       </td>
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
-                        N : {data[0].N_kg_acre}
+                        N :{" "}
+                        {mittiSchedule
+                          ? mittiSchedule.chemicalN.length || mittiSchedule.organicN.length
+                            ? mittiSchedule.N.toFixed(2)
+                            : "—"
+                          : data[0].N_kg_acre}
                       </td>
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
-                        {data[0].fertilizers && (
-                          <div className="text-lg font-normal">
-                            <div>
-                              Urea: {data[0].fertilizers?.Urea_N_kg_per_acre} kg
-                            </div>
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
-                        {data[0].organic_inputs && (
-                          <div className="text-lg font-normal">
-                            {data[0].organic_inputs?.map((input, index) => (
-                              <div key={index}>{index === 0 ? input : ""}</div>
+                        {mittiSchedule ? (
+                          mittiSchedule.chemicalN.length > 0 ? (
+                          <div className="text-lg font-normal space-y-0.5">
+                            {mittiSchedule.chemicalN.map((line) => (
+                              <div key={line}>{line}</div>
                             ))}
                           </div>
+                          ) : (
+                            <span className="text-gray-400">—</span>
+                          )
+                        ) : (
+                          data[0].fertilizers && (
+                            <div className="text-lg font-normal">
+                              <div>
+                                Urea: {data[0].fertilizers?.Urea_N_kg_per_acre} kg
+                              </div>
+                            </div>
+                          )
                         )}
+                      </td>
+                      <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
+                        {mittiSchedule ? (
+                          mittiSchedule.organicN.length > 0 ? (
+                          <div className="text-lg font-normal space-y-0.5">
+                            {mittiSchedule.organicN.map((line) => (
+                              <div key={line}>{line}</div>
+                            ))}
+                          </div>
+                          ) : (
+                            <span className="text-gray-400">—</span>
+                          )
+                        ) : (
+                          data[0].organic_inputs && (
+                            <div className="text-lg font-normal">
+                              {data[0].organic_inputs?.map((input, index) => (
+                                <div key={index}>{index === 0 ? input : ""}</div>
+                              ))}
+                            </div>
+                          )
+                        )}
+                      </td>
+                      <td className="px-3 py-6 text-center border-b align-middle">
+                        <FertilizerRowStatus
+                          done={checklist.N}
+                          onToggle={() => toggleChecklistRow("N")}
+                          label="Mark N row inputs done"
+                          title="Mark N + Urea + organic (this row) as applied for this stage/date"
+                        />
                       </td>
                     </tr>
                   )}
 
-                  {/* Middle rows - show dots if there are more than 2 days */}
+                  {/* Middle row - P / DAP (or SSP) when mittisense */}
                   {data.length > 2 && (
-                    <tr className="bg-gray-50">
+                    <tr className={checklist.P ? "bg-emerald-50" : "bg-amber-50/40"}>
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
                         To
                       </td>
@@ -880,60 +1119,136 @@ const FertilizerTable: React.FC = () => {
                         {data[0].stage}
                       </td>
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
-                        P : {data[0].P_kg_acre}
+                        P :{" "}
+                        {mittiSchedule
+                          ? mittiSchedule.chemicalP.length
+                            ? mittiSchedule.P.toFixed(2)
+                            : "—"
+                          : data[0].P_kg_acre}
                       </td>
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
-                        <div className="text-lg font-normal">
-                          SuperPhosphate:{" "}
-                          {data[0].fertilizers?.SuperPhosphate_P_kg_per_acre} kg
-                        </div>
-                      </td>
-                      <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
-                        {data[0].organic_inputs && (
-                          <div className="text-lg font-normal">
-                            {data[0].organic_inputs?.map((input, index) => (
-                              <div key={index}>{index === 1 ? input : ""}</div>
+                        {mittiSchedule ? (
+                          mittiSchedule.chemicalP.length > 0 ? (
+                          <div className="text-lg font-normal space-y-0.5">
+                            {mittiSchedule.chemicalP.map((line) => (
+                              <div key={line}>{line}</div>
                             ))}
                           </div>
+                          ) : (
+                            <span className="text-gray-400">—</span>
+                          )
+                        ) : (
+                          <div className="text-lg font-normal">
+                            SuperPhosphate:{" "}
+                            {data[0].fertilizers?.SuperPhosphate_P_kg_per_acre} kg
+                          </div>
                         )}
+                      </td>
+                      <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
+                        {mittiSchedule ? (
+                          mittiSchedule.organicP.length > 0 ? (
+                            <div className="text-lg font-normal space-y-0.5">
+                              {mittiSchedule.organicP.map((line) => (
+                                <div key={line}>{line}</div>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-gray-400">—</span>
+                          )
+                        ) : (
+                          data[0].organic_inputs && (
+                            <div className="text-lg font-normal">
+                              {data[0].organic_inputs?.map((input, index) => (
+                                <div key={index}>{index === 1 ? input : ""}</div>
+                              ))}
+                            </div>
+                          )
+                        )}
+                      </td>
+                      <td className="px-3 py-6 text-center border-b align-middle">
+                        <FertilizerRowStatus
+                          done={checklist.P}
+                          onToggle={() => toggleChecklistRow("P")}
+                          label="Mark P row inputs done"
+                          title="Mark P + chemical + organic (this row) as applied for this stage/date"
+                        />
                       </td>
                     </tr>
                   )}
 
-                  {/* Last row - show actual data if there are more than 1 day */}
+                  {/* Last row - K / MOP + apply headline in same space */}
                   {data.length > 1 && (
-                    <tr className="bg-white">
+                    <tr className={checklist.K ? "bg-emerald-50" : "bg-amber-50/40"}>
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
                         {data[data.length - 1].date}
                       </td>
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
                         {/* {data[data.length - 1].stage} */}
                       </td>
-                      <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
-                        K : {data[0].K_kg_acre}
+                      <td className="px-4 py-6 text-lg font-normal text-gray-900 border-b align-top">
+                        <div>
+                          K :{" "}
+                          {mittiSchedule
+                            ? mittiSchedule.chemicalK.length
+                              ? mittiSchedule.K.toFixed(2)
+                              : "—"
+                            : data[0].K_kg_acre}
+                        </div>
                       </td>
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
-                        {data[data.length - 1].fertilizers && (
-                          <div className="text-lg font-normal">
-                            <div>
-                              Muriate of Potash:{" "}
-                              {
-                                data[data.length - 1].fertilizers
-                                  ?.Potash_K_kg_per_acre
-                              }{" "}
-                              kg
-                            </div>
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
-                        {data[0].organic_inputs && (
-                          <div className="text-lg font-normal">
-                            {data[0].organic_inputs?.map((input, index) => (
-                              <div key={index}>{index === 2 ? input : ""}</div>
+                        {mittiSchedule ? (
+                          mittiSchedule.chemicalK.length > 0 ? (
+                          <div className="text-lg font-normal space-y-0.5">
+                            {mittiSchedule.chemicalK.map((line) => (
+                              <div key={line}>{line}</div>
                             ))}
                           </div>
+                          ) : (
+                            <span className="text-gray-400">—</span>
+                          )
+                        ) : (
+                          data[data.length - 1].fertilizers && (
+                            <div className="text-lg font-normal">
+                              <div>
+                                Muriate of Potash:{" "}
+                                {
+                                  data[data.length - 1].fertilizers
+                                    ?.Potash_K_kg_per_acre
+                                }{" "}
+                                kg
+                              </div>
+                            </div>
+                          )
                         )}
+                      </td>
+                      <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
+                        {mittiSchedule ? (
+                          mittiSchedule.organicK.length > 0 ? (
+                            <div className="text-lg font-normal space-y-0.5">
+                              {mittiSchedule.organicK.map((line) => (
+                                <div key={line}>{line}</div>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-gray-400">—</span>
+                          )
+                        ) : (
+                          data[0].organic_inputs && (
+                            <div className="text-lg font-normal">
+                              {data[0].organic_inputs?.map((input, index) => (
+                                <div key={index}>{index === 2 ? input : ""}</div>
+                              ))}
+                            </div>
+                          )
+                        )}
+                      </td>
+                      <td className="px-3 py-6 text-center border-b align-middle">
+                        <FertilizerRowStatus
+                          done={checklist.K}
+                          onToggle={() => toggleChecklistRow("K")}
+                          label="Mark K row inputs done"
+                          title="Mark K + MOP + organic (this row) as applied for this stage/date"
+                        />
                       </td>
                     </tr>
                   )}
