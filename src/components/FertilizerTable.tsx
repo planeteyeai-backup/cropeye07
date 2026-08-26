@@ -1004,15 +1004,6 @@ const FertilizerTable: React.FC = () => {
                 <h3 className="text-lg font-semibold text-gray-700 mb-2">
                   {/* Next 7 Days Fertilizer Schedule */}
                 </h3>
-                {allInputsDone && (
-                  <p className="text-sm font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2">
-                    All inputs for{" "}
-                    <span className="font-semibold">{data[0].stage}</span> (
-                    {data[0].date}
-                    {data.length > 1 ? ` – ${data[data.length - 1].date}` : ""})
-                    are marked done — nutrients, chemical, and organic inputs are workable.
-                  </p>
-                )}
               </div>
               <div className="flex-1 flex flex-col">
                 <table className="fertilizer-schedule-table min-w-full h-full bg-green-400 border border-gray-200 border-collapse table-fixed">
@@ -1033,15 +1024,12 @@ const FertilizerTable: React.FC = () => {
                     <th className="px-4 py-4 text-left text-lg font-semibold text-gray-800 border-b border-gray-300">
                       Organic Inputs(kg/acre)
                     </th>
-                    <th className="px-3 py-4 text-center text-lg font-semibold text-gray-800 border-b border-gray-300 w-28">
-                      Status
-                    </th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
                   {/* First row - N / Urea / FYM (mittisense when available) */}
                   {data.length > 0 && (
-                    <tr className={checklist.N ? "bg-emerald-50" : "bg-amber-50/40"}>
+                    <tr className="bg-white">
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
                         {data[0].date}
                       </td>
@@ -1098,20 +1086,12 @@ const FertilizerTable: React.FC = () => {
                           )
                         )}
                       </td>
-                      <td className="px-3 py-6 text-center border-b align-middle">
-                        <FertilizerRowStatus
-                          done={checklist.N}
-                          onToggle={() => toggleChecklistRow("N")}
-                          label="Mark N row inputs done"
-                          title="Mark N + Urea + organic (this row) as applied for this stage/date"
-                        />
-                      </td>
                     </tr>
                   )}
 
                   {/* Middle row - P / DAP (or SSP) when mittisense */}
                   {data.length > 2 && (
-                    <tr className={checklist.P ? "bg-emerald-50" : "bg-amber-50/40"}>
+                    <tr className="bg-white">
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
                         To
                       </td>
@@ -1165,20 +1145,12 @@ const FertilizerTable: React.FC = () => {
                           )
                         )}
                       </td>
-                      <td className="px-3 py-6 text-center border-b align-middle">
-                        <FertilizerRowStatus
-                          done={checklist.P}
-                          onToggle={() => toggleChecklistRow("P")}
-                          label="Mark P row inputs done"
-                          title="Mark P + chemical + organic (this row) as applied for this stage/date"
-                        />
-                      </td>
                     </tr>
                   )}
 
-                  {/* Last row - K / MOP + apply headline in same space */}
+                  {/* Last row - K / MOP */}
                   {data.length > 1 && (
-                    <tr className={checklist.K ? "bg-emerald-50" : "bg-amber-50/40"}>
+                    <tr className="bg-white">
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
                         {data[data.length - 1].date}
                       </td>
@@ -1241,14 +1213,6 @@ const FertilizerTable: React.FC = () => {
                             </div>
                           )
                         )}
-                      </td>
-                      <td className="px-3 py-6 text-center border-b align-middle">
-                        <FertilizerRowStatus
-                          done={checklist.K}
-                          onToggle={() => toggleChecklistRow("K")}
-                          label="Mark K row inputs done"
-                          title="Mark K + MOP + organic (this row) as applied for this stage/date"
-                        />
                       </td>
                     </tr>
                   )}
