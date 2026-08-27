@@ -119,7 +119,7 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [npkUnavailable, setNpkUnavailable] = useState(false);
-  const [reportTab, setReportTab] = useState<"recommendation" | "analysis" | "chemical">("analysis");
+  const [reportTab, setReportTab] = useState<"recommendation" | "analysis" | "chemical">("recommendation");
   const [showDetailCards, setShowDetailCards] = useState(true);
   const [mittiRec, setMittiRec] = useState<MittisenseRecommendation | null>(null);
   const [mittiSoil, setMittiSoil] = useState<MittisenseSoilAnalysis | null>(null);
@@ -581,7 +581,7 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
       name: "Nitrogen",
       symbol: "N",
       value: analysisNDisplay,
-      unit: "Kg/acre",
+      unit: "kg/acre",
       optimalRange: "50 - 150",
       level: getNitrogenLevel(analysisNNum),
       percentage: calculatePercentage(analysisNNum, 50, 150, 10, 200),
@@ -590,7 +590,7 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
       name: "Phosphorus",
       symbol: "P",
       value: analysisPDisplay,
-      unit: "Kg/acre",
+      unit: "kg/acre",
       optimalRange: "25 - 75",
       level: getPhosphorusLevel(analysisPNum),
       percentage: calculatePercentage(analysisPNum, 25, 75, 5, 100),
@@ -599,13 +599,14 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
       name: "Potassium",
       symbol: "K",
       value: analysisKDisplay,
-      unit: "Kg/acre",
+      unit: "kg/acre",
       optimalRange: "20 - 100",
       level: getPotassiumLevel(analysisKNum),
       percentage: calculatePercentage(analysisKNum, 20, 100, 5, 150),
     },
     {
-      name: "Soil pH",
+      // Round badge only: pH
+      name: "",
       symbol: "pH",
       value: getSoilValue(soilData?.ph, soilData?.phh2o) ?? currentPhValue,
       unit: "",
@@ -618,10 +619,11 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
       ),
     },
     {
-      name: "CEC",
+      // Round badge only: CEC
+      name: "",
       symbol: "CEC",
       value: getSoilValue(soilData?.cec, soilData?.cation_exchange_capacity),
-      unit: "C mol/Kg",
+      unit: "c mol/kg",
       optimalRange: "15 - 40",
       level: getCECLevel(
         getSoilValue(soilData?.cec, soilData?.cation_exchange_capacity)
@@ -635,13 +637,14 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
       ),
     },
     {
-      name: "Organic Carbon",
-      symbol: "OC",
+      // Round badge: Organic Carbon (not OC)
+      name: "",
+      symbol: "Organic Carbon",
       value: getSoilValue(
         soilData?.organic_carbon_stock,
         soilData?.ocs_0_30cm_mean
       ),
-      unit: " T/acre",
+      unit: "t/acre",
       optimalRange: "2 - 15",
       level: getOrganicCarbonStockLevel(
         getSoilValue(soilData?.organic_carbon_stock, soilData?.ocs_0_30cm_mean)
@@ -655,10 +658,11 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
       ),
     },
     {
-      name: "Bulk Density",
-      symbol: "BD",
+      // Round badge: Bulk Density (not BD)
+      name: "",
+      symbol: "Bulk Density",
       value: getSoilValue(soilData?.bulk_density, soilData?.bdod_0_5cm_mean),
-      unit: "Kg/m\u00B3",
+      unit: "kg/m\u00B3",
       optimalRange: "0.50 - 1.60",
       level: getBulkDensityLevel(
         getSoilValue(soilData?.bulk_density, soilData?.bdod_0_5cm_mean)
@@ -672,7 +676,8 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
       ),
     },
     {
-      name: "Fe",
+      // Round badge only: Fe
+      name: "",
       symbol: "Fe",
       value: getSoilValue(soilData?.fe_ppm_estimated, soilData?.fe),
       unit: "ppm",
@@ -689,8 +694,9 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
       ),
     },
     {
-      name: "Soil Organic Carbon",
-      symbol: "SOC",
+      // Round badge: Soil Organic Carbon (full form)
+      name: "",
+      symbol: "Soil Organic Carbon",
       value: getSoilValue(
         soilData?.soil_organic_carbon,
         soilData?.soc_0_5cm_mean
@@ -895,64 +901,9 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
     return card?.applyHeadline;
   };
 
-  // In-chemical: N / P / K from inchemical_* only (not product cards).
-  // Card title = product (Urea/MOP/…) when available; else Nitrogen/P/K.
-  // Apply under a card only when that nutrient’s product is in the advisory.
+  // In-chemical: N / P / K names + inchemical_* values only.
+  // Product names (Urea/MOP/SSP/FYM) and Apply lines stay on Recommendation only.
   // Fill remaining slots with soil metrics to keep a full 9-card grid.
-  const chemicalProductLabel = (symbol: "N" | "P" | "K"): string | undefined => {
-    if (!mittiRec) return undefined;
-    if (symbol === "N") {
-      const ureaKg = mittiRec.urea_kg ?? 0;
-      if (ureaKg > 0 || (mittiRec.products ?? []).some((p) => /urea/i.test(String(p)))) {
-        return "Urea";
-      }
-      if (recommendationSlots.N.productNames.length) {
-        return recommendationSlots.N.productNames[0];
-      }
-      return undefined;
-    }
-    if (symbol === "P") {
-      if (recommendationSlots.P.productNames.length) {
-        return recommendationSlots.P.productNames[0];
-      }
-      const dapKg = mittiRec.dap_kg ?? 0;
-      const sspKg = mittiRec.ssp_kg ?? 0;
-      if (dapKg > 0 || (mittiRec.products ?? []).some((p) => /dap/i.test(String(p)))) {
-        return "DAP";
-      }
-      if (sspKg > 0 || (mittiRec.products ?? []).some((p) => /ssp/i.test(String(p)))) {
-        return "SSP";
-      }
-      return undefined;
-    }
-    const mopKg = mittiRec.mop_kg ?? 0;
-    if (mopKg > 0 || (mittiRec.products ?? []).some((p) => /mop/i.test(String(p)))) {
-      return "MOP";
-    }
-    if (recommendationSlots.K.productNames.length) {
-      return recommendationSlots.K.productNames[0];
-    }
-    return undefined;
-  };
-
-  const chemicalNpkApply = (symbol: "N" | "P" | "K"): string | undefined => {
-    if (!mittiRec) return undefined;
-    // No Apply under P on In-chemical
-    if (symbol === "P") return undefined;
-    if (symbol === "N") {
-      const ureaKg = mittiRec.urea_kg ?? 0;
-      if (ureaKg > 0 || (mittiRec.products ?? []).some((p) => /urea/i.test(String(p)))) {
-        return ureaKg > 0 ? `Apply ${ureaKg} kg Urea` : "Apply Urea";
-      }
-      return undefined;
-    }
-    const mopKg = mittiRec.mop_kg ?? 0;
-    if (mopKg > 0 || (mittiRec.products ?? []).some((p) => /mop/i.test(String(p)))) {
-      return mopKg > 0 ? `Apply ${mopKg} kg MOP` : "Apply MOP";
-    }
-    return undefined;
-  };
-
   const chemicalMetrics: NutrientData[] = (["N", "P", "K"] as const).map(
     (symbol) => {
       const value =
@@ -967,16 +918,15 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
           : symbol === "P"
             ? getPhosphorusLevel
             : getPotassiumLevel;
-      const productName = chemicalProductLabel(symbol);
       return {
-        name: productName || nutrientFallbackName(symbol),
+        name: nutrientFallbackName(symbol),
         symbol,
         value,
-        unit: "Kg/acre",
+        unit: "kg/acre",
         optimalRange: "",
         level: levelFn(typeof value === "number" ? value : null),
         percentage: 0,
-        applyHeadline: chemicalNpkApply(symbol),
+        applyHeadline: undefined,
       };
     },
   );
@@ -1069,13 +1019,27 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
     return String(metric.value);
   };
 
+  /** Units: lowercase inside curly braces, e.g. {kg/acre} */
+  const formatMetricUnit = (unit: string | undefined): string => {
+    const raw = String(unit ?? "").trim();
+    if (!raw) return "";
+    const lower = raw
+      .toLowerCase()
+      .replace(/^\[|\]$/g, "")
+      .replace(/^\{|\}$/g, "")
+      .trim();
+    return lower ? `{${lower}}` : "";
+  };
+
   const getMetricTooltip = (metric: NutrientData): string => {
     const valueText = formatMetricValue(metric);
-    const unit = metric.unit?.trim() ? ` ${metric.unit.trim()}` : "";
+    const unit = formatMetricUnit(metric.unit);
+    const unitText = unit ? ` ${unit}` : "";
+    const title = metric.name?.trim() || metric.symbol;
     if (reportTab === "recommendation" || !metric.optimalRange) {
-      return `${metric.name} (${metric.symbol}): ${valueText}${unit} · ${getLevelLabel(metric.level)}`;
+      return `${title}: ${valueText}${unitText} · ${getLevelLabel(metric.level)}`;
     }
-    return `${metric.name} (${metric.symbol}): ${valueText}${unit} · ${getLevelLabel(metric.level)} · Optimal: ${metric.optimalRange}`;
+    return `${title}: ${valueText}${unitText} · ${getLevelLabel(metric.level)} · Optimal: ${metric.optimalRange}`;
   };
 
   const hasLoadedReport =
@@ -1251,14 +1215,22 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
                     )}
 
                     <div className="mb-3 flex items-center justify-center">
-                      <span className="inline-flex h-8 min-w-8 items-center justify-center rounded-full bg-emerald-50 px-2.5 text-xs font-bold tracking-wide text-emerald-800 ring-1 ring-emerald-700/10">
+                      <span
+                        className={`inline-flex min-h-8 min-w-8 items-center justify-center rounded-full bg-emerald-50 px-2.5 font-bold text-emerald-800 ring-1 ring-emerald-700/10 ${
+                          metric.symbol.length > 4
+                            ? "max-w-[9.5rem] px-3 py-1.5 text-center text-[10px] leading-tight tracking-normal"
+                            : "text-xs tracking-wide"
+                        }`}
+                      >
                         {metric.symbol}
                       </span>
                     </div>
 
-                    <p className={`${compact ? "text-[13px]" : "text-sm"} font-medium text-slate-500`}>
-                      {metric.name}
-                    </p>
+                    {metric.name?.trim() ? (
+                      <p className={`${compact ? "text-[13px]" : "text-sm"} font-medium text-slate-500`}>
+                        {metric.name}
+                      </p>
+                    ) : null}
 
                     <div className="mt-2 flex flex-1 flex-col items-center justify-center">
                       <p
@@ -1268,9 +1240,9 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
                       >
                         {formatMetricValue(metric)}
                       </p>
-                      {metric.unit?.trim() ? (
-                        <p className="mt-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
-                          {metric.unit.trim()}
+                      {formatMetricUnit(metric.unit) ? (
+                        <p className="mt-1.5 text-[13px] font-medium lowercase tracking-normal text-slate-400 sm:text-sm">
+                          {formatMetricUnit(metric.unit)}
                         </p>
                       ) : null}
                     </div>
