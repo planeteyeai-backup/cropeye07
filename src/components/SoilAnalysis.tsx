@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Download, Info, Satellite, FlaskConical, Leaf, Beaker } from "lucide-react";
+import { Download, Info, Satellite, FlaskConical, Leaf } from "lucide-react";
 import { useAppContext } from "../context/AppContext";
 import { useFarmerProfile } from "../hooks/useFarmerProfile";
 import { RefreshCw } from "lucide-react";
@@ -971,9 +971,7 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
   const detailCardMetrics =
     reportTab === "recommendation"
       ? [...recommendationMetrics, ...recommendationSoilMetrics].slice(0, 9)
-      : reportTab === "chemical"
-        ? chemicalCardMetrics
-        : analysisMetrics;
+      : chemicalCardMetrics;
 
   const presentMonthLabel = new Date().toLocaleString("en-GB", {
     month: "long",
@@ -982,7 +980,6 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
 
   const reportTabs = [
     { id: "recommendation" as const, label: "Recommendation", icon: Leaf },
-    { id: "analysis" as const, label: "Soil Analysis", icon: Beaker },
     { id: "chemical" as const, label: "In-chemical", icon: FlaskConical },
   ];
 
@@ -1098,7 +1095,7 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
         <div className={`${compact ? "px-3 py-3" : "px-4 py-4 sm:px-6 sm:py-5"}`}>
           <div className={`${compact ? "mb-3" : "mb-5"}`}>
             <div
-              className="grid grid-cols-3 gap-1 rounded-2xl bg-emerald-950/[0.04] p-1"
+              className="grid grid-cols-2 gap-1 rounded-2xl bg-emerald-950/[0.04] p-1"
               role="tablist"
               aria-label="Soil report view"
             >
@@ -1141,7 +1138,7 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
 
           {npkUnavailable &&
             !error &&
-            reportTab === "analysis" && (
+            reportTab === "chemical" && (
             <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-center text-sm text-amber-800">
               Soil NPK (N/P/K) is not available for this plot from mittisense.
               Other soil metrics below may still be available.
@@ -1167,7 +1164,7 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
 
           {hasLoadedReport && (
             <div className={`${compact ? "space-y-3" : "space-y-6 sm:space-y-8"}`}>
-              {(reportTab === "chemical" || reportTab === "analysis") &&
+              {(reportTab === "chemical") &&
                 mittiError &&
                 !mittiLoading && (
                 <p className="mb-2 text-center text-xs text-amber-700">{mittiError}</p>
