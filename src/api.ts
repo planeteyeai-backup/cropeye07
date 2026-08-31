@@ -1151,7 +1151,10 @@ export const calculatePolygonArea = (
 // Get farmer profile using the dedicated my-profile endpoint
 let farmerMyProfileInFlight: ReturnType<typeof api.get> | null = null;
 
-export const getFarmerMyProfile = () => {
+export const getFarmerMyProfile = (options?: {
+  force?: boolean;
+  farmId?: number | string;
+}) => {
   // Check if token exists and is valid before making the call
   const token = getAuthToken();
   if (!token || !isValidToken(token)) {
@@ -1164,10 +1167,22 @@ export const getFarmerMyProfile = () => {
     (error as any).isSilent = true; // Mark as silent to prevent console logging
     return Promise.reject(error);
   }
-  if (farmerMyProfileInFlight) {
+  const farmId =
+    options?.farmId != null && String(options.farmId).trim() !== ""
+      ? String(options.farmId).trim()
+      : "";
+  const url = farmId
+    ? `/farms/my-profile/?farm_id=${encodeURIComponent(farmId)}`
+    : "/farms/my-profile/";
+  // After a PATCH, never reuse a GET that started before the save.
+  if (!options?.force && !farmId && farmerMyProfileInFlight) {
     return farmerMyProfileInFlight;
   }
-  farmerMyProfileInFlight = api.get("/farms/my-profile/").finally(() => {
+  const request = api.get(url);
+  if (options?.force || farmId) {
+    return request;
+  }
+  farmerMyProfileInFlight = request.finally(() => {
     farmerMyProfileInFlight = null;
   });
   return farmerMyProfileInFlight;
@@ -1371,151 +1386,262 @@ const postRegisterFarmerMultipart = (formData: FormData) =>
     ],
   });
 
+export type RegisterFarmerIdsPlot = {
+  plot_id: number;
+  farm_id: number;
+  irrigation_id?: number | null;
+  soil_report_id?: number | null;
+  plantation_id?: number | null;
+};
+
+export type RegisterFarmerSummaryRow = {
+  farmer?: { id?: number; username?: string; email?: string };
+  plot?: {
+    id?: number;
+    gat_number?: string;
+    plot_number?: string;
+    village?: string;
+  };
+  farm?: { id?: number; address?: string; plantation_date?: string };
+  irrigation?: { id?: number; irrigation_type_name?: string };
+};
+
+export type RegisterFarmerSuccess = {
+  success?: boolean;
+  message?: string;
+  ids?: {
+    farmer_id?: number;
+    plots?: RegisterFarmerIdsPlot[];
+  };
+  registration_summary?: RegisterFarmerSummaryRow[];
+};
+
+export type ParsedRegisterFarmerResult = {
+  farmerId?: number;
+  plots: Array<{
+    plotId: number;
+    farmId: number;
+    irrigationId?: number | null;
+    gatNumber?: string;
+    plotNumber?: string;
+    village?: string;
+    address?: string;
+    irrigationType?: string;
+  }>;
+  message: string;
+};
+
+function asPositiveId(value: unknown): number | undefined {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+/** Read farmer_id + unique plot/farm ids from the register-farmer success body. */
+export function parseRegisterFarmerSuccess(
+  data: RegisterFarmerSuccess | unknown,
+): ParsedRegisterFarmerResult {
+  const body = (data ?? {}) as RegisterFarmerSuccess;
+  const idRows = Array.isArray(body.ids?.plots) ? body.ids!.plots! : [];
+  const summary = Array.isArray(body.registration_summary)
+    ? body.registration_summary
+    : [];
+
+  const plots = idRows.map((row, index) => {
+    const summaryRow = summary[index];
+    const plotId =
+      asPositiveId(row?.plot_id) ?? asPositiveId(summaryRow?.plot?.id) ?? 0;
+    const farmId =
+      asPositiveId(row?.farm_id) ?? asPositiveId(summaryRow?.farm?.id) ?? 0;
+    return {
+      plotId,
+      farmId,
+      irrigationId:
+        asPositiveId(row?.irrigation_id) ??
+        asPositiveId(summaryRow?.irrigation?.id) ??
+        null,
+      gatNumber: summaryRow?.plot?.gat_number,
+      plotNumber: summaryRow?.plot?.plot_number,
+      village: summaryRow?.plot?.village,
+      address: summaryRow?.farm?.address,
+      irrigationType: summaryRow?.irrigation?.irrigation_type_name,
+    };
+  });
+
+  if (!plots.length && summary.length) {
+    for (const row of summary) {
+      const plotId = asPositiveId(row?.plot?.id);
+      const farmId = asPositiveId(row?.farm?.id);
+      if (!plotId || !farmId) continue;
+      plots.push({
+        plotId,
+        farmId,
+        irrigationId: asPositiveId(row?.irrigation?.id) ?? null,
+        gatNumber: row?.plot?.gat_number,
+        plotNumber: row?.plot?.plot_number,
+        village: row?.plot?.village,
+        address: row?.farm?.address,
+        irrigationType: row?.irrigation?.irrigation_type_name,
+      });
+    }
+  }
+
+  return {
+    farmerId: asPositiveId(body.ids?.farmer_id) ?? asPositiveId(summary[0]?.farmer?.id),
+    plots,
+    message:
+      (typeof body.message === "string" && body.message.trim()) ||
+      "Farmer registration completed successfully",
+  };
+}
+
+function assertRegisterFarmerAuth() {
+  const token = getAuthToken();
+  const userRole = getUserRole();
+
+  if (!token || !isValidToken(token)) {
+    const errorMsg =
+      "Authentication required. Please login as a Field Officer or Admin to register farmers.";
+    const error = new Error(errorMsg);
+    (error as any).response = {
+      status: 401,
+      data: { detail: errorMsg },
+    };
+    (error as any).requiresAuth = true;
+    throw error;
+  }
+
+  const allowedRoles = ["fieldofficer", "manager", "admin", "owner"];
+  if (!userRole || !allowedRoles.includes(userRole.toLowerCase())) {
+    const errorMsg = `Access denied. Only Field Officers, Managers, and Admins can register farmers. Your current role: ${userRole || "unknown"}. Please login with an authorized account.`;
+    const error = new Error(errorMsg);
+    (error as any).response = {
+      status: 403,
+      data: {
+        detail: errorMsg,
+        message: errorMsg,
+      },
+    };
+    (error as any).requiresAuth = true;
+    throw error;
+  }
+}
+
+function rethrowRegisterFarmerAuth(error: any): never {
+  if (
+    error.response?.status === 401 ||
+    error.response?.status === 403 ||
+    error.requiresAuth
+  ) {
+    const errorMsg =
+      error.response?.data?.detail ||
+      error.response?.data?.message ||
+      error.message ||
+      (error.response?.status === 403
+        ? "Access denied. Only Field Officers, Managers, and Admins can register farmers."
+        : "Authentication credentials were not provided. Please login as a Field Officer or Admin to register farmers.");
+
+    const authError = new Error(errorMsg);
+    (authError as any).response = error.response || {
+      status: error.response?.status || 401,
+      data: { detail: errorMsg, message: errorMsg },
+    };
+    (authError as any).requiresAuth = true;
+    throw authError;
+  }
+  throw error;
+}
+
+type RegisterFarmerPlotTriple = {
+  plot: any;
+  farm: any;
+  irrigation: any;
+};
+
 /**
- * Single plot registration: JSON parts as strings + optional file `farm_document`.
- * Backend: farmer, plot, farm, irrigation as JSON strings; FILES["farm_document"] optional.
+ * One POST /api/farms/register-farmer/ for a farmer with 1+ plots.
+ * Multipart: farmer JSON, plots JSON array of {plot, farm, irrigation}.
+ * Single-plot also sends plot/farm/irrigation for older backends.
  */
 export const registerFarmerAllInOne = async (
   structured: {
     farmer: any;
-    plot: any;
-    farm: any;
-    irrigation: any;
+    plot?: any;
+    farm?: any;
+    irrigation?: any;
+    plots?: RegisterFarmerPlotTriple[];
   },
   options?: { farmDocument?: File | null },
 ) => {
   try {
-    const token = getAuthToken();
-    const userRole = getUserRole();
+    assertRegisterFarmerAuth();
 
-    if (!token || !isValidToken(token)) {
-      const errorMsg =
-        "Authentication required. Please login as a Field Officer or Admin to register farmers.";
-      const error = new Error(errorMsg);
-      (error as any).response = {
-        status: 401,
-        data: { detail: errorMsg },
-      };
-      (error as any).requiresAuth = true;
-      throw error;
-    }
+    const plotTriples: RegisterFarmerPlotTriple[] =
+      Array.isArray(structured.plots) && structured.plots.length
+        ? structured.plots
+        : structured.plot && structured.farm && structured.irrigation
+          ? [
+              {
+                plot: structured.plot,
+                farm: structured.farm,
+                irrigation: structured.irrigation,
+              },
+            ]
+          : [];
 
-    const allowedRoles = ["fieldofficer", "manager", "admin", "owner"];
-    if (!userRole || !allowedRoles.includes(userRole.toLowerCase())) {
-      const errorMsg = `Access denied. Only Field Officers, Managers, and Admins can register farmers. Your current role: ${userRole || "unknown"}. Please login with an authorized account.`;
-      const error = new Error(errorMsg);
-      (error as any).response = {
-        status: 403,
-        data: {
-          detail: errorMsg,
-          message: errorMsg,
-        },
-      };
-      (error as any).requiresAuth = true;
-      throw error;
+    if (!plotTriples.length) {
+      throw new Error("At least one plot is required for registration");
     }
 
     const fd = new FormData();
     fd.append("farmer", JSON.stringify(structured.farmer));
-    fd.append("plot", JSON.stringify(structured.plot));
-    fd.append("farm", JSON.stringify(structured.farm));
-    fd.append("irrigation", JSON.stringify(structured.irrigation));
+    fd.append("plots", JSON.stringify(plotTriples));
+    // Backward compatible: one-plot backends still read these keys.
+    if (plotTriples.length === 1) {
+      fd.append("plot", JSON.stringify(plotTriples[0].plot));
+      fd.append("farm", JSON.stringify(plotTriples[0].farm));
+      fd.append("irrigation", JSON.stringify(plotTriples[0].irrigation));
+    }
     const file = options?.farmDocument;
     if (file) {
       fd.append("farm_document", file);
     }
 
-    const response = await postRegisterFarmerMultipart(fd);
-    return response;
+    return await postRegisterFarmerMultipart(fd);
   } catch (error: any) {
-    // Provide better error messages
-    if (
-      error.response?.status === 401 ||
-      error.response?.status === 403 ||
-      error.requiresAuth
-    ) {
-      // If error already has a detailed message, use it; otherwise enhance it
-      const errorMsg =
-        error.response?.data?.detail ||
-        error.response?.data?.message ||
-        error.message ||
-        (error.response?.status === 403
-          ? "Access denied. Only Field Officers, Managers, and Admins can register farmers."
-          : "Authentication credentials were not provided. Please login as a Field Officer or Admin to register farmers.");
-      
-      const authError = new Error(errorMsg);
-      (authError as any).response = error.response || {
-        status: error.response?.status || 401,
-        data: { detail: errorMsg, message: errorMsg },
-      };
-      (authError as any).requiresAuth = true;
-      throw authError;
-    }
-    throw error;
+    rethrowRegisterFarmerAuth(error);
   }
 };
 
 /**
- * Multipart registration per plot (matches POST /api/farms/register-farmer/).
- * Optional `formData.documents`: first file is sent as `farm_document` on the first plot only
- * (backend expects a single file field name `farm_document`).
+ * Register a farmer and every plot in a single POST /api/farms/register-farmer/.
+ * Optional `formData.documents`: first file is sent as `farm_document`.
  */
 export const registerFarmerAllInOneOnly = async (
   formData: any,
   plots: any[],
 ) => {
   try {
-    const token = getAuthToken();
-    const userRole = getUserRole();
-
-    if (!token || !isValidToken(token)) {
-      const errorMsg =
-        "Authentication required. Please login as a Field Officer or Admin to register farmers.";
-      const error = new Error(errorMsg);
-      (error as any).response = {
-        status: 401,
-        data: { detail: errorMsg },
-      };
-      (error as any).requiresAuth = true;
-      throw error;
-    }
-
-    const allowedRoles = ["fieldofficer", "manager", "admin", "owner"];
-    if (!userRole || !allowedRoles.includes(userRole.toLowerCase())) {
-      const errorMsg = `Access denied. Only Field Officers, Managers, and Admins can register farmers. Your current role: ${userRole || "unknown"}. Please login with an authorized account.`;
-      const error = new Error(errorMsg);
-      (error as any).response = {
-        status: 403,
-        data: {
-          detail: errorMsg,
-          message: errorMsg,
-        },
-      };
-      (error as any).requiresAuth = true;
-      throw error;
-    }
+    assertRegisterFarmerAuth();
 
     const docList = formData?.documents as FileList | null | undefined;
     const farmDocument =
       docList && docList.length > 0 ? docList[0] : null;
 
     const allInOneDataArray = convertToAllInOneFormat(formData, plots);
-    const results = [];
-    for (let i = 0; i < allInOneDataArray.length; i++) {
-      const plotPayload = allInOneDataArray[i];
-      const result = await registerFarmerAllInOne(plotPayload, {
-        farmDocument: i === 0 ? farmDocument : null,
-      });
-      results.push(result);
-      if (i < allInOneDataArray.length - 1) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
-    }
-    return results.length === 1 ? results[0] : results;
+    const farmer = allInOneDataArray[0]?.farmer;
+    const plotTriples = allInOneDataArray.map((payload) => ({
+      plot: payload.plot,
+      farm: payload.farm,
+      irrigation: payload.irrigation,
+    }));
+
+    const response = await registerFarmerAllInOne(
+      { farmer, plots: plotTriples },
+      { farmDocument },
+    );
+    return parseRegisterFarmerSuccess(response?.data ?? response);
   } catch (error: any) {
-    // Enhance error messages for 403 and 401 errors
     if (error.response?.status === 403 || error.response?.status === 401 || error.requiresAuth) {
-      // If error doesn't have a detailed message, enhance it
       if (!error.response?.data?.detail && !error.response?.data?.message) {
         const status = error.response?.status || 403;
         const defaultMsg = status === 403
@@ -1533,7 +1659,6 @@ export const registerFarmerAllInOneOnly = async (
       }
     }
     
-    // Only log non-authentication errors to console
     if (
       !error.requiresAuth &&
       error.response?.status !== 401 &&
@@ -1700,7 +1825,7 @@ const convertToAllInOneFormat = (formData: any, plots: any[]) => {
     throw new Error("At least one plot is required for registration");
   }
 
-  // Return array of payloads - one for each plot
+  // One farmer + one {plot, farm, irrigation} triple per plot (single POST).
   return plots.map((plot) => convertSinglePlotToAllInOneFormat(formData, plot));
 };
 
@@ -1798,10 +1923,20 @@ export function isAnalyzeSinglePlotPlantationDateError(err: unknown): boolean {
 // Single-plot agro stats (Manager/Owner/Farmer dashboards)
 export const getSinglePlotAgroStats = async (
   plotId: string | number,
-  config?: { signal?: AbortSignal; timeout?: number },
+  config?: { signal?: AbortSignal; timeout?: number; endDate?: string },
 ) => {
-  const url = `https://events-cropeye.up.railway.app/plots/analyzeSinglePlot?plot_id=${encodePlotIdForEventsUrl(plotId)}`;
-  const response = await eventsApi.get(url, config);
+  const eventsBase =
+    String(import.meta.env.VITE_DEV_EVENTS_API_URL ?? "").trim().replace(/\/$/, "") ||
+    "https://events-cropeye.up.railway.app";
+  const params = new URLSearchParams();
+  params.set("plot_id", formatPlotIdForEventsApi(String(plotId)));
+  const endDate = config?.endDate?.trim().split("T")[0];
+  if (endDate && /^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+    params.set("end_date", endDate);
+  }
+  const { endDate: _omit, ...axiosConfig } = config ?? {};
+  const url = `${eventsBase}/plots/analyzeSinglePlot?${params.toString()}`;
+  const response = await eventsApi.get(url, axiosConfig);
   return response.data;
 };
 
@@ -1839,6 +1974,133 @@ export const getFieldOfficerAgroStats = async (
 
   fieldOfficerAgroStatsInFlight.set(cacheKey, pending);
   return pending;
+};
+
+export type DistrictTotalPlotAreaResponse = {
+  district: string;
+  real_plots_only?: boolean;
+  plot_count: number;
+  excluded_plot_count?: number;
+  total_area_hectares: number;
+  total_area_acres: number;
+  timestamp?: string;
+};
+
+/** Events API district slugs — profile/region labels may use alternate spellings. */
+const DISTRICT_EVENTS_API_ALIASES: Record<string, string> = {
+  kalburagi: "kalburgi",
+  kalaburagi: "kalburgi",
+  gulbarga: "kalburgi",
+  vijapura: "vijaypura",
+  bijapur: "vijaypura",
+  bagalakote: "bagalkot",
+};
+
+const EVENTS_DISTRICT_SLUGS = new Set([
+  "bagalkot",
+  "bagalkote",
+  "kalburgi",
+  "mandya",
+  "vijaypura",
+  "vijayapura",
+  "gulbarga",
+]);
+
+export function normalizeDistrictForEventsApi(district: string): string {
+  const d = district.trim().toLowerCase().replace(/\s+/g, "");
+  if (!d) return "";
+  return DISTRICT_EVENTS_API_ALIASES[d] ?? d;
+}
+
+function slugFromDistrictLabel(label: string): string {
+  const slug = normalizeDistrictForEventsApi(label);
+  if (slug && EVENTS_DISTRICT_SLUGS.has(slug)) return slug;
+
+  const lower = label.toLowerCase();
+  if (/kalbur|gulbarga/.test(lower)) return "kalburgi";
+  if (/bagalk/.test(lower)) return "bagalkot";
+  if (/mandya/.test(lower)) return "mandya";
+  if (/vijay|bijapur/.test(lower)) return "vijaypura";
+  return "";
+}
+
+function majorityDistrictSlug(labels: string[]): string {
+  const counts = new Map<string, number>();
+  for (const label of labels) {
+    const slug = slugFromDistrictLabel(label);
+    if (!slug) continue;
+    counts.set(slug, (counts.get(slug) ?? 0) + 1);
+  }
+
+  let best = "";
+  let bestCount = 0;
+  for (const [slug, count] of counts) {
+    if (count > bestCount) {
+      best = slug;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+/** Pick Events district slug for the logged-in manager (not shared region labels). */
+export function resolveManagerDistrictForEventsApi(
+  me: unknown,
+  fieldOfficers?: unknown[],
+): string {
+  const profileDistricts: string[] = [];
+  const officerDistricts: string[] = [];
+  const push = (value: unknown, bucket: string[]) => {
+    const text = String(value ?? "").trim();
+    if (text) bucket.push(text);
+  };
+
+  const profile = me as Record<string, unknown> | null | undefined;
+  push(profile?.district, profileDistricts);
+  const address = profile?.address as Record<string, unknown> | undefined;
+  if (address) push(address.district, profileDistricts);
+
+  for (const officer of fieldOfficers ?? []) {
+    const fo = officer as Record<string, unknown>;
+    push(fo.district, officerDistricts);
+    const foAddress = fo.address as Record<string, unknown> | undefined;
+    if (foAddress) push(foAddress.district, officerDistricts);
+  }
+
+  for (const label of profileDistricts) {
+    const slug = slugFromDistrictLabel(label);
+    if (slug) return slug;
+  }
+
+  const fromOfficers = majorityDistrictSlug(officerDistricts);
+  if (fromOfficers) return fromOfficers;
+
+  // Last resort only — region is often shared and must not override district.
+  const regionSlug = slugFromDistrictLabel(String(profile?.region ?? ""));
+  return regionSlug;
+}
+
+/** GET /districts/{district}/total-plot-area — district-wide plot acreage. */
+export const fetchDistrictTotalPlotArea = async (
+  district: string,
+): Promise<DistrictTotalPlotAreaResponse> => {
+  const d = normalizeDistrictForEventsApi(district);
+  if (!d) {
+    throw new Error("District is required");
+  }
+
+  const cacheKey = `district_total_plot_area_${d}`;
+  const cached = getCache(cacheKey, AGRO_STATS_CACHE_TTL_MS);
+  if (cached != null) {
+    return cached as DistrictTotalPlotAreaResponse;
+  }
+
+  const url = `/districts/${encodeURIComponent(d)}/total-plot-area`;
+  const response = await eventsApi.get<DistrictTotalPlotAreaResponse>(url);
+  if (response.data != null) {
+    setCache(cacheKey, response.data);
+  }
+  return response.data;
 };
 
 /** Field officers assigned to the current manager (or owner).
@@ -2346,17 +2608,16 @@ export const patchFarmMyProfile = (data: {
   address?: string;
   area_size?: string;
   plantation_date?: string;
+  soil_type_id?: number | null;
+  crop_type_id?: number;
   crop_variety?: string;
   variety_type?: string;
   variety_subtype?: string;
-  plantation_type?: string;
-  planting_method?: string;
   spacing_a?: string;
   spacing_b?: string;
   row_spacing?: string;
   plant_spacing?: string;
   irrigation_type?: string;
-  irrigation_type_name?: string;
   flow_rate_liter_per_hour?: string;
   emitters_per_plant?: number;
   motor_horsepower?: number;
