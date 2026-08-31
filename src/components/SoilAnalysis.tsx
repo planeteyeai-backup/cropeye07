@@ -644,7 +644,7 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
         soilData?.organic_carbon_stock,
         soilData?.ocs_0_30cm_mean
       ),
-      unit: "t/acre",
+      unit: "T/acre",
       optimalRange: "2 - 15",
       level: getOrganicCarbonStockLevel(
         getSoilValue(soilData?.organic_carbon_stock, soilData?.ocs_0_30cm_mean)
@@ -803,9 +803,9 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
   };
 
   const recommendationSlots: Record<"N" | "P" | "K", RecSlot> = {
-    N: { value: null, unit: "kg", applyLines: [], productNames: [] },
-    P: { value: null, unit: "kg", applyLines: [], productNames: [] },
-    K: { value: null, unit: "kg", applyLines: [], productNames: [] },
+    N: { value: null, unit: "kg/acre", applyLines: [], productNames: [] },
+    P: { value: null, unit: "kg/acre", applyLines: [], productNames: [] },
+    K: { value: null, unit: "kg/acre", applyLines: [], productNames: [] },
   };
 
   for (const row of recommendationProducts) {
@@ -814,7 +814,7 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
     const apply = formatHeadlineApply(row);
     const isFym = /fym/i.test(row.product);
     const displayValue = isFym ? Number((row.kg / 1000).toFixed(2)) : row.kg;
-    const displayUnit = isFym ? "tons/acre" : "kg";
+    const displayUnit = isFym ? "tons/acre" : "kg/acre";
     const productLabel = String(row.product).trim();
     for (const symbol of targets) {
       const slot = recommendationSlots[symbol];
@@ -884,7 +884,7 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
         name,
         symbol,
         value: slot.value,
-        unit: slot.unit,
+        unit: /fym/i.test(slot.applyLines.join(" ")) ? "tons/acre" : "kg/acre",
         optimalRange: "",
         level: "optimal" as const,
         percentage: 0,
@@ -1016,16 +1016,31 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
     return String(metric.value);
   };
 
-  /** Units: lowercase inside curly braces, e.g. {kg/acre} */
+  /** Units inside curly braces, e.g. {kg/acre}; tonnes use capital T: {T/acre} */
   const formatMetricUnit = (unit: string | undefined): string => {
     const raw = String(unit ?? "").trim();
     if (!raw) return "";
-    const lower = raw
-      .toLowerCase()
+    const cleaned = raw
       .replace(/^\[|\]$/g, "")
       .replace(/^\{|\}$/g, "")
       .trim();
-    return lower ? `{${lower}}` : "";
+    if (!cleaned) return "";
+    if (/^t\/acre$/i.test(cleaned)) return "{T/acre}";
+    return `{${cleaned.toLowerCase()}}`;
+  };
+
+  const getMetricUnitLabel = (metric: NutrientData): string => {
+    const isNpk =
+      metric.symbol === "N" || metric.symbol === "P" || metric.symbol === "K";
+
+    if (reportTab === "recommendation" && isNpk) {
+      if (/fym/i.test(metric.applyHeadline ?? "") || /fym/i.test(metric.name)) {
+        return "{tons/acre}";
+      }
+      return "{kg/acre}";
+    }
+
+    return formatMetricUnit(metric.unit);
   };
 
   const getMetricTooltip = (metric: NutrientData): string => {
@@ -1043,8 +1058,8 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
     Boolean(currentPlotName) && !loading && !error && !profileLoading;
 
   return (
-    <div className="w-full max-w-full min-w-0">
-      <div className="overflow-hidden rounded-3xl border border-emerald-900/10 bg-[linear-gradient(180deg,#f7fbf7_0%,#ffffff_42%,#ffffff_100%)] shadow-[0_12px_40px_-24px_rgba(6,78,59,0.35)]">
+    <div className="w-full h-full flex flex-col max-w-full min-w-0">
+      <div className="flex-1 flex flex-col overflow-hidden rounded-3xl border border-emerald-900/10 bg-[linear-gradient(180deg,#f7fbf7_0%,#ffffff_42%,#ffffff_100%)] shadow-[0_12px_40px_-24px_rgba(6,78,59,0.35)]">
         {/* Header */}
         <div className={`flex flex-wrap items-center justify-between gap-3 border-b border-emerald-900/5 bg-white/70 backdrop-blur ${compact ? "px-3 py-2.5" : "px-4 py-4 sm:px-6 sm:py-5"}`}>
           <div className="flex flex-wrap items-center gap-2 sm:gap-3 min-w-0">
@@ -1092,7 +1107,7 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
           </div>
         </div>
 
-        <div className={`${compact ? "px-3 py-3" : "px-4 py-4 sm:px-6 sm:py-5"}`}>
+        <div className={`flex-1 overflow-y-auto scroll-hide ${compact ? "px-3 py-3" : "px-4 py-4 sm:px-6 sm:py-5"}`}>
           <div className={`${compact ? "mb-3" : "mb-5"}`}>
             <div
               className="grid grid-cols-2 gap-1 rounded-2xl bg-emerald-950/[0.04] p-1"
@@ -1229,17 +1244,17 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
                       </p>
                     ) : null}
 
-                    <div className="mt-2 flex flex-1 flex-col items-center justify-center">
+                    <div className="mt-2 flex flex-1 flex-col items-center justify-center gap-0.5">
                       <p
                         className={`${
                           compact ? "text-[28px]" : "text-[32px] sm:text-[36px]"
-                        } font-bold leading-none tracking-tight text-emerald-950 tabular-nums`}
+                        } shrink-0 font-bold leading-none tracking-tight text-emerald-950 tabular-nums`}
                       >
                         {formatMetricValue(metric)}
                       </p>
-                      {formatMetricUnit(metric.unit) ? (
-                        <p className="mt-1.5 text-[13px] font-medium lowercase tracking-normal text-slate-400 sm:text-sm">
-                          {formatMetricUnit(metric.unit)}
+                      {getMetricUnitLabel(metric) ? (
+                        <p className="shrink-0 text-[13px] font-medium tracking-normal text-slate-400 sm:text-sm">
+                          {getMetricUnitLabel(metric)}
                         </p>
                       ) : null}
                     </div>

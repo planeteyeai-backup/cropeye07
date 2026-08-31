@@ -36,14 +36,26 @@ function toFinite(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** Prefer slash ids — SEF 404s on many underscore forms (`8_1A` vs `8/1A`). */
-function orderSoilMoistureCandidates(candidates: string[]): string[] {
-  return [...candidates].sort((a, b) => {
-    const aSlash = a.includes("/") ? 0 : 1;
-    const bSlash = b.includes("/") ? 0 : 1;
-    if (aSlash !== bSlash) return aSlash - bSlash;
-    return a.length - b.length;
-  });
+/** Prefer the selected/fastapi id as-is; try both slash and underscore forms.
+ *  SEF is inconsistent: some plots only exist as `8/1A`, others only as `142_256`. */
+function orderSoilMoistureCandidates(candidates: string[]):   string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (v: string) => {
+    const s = String(v ?? "").trim();
+    if (!s) return;
+    const key = s.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(s);
+  };
+
+  for (const c of candidates) {
+    push(c);
+    if (c.includes("_")) push(c.replace(/_/g, "/"));
+    if (c.includes("/")) push(c.replace(/\//g, "_"));
+  }
+  return out;
 }
 
 function normalizeStackItem(item: any): SoilMoistureDay | null {
@@ -123,17 +135,15 @@ export function parseSoilMoistureResponse(data: any): SoilMoistureParsed | null 
 
 async function postSoilMoistureOnce(plotName: string): Promise<any> {
   const base = sefBaseUrl();
+  // Prefer body POST first — path forms 404/502 often for the same plot.
   const attempts: Array<{ url: string; body?: string }> = [
-    {
-      url: `${base}/soil-moisture/${encodeURIComponent(plotName)}`,
-      body: JSON.stringify({ plot_name: plotName }),
-    },
     {
       url: `${base}/soil-moisture`,
       body: JSON.stringify({ plot_name: plotName }),
     },
     {
       url: `${base}/soil-moisture/${encodeURIComponent(plotName)}`,
+      body: JSON.stringify({ plot_name: plotName }),
     },
   ];
 
@@ -152,6 +162,7 @@ async function postSoilMoistureOnce(plotName: string): Promise<any> {
       if (!resp.ok) {
         const text = await resp.text().catch(() => "");
         lastErr = new Error(`HTTP ${resp.status}: ${text || resp.statusText}`);
+        // Plot not found → try next URL / plot-name candidate quickly.
         continue;
       }
       return await resp.json();

@@ -4,6 +4,7 @@ import { useAppContext } from "../context/AppContext";
 import FertilizerTable from "./FertilizerTable";
 import { useFarmerProfile } from "../hooks/useFarmerProfile";
 import { useI18nLite, type AppLanguage } from "../i18nLite";
+import { fetchMittisenseRecommendation } from "../utils/mittisenseNpkApi";
 
 interface FertilizerEntry {
   day: number;
@@ -125,42 +126,22 @@ const Fertilizer: React.FC = () => {
     }
 
     try {
-      // NPK uses calendar today only — not Sentinel/image end_date.
-      const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
-      const today = new Date(Date.now() - tzOffsetMs).toISOString().slice(0, 10);
-      const url = `${API_BASE_URL}/required-n/${encodeURIComponent(
-        PLOT_NAME
-      )}?end_date=${today}`;
+      const rec = await fetchMittisenseRecommendation(PLOT_NAME, profile?.plots ?? null);
 
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { 
-          Accept: "application/json",
-          "Content-Type": "application/json"
-        },
-        mode: "cors",
-      });
-
-      if (!res.ok) {
+      if (!rec) {
         throw new Error(
-          `Soil NPK not available for this plot (server ${res.status}). Values are shown only when the API returns data.`,
+          "Soil NPK not available for this plot. Values are shown only when the API returns data.",
         );
       }
 
-      const json = await res.json();
-
-      // Extract NPK data from the new response structure — only show if present.
+      // Extract NPK data from the recommendation response
       if (
-        json.soilN !== undefined && json.soilP !== undefined && json.soilK !== undefined &&
-        json.plantanalysis_n !== undefined && json.plantanalysis_p !== undefined && json.plantanalysis_k !== undefined
+        rec.N !== undefined && rec.P !== undefined && rec.K !== undefined
       ) {
         const npk = {
-          N: json.soilN,
-          P: json.soilP,
-          K: json.soilK,
-          plantanalysis_n: json.plantanalysis_n,
-          plantanalysis_p: json.plantanalysis_p,
-          plantanalysis_k: json.plantanalysis_k,
+          N: rec.N,
+          P: rec.P,
+          K: rec.K,
         };
         setAppState((prev: any) => ({ ...prev, npkData: npk }));
         setCached(cacheKey, npk);
@@ -366,8 +347,13 @@ const Fertilizer: React.FC = () => {
                   {card.short}
                 </span>
               </div>
-              <div className={`text-4xl font-extrabold ${card.textColor}`}>
-                {card.value}
+              <div className="flex flex-col items-center">
+                <div className={`text-4xl font-extrabold ${card.textColor}`}>
+                  {card.value}
+                </div>
+                {card.value !== "Loading..." && card.value !== "No Data" && (
+                  <span className="text-sm text-gray-500 font-medium mt-1">kg/acre</span>
+                )}
               </div>
             </div>
           ))}

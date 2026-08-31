@@ -116,6 +116,16 @@ function parseStageDayRange(days: string | undefined): { min: number; max: numbe
   return { min: minRaw, max: maxRaw };
 }
 
+function getCurrentMonthStartAndEndDates() {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), 1);
+  const end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  return {
+    start: start.toLocaleDateString("en-GB"),
+    end: end.toLocaleDateString("en-GB"),
+  };
+}
+
 function saveFertilizerChecklist(
   key: string,
   state: FertilizerChecklistState,
@@ -1031,7 +1041,7 @@ const FertilizerTable: React.FC = () => {
                   {data.length > 0 && (
                     <tr className="bg-white">
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
-                        {data[0].date}
+                        {mittiSchedule ? getCurrentMonthStartAndEndDates().start : data[0].date}
                       </td>
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
                         {/* {data[0].stage} */}
@@ -1039,9 +1049,7 @@ const FertilizerTable: React.FC = () => {
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
                         N :{" "}
                         {mittiSchedule
-                          ? mittiSchedule.chemicalN.length || mittiSchedule.organicN.length
-                            ? mittiSchedule.N.toFixed(2)
-                            : "—"
+                          ? mittiSchedule.N.toFixed(2)
                           : data[0].N_kg_acre}
                       </td>
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
@@ -1059,7 +1067,7 @@ const FertilizerTable: React.FC = () => {
                           data[0].fertilizers && (
                             <div className="text-lg font-normal">
                               <div>
-                                Urea: {data[0].fertilizers?.Urea_N_kg_per_acre} kg
+                                Urea: {data[0].fertilizers?.Urea_N_kg_per_acre} kg/acre
                               </div>
                             </div>
                           )
@@ -1101,9 +1109,7 @@ const FertilizerTable: React.FC = () => {
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
                         P :{" "}
                         {mittiSchedule
-                          ? mittiSchedule.chemicalP.length
-                            ? mittiSchedule.P.toFixed(2)
-                            : "—"
+                          ? mittiSchedule.P.toFixed(2)
                           : data[0].P_kg_acre}
                       </td>
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
@@ -1120,7 +1126,7 @@ const FertilizerTable: React.FC = () => {
                         ) : (
                           <div className="text-lg font-normal">
                             SuperPhosphate:{" "}
-                            {data[0].fertilizers?.SuperPhosphate_P_kg_per_acre} kg
+                            {data[0].fertilizers?.SuperPhosphate_P_kg_per_acre} kg/acre
                           </div>
                         )}
                       </td>
@@ -1152,7 +1158,7 @@ const FertilizerTable: React.FC = () => {
                   {data.length > 1 && (
                     <tr className="bg-white">
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
-                        {data[data.length - 1].date}
+                        {mittiSchedule ? getCurrentMonthStartAndEndDates().end : data[data.length - 1].date}
                       </td>
                       <td className="px-4 py-6 whitespace-nowrap text-lg font-normal text-gray-900 border-b align-top">
                         {/* {data[data.length - 1].stage} */}
@@ -1161,9 +1167,7 @@ const FertilizerTable: React.FC = () => {
                         <div>
                           K :{" "}
                           {mittiSchedule
-                            ? mittiSchedule.chemicalK.length
-                              ? mittiSchedule.K.toFixed(2)
-                              : "—"
+                            ? mittiSchedule.K.toFixed(2)
                             : data[0].K_kg_acre}
                         </div>
                       </td>
@@ -1187,7 +1191,7 @@ const FertilizerTable: React.FC = () => {
                                   data[data.length - 1].fertilizers
                                     ?.Potash_K_kg_per_acre
                                 }{" "}
-                                kg
+                                kg/acre
                               </div>
                             </div>
                           )

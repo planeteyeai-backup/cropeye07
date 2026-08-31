@@ -452,9 +452,9 @@ export function buildFertilizerScheduleFromMittisense(
       const slot = slots[symbol];
       if (slot.value === 0) slot.value = displayValue;
 
-      if (isFym) {
-        // FYM → N organic only (not chemical / not P/K)
-        if (symbol === "N" && !slot.organic.includes(chemLine)) {
+      const isOrganicSpecial = /19\s*:\s*19|35\s*:\s*00|13\s*:\s*00/.test(row.product);
+      if (isFym || isOrganicSpecial) {
+        if (!slot.organic.includes(chemLine)) {
           slot.organic.push(chemLine);
         }
         continue;
@@ -490,8 +490,8 @@ export function buildFertilizerScheduleFromMittisense(
     chemicalP: chemOrApply(pSlot),
     chemicalK: chemOrApply(kSlot),
     organicN: nSlot.organic,
-    organicP: [],
-    organicK: [],
+    organicP: pSlot.organic,
+    organicK: kSlot.organic,
   };
 }
 

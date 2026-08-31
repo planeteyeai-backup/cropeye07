@@ -41,7 +41,7 @@ function statusForMoisture(
   optimalMin: number,
   optimalMax: number,
 ): string {
-  if (pct >= optimalMin && pct <= optimalMax) return "Moderated";
+  if (pct >= optimalMin && pct <= optimalMax) return "";
   if (pct < optimalMin) return "Low";
   return "High";
 }
@@ -291,15 +291,14 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
                   ETo loss
                 </div>
                 <div className="water-balance-kpi-value">
-                  {etoLossKl.toFixed(1)} kL
+                  {etoTodayMm.toFixed(1)} mm
                 </div>
               </div>
             </div>
 
             {etoTodayMm > 0 && (
               <p className="water-balance-eto-hint">
-                ETo today: {etoTodayMm.toFixed(1)} mm/day
-                {selected ? ` · ${selected.shortDate}` : ""}
+                {selected ? `Date: ${selected.shortDate}` : ""}
               </p>
             )}
 
