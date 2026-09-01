@@ -203,44 +203,112 @@ function resolveCropTypeId(
   return existingId;
 }
 
-function findFarmInProfile(dataObj: any, targetId: string | number): any | null {
+function findFarmInProfile(
+  dataObj: any,
+  targetId: string | number,
+  plotId?: string,
+): any | null {
   const tid = String(targetId);
-  if (dataObj?.id != null && String(dataObj.id) === tid) return dataObj;
-  if (dataObj?.farm?.id != null && String(dataObj.farm.id) === tid) return dataObj.farm;
+  const pid = plotId != null && String(plotId).trim() !== "" ? String(plotId) : "";
 
   const plots = Array.isArray(dataObj?.plots) ? dataObj.plots : [];
   for (const plot of plots) {
+    if (pid && plot?.id != null && String(plot.id) !== pid) continue;
     for (const farm of farmsOnPlot(plot)) {
       if (String(farm?.id) === tid) return farm;
     }
   }
+  if (dataObj?.id != null && String(dataObj.id) === tid) return dataObj;
+  if (dataObj?.farm?.id != null && String(dataObj.farm.id) === tid) return dataObj.farm;
+
   if (Array.isArray(dataObj?.farms)) {
     for (const farm of dataObj.farms) {
-      if (String(farm?.id) === tid) return farm;
+      if (String(farm?.id) === tid) {
+        if (pid && farm?.plot_id != null && String(farm.plot_id) !== pid) continue;
+        return farm;
+      }
     }
   }
   if (dataObj?.farm && String(dataObj.farm?.id) === tid) return dataObj.farm;
   return null;
 }
 
-function mergeServerFarmIntoProfile(data: any, serverFarm: any, farmId: string | number): any {
+function mergeServerFarmIntoProfile(
+  data: any,
+  serverFarm: any,
+  farmId: string | number,
+  plotId?: string,
+): any {
   if (!data || !serverFarm) return data;
   const tid = String(farmId);
-  const replaceFarm = (farm: any) =>
-    farm?.id != null && String(farm.id) === tid ? { ...farm, ...serverFarm } : farm;
+  const pid = plotId != null && String(plotId).trim() !== "" ? String(plotId) : "";
+  const replaceFarm = (farm: any, plot: any) => {
+    if (farm?.id == null || String(farm.id) !== tid) return farm;
+    if (pid && plot?.id != null && String(plot.id) !== pid) return farm;
+    if (pid && farm?.plot_id != null && String(farm.plot_id) !== pid) return farm;
+    return { ...farm, ...serverFarm };
+  };
 
   const next = { ...data };
   if (Array.isArray(next.plots)) {
     next.plots = next.plots.map((plot: any) => {
       const patched = { ...plot };
-      if (Array.isArray(plot?.farms)) patched.farms = plot.farms.map(replaceFarm);
-      if (plot?.farm) patched.farm = replaceFarm(plot.farm);
+      if (Array.isArray(plot?.farms)) {
+        patched.farms = plot.farms.map((farm: any) => replaceFarm(farm, plot));
+      }
+      if (plot?.farm) patched.farm = replaceFarm(plot.farm, plot);
       return patched;
     });
   }
-  if (Array.isArray(next.farms)) next.farms = next.farms.map(replaceFarm);
-  if (next.farm) next.farm = replaceFarm(next.farm);
+  if (Array.isArray(next.farms)) {
+    next.farms = next.farms.map((farm: any) => replaceFarm(farm, next.plot ?? null));
+  }
+  if (next.farm) next.farm = replaceFarm(next.farm, next.plot ?? next.farm?.plot);
   return next;
+}
+
+/**
+ * GET ?farm_id= often returns a single farm (no plots[]). Never replace a
+ * multi-plot profile with that — merge the updated farm into the existing plots.
+ */
+function mergeFarmGetIntoProfile(
+  existing: any,
+  incoming: any,
+  farmId: string,
+  plotId?: string,
+): any {
+  if (!incoming) return existing;
+  const existingPlots = Array.isArray(existing?.plots) ? existing.plots : [];
+  const incomingPlots = Array.isArray(incoming?.plots) ? incoming.plots : [];
+
+  if (incomingPlots.length > 1) {
+    return overlaySavedFarmsOnProfile(incoming);
+  }
+  if (existingPlots.length > 1) {
+    const serverFarm =
+      findFarmInProfile(incoming, farmId, plotId) ??
+      (incoming?.id != null && String(incoming.id) === String(farmId) ? incoming : null);
+    if (serverFarm) {
+      return overlaySavedFarmsOnProfile(
+        mergeServerFarmIntoProfile(existing, serverFarm, farmId, plotId),
+      );
+    }
+    return overlaySavedFarmsOnProfile(existing);
+  }
+  if (incomingPlots.length === 1 || findFarmInProfile(incoming, farmId, plotId)) {
+    if (existingPlots.length === 1 && incomingPlots.length === 0) {
+      const serverFarm =
+        findFarmInProfile(incoming, farmId, plotId) ??
+        (incoming?.id != null && String(incoming.id) === String(farmId) ? incoming : null);
+      if (serverFarm) {
+        return overlaySavedFarmsOnProfile(
+          mergeServerFarmIntoProfile(existing, serverFarm, farmId, plotId),
+        );
+      }
+    }
+    return overlaySavedFarmsOnProfile(incoming);
+  }
+  return overlaySavedFarmsOnProfile(incoming ?? existing);
 }
 
 function comparableValue(key: string, value: unknown): string {
@@ -285,6 +353,13 @@ function readFarmField(serverFarm: any, key: string): unknown {
         serverFarm?.planting_method,
         serverFarm?.variety_subtype,
       );
+    case "sugarcane_yield":
+      return firstNonEmpty(
+        serverFarm?.sugarcane_yield,
+        serverFarm?.sugarcaneYield,
+        serverFarm?.yield_tonnes,
+        serverFarm?.yield,
+      );
     case "flow_rate_liter_per_hour":
       return firstNonEmpty(
         irrigation?.flow_rate_lph,
@@ -326,7 +401,7 @@ function findMismatchedFarmFields(
 ): string[] {
   const mismatches: string[] = [];
   for (const [key, sentValue] of Object.entries(sent)) {
-    if (key === "farm_id") continue;
+    if (key === "farm_id" || key === "plot_id") continue;
     const serverValue = readFarmField(serverFarm, key);
     if (comparableValue(key, sentValue) !== comparableValue(key, serverValue)) {
       mismatches.push(key);
@@ -367,6 +442,31 @@ type FarmChoice = {
   plot: any;
 };
 
+/** Keep the richer multi-plot choice list; only refresh the matching farm object. */
+function mergeFarmChoices(prev: FarmChoice[], next: FarmChoice[]): FarmChoice[] {
+  if (!next.length) return prev;
+  if (!prev.length) return next;
+  if (next.length >= prev.length) return next;
+  return prev.map((p) => {
+    const updated =
+      next.find(
+        (n) =>
+          n.farmId === p.farmId &&
+          (!p.plotId || !n.plotId || n.plotId === p.plotId),
+      ) ?? next.find((n) => n.farmId === p.farmId);
+    if (!updated) return p;
+    return {
+      ...p,
+      farm: updated.farm ?? p.farm,
+      plot: updated.plot ?? p.plot,
+      plotId: p.plotId || updated.plotId,
+      gatNumber: p.gatNumber || updated.gatNumber,
+      plotNumber: p.plotNumber || updated.plotNumber,
+      label: p.label || updated.label,
+    };
+  });
+}
+
 function firstNonEmpty(...values: unknown[]): string {
   for (const value of values) {
     if (value == null) continue;
@@ -406,33 +506,34 @@ function collectFarmChoices(data: any): FarmChoice[] {
 
   const add = (farm: any, plot: any) => {
     const farmId = farm?.id != null ? String(farm.id) : "";
-    if (!farmId || seen.has(farmId)) return;
-    seen.add(farmId);
-    const plotRec = plot ?? farm?.plot ?? null;
-    const gat = String(plotRec?.gat_number ?? farm?.gat_number ?? "").trim();
-    const plotNum = String(plotRec?.plot_number ?? farm?.plot_number ?? "").trim();
-    const plotId =
-      plotRec?.id ??
-      plotRec?.plot_id ??
-      farm?.plot_id ??
-      farm?.plot?.id ??
-      "";
-    const fastapi = String(plotRec?.fastapi_plot_id ?? farm?.farm_uid ?? "").trim();
+    if (!farmId) return;
+    // plot.id + farm.id from my-profile (plot.farms[0].id)
+    const plotId = plot?.id != null ? String(plot.id) : "";
+    const dedupeKey = plotId ? `${plotId}:${farmId}` : farmId;
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+    const gat = String(plot?.gat_number ?? farm?.gat_number ?? "").trim();
+    const plotNum = String(plot?.plot_number ?? farm?.plot_number ?? "").trim();
+    const fastapi = String(plot?.fastapi_plot_id ?? farm?.farm_uid ?? "").trim();
     const gatPlot = [gat, plotNum].filter(Boolean).join("/");
     choices.push({
       farmId,
-      plotId: plotId != null && plotId !== "" ? String(plotId) : "",
+      plotId,
       gatNumber: gat,
       plotNumber: plotNum,
-      label: `${gatPlot || fastapi || "Plot"} · farm ${farmId}`,
+      label: `${gatPlot || fastapi || "Plot"} · plot ${plotId || "?"} · farm ${farmId}`,
       farm,
-      plot: plotRec,
+      plot,
     });
   };
 
   const plots = Array.isArray(data?.plots) ? data.plots : [];
   for (const plot of plots) {
-    farmsOnPlot(plot).forEach((farm: any) => add(farm, plot));
+    const farms = farmsOnPlot(plot);
+    if (farms.length > 0) {
+      // Each plot maps to its primary farm: plot.farms[0]
+      add(farms[0], plot);
+    }
   }
   if (Array.isArray(data?.farms)) {
     data.farms.forEach((farm: any) => add(farm, farm?.plot ?? data?.plot ?? null));
@@ -511,20 +612,52 @@ function farmToForm(farm: any): FarmFormData {
       irrigation?.distance_motor_to_plot_m,
     ),
     sugarcane_type: firstNonEmpty(farm?.sugarcane_type) || "new",
-    sugarcane_yield: firstNonEmpty(farm?.sugarcane_yield),
+    sugarcane_yield: (() => {
+      const type = firstNonEmpty(farm?.sugarcane_type) || "new";
+      if (type === "new") return "";
+      return firstNonEmpty(
+        farm?.sugarcane_yield,
+        farm?.sugarcaneYield,
+        farm?.yield_tonnes,
+        farm?.yield,
+      );
+    })(),
     plants_in_field: firstNonEmpty(farm?.plants_in_field),
   };
 }
 
 function formFromFarm(farm: any, farmId?: string, plotId?: string): FarmFormData {
   const fromApi = farmToForm(farm);
-  const plotKey = normalizePlotKey(currentPlotKey());
-  const pending =
-    (farmId ? readSavedFarmFields(farmId) : null) ??
-    (plotId ? readSavedFarmFields(`plot:${plotId}`) : null) ??
-    (plotKey ? readSavedFarmFields(`plotkey:${plotKey}`) : null);
+  // Only apply local overlays that belong to THIS farm/plot — never another plot's plotkey.
+  const pendingByFarm = farmId ? readSavedFarmFields(farmId) : null;
+  const pendingByPlot = plotId ? readSavedFarmFields(`plot:${plotId}`) : null;
+  let pendingByKey: Record<string, string> | null = null;
+  const selectedKey = normalizePlotKey(currentPlotKey());
+  if (selectedKey) {
+    const farmKeys = [
+      farmId,
+      plotId,
+      farm?.farm_uid,
+      farm?.fastapi_plot_id,
+      farm?.id,
+    ]
+      .filter((v) => v != null && String(v).trim() !== "")
+      .map((v) => normalizePlotKey(String(v)));
+    if (farmKeys.includes(selectedKey) || (plotId && normalizePlotKey(plotId) === selectedKey)) {
+      pendingByKey = readSavedFarmFields(`plotkey:${selectedKey}`);
+    }
+  }
+  const pending = pendingByFarm ?? pendingByPlot ?? pendingByKey;
   if (!pending) return fromApi;
-  return { ...fromApi, ...pending } as FarmFormData;
+  const merged = { ...fromApi } as FarmFormData;
+  (Object.keys(pending) as Array<keyof FarmFormData>).forEach((key) => {
+    const saved = pending[key as string];
+    if (saved == null) return;
+    const text = String(saved).trim();
+    if (!text) return;
+    merged[key] = text as FarmFormData[typeof key];
+  });
+  return merged;
 }
 
 function mergeFarmFieldsIntoFarmObject(farm: any, form: FarmFormData): any {
@@ -553,6 +686,10 @@ function mergeFarmFieldsIntoFarmObject(farm: any, form: FarmFormData): any {
     spacing_a: form.spacing_a,
     spacing_b: form.spacing_b,
     irrigation_type: irrigation,
+    flow_rate_liter_per_hour: form.flow_rate_liter_per_hour,
+    flow_rate_lph: form.flow_rate_liter_per_hour,
+    emitters_per_plant: form.emitters_per_plant,
+    emitters_count: form.emitters_per_plant,
     sugarcane_type: form.sugarcane_type,
     sugarcane_yield: form.sugarcane_yield,
     plants_in_field: form.plants_in_field,
@@ -575,9 +712,15 @@ function farmRecordMatches(
   farmId: string,
   plotId?: string,
 ): boolean {
-  if (farmId && farm?.id != null && String(farm.id) === String(farmId)) return true;
-  if (plotId && plot?.id != null && String(plot.id) === String(plotId)) return true;
-  if (plotId && farm?.plot_id != null && String(farm.plot_id) === String(plotId)) return true;
+  const farmOk =
+    !farmId || (farm?.id != null && String(farm.id) === String(farmId));
+  const plotOk =
+    !plotId ||
+    (plot?.id != null && String(plot.id) === String(plotId)) ||
+    (farm?.plot_id != null && String(farm.plot_id) === String(plotId));
+  if (farmId && plotId) return Boolean(farmOk && plotOk);
+  if (farmId) return Boolean(farmOk);
+  if (plotId) return Boolean(plotOk);
   return false;
 }
 
@@ -630,10 +773,8 @@ function currentPlotKey(): string {
 
 function choicePlotKeys(choice: FarmChoice): string[] {
   return [
-    choice.farmId,
     choice.plotId,
-    choice.gatNumber && choice.plotNumber ? `${choice.gatNumber}/${choice.plotNumber}` : "",
-    choice.gatNumber && choice.plotNumber ? `${choice.gatNumber}_${choice.plotNumber}` : "",
+    choice.farmId,
     choice.plot?.fastapi_plot_id,
     choice.plot?.id,
     choice.farm?.farm_uid,
@@ -644,26 +785,65 @@ function choicePlotKeys(choice: FarmChoice): string[] {
     .filter(Boolean);
 }
 
+function gatPlotKeys(choice: FarmChoice): string[] {
+  if (!choice.gatNumber || !choice.plotNumber) return [];
+  return [
+    normalizePlotKey(`${choice.gatNumber}/${choice.plotNumber}`),
+    normalizePlotKey(`${choice.gatNumber}_${choice.plotNumber}`),
+  ].filter(Boolean);
+}
+
 function pickFarmChoice(choices: FarmChoice[], plotKey = currentPlotKey()): FarmChoice | undefined {
   if (!choices.length) return undefined;
   const key = normalizePlotKey(plotKey);
   if (!key) return choices.length === 1 ? choices[0] : undefined;
-  const match = choices.find((choice) => choicePlotKeys(choice).includes(key));
-  if (match) return match;
+
+  // Prefer plot.id — never rely on GAT alone when multiple plots share it.
+  const byPlotId = choices.find(
+    (choice) => choice.plotId && normalizePlotKey(choice.plotId) === key,
+  );
+  if (byPlotId) return byPlotId;
+
+  const byFarmId = choices.find(
+    (choice) => normalizePlotKey(choice.farmId) === key,
+  );
+  if (byFarmId) return byFarmId;
+
+  const byStableId = choices.find((choice) =>
+    choicePlotKeys(choice).includes(key),
+  );
+  if (byStableId) return byStableId;
+
+  // GAT/plot-number only when it maps to a single choice.
+  const gatMatches = choices.filter((choice) => gatPlotKeys(choice).includes(key));
+  if (gatMatches.length === 1) return gatMatches[0];
+
   return choices.length === 1 ? choices[0] : undefined;
 }
 
-/** Prefer the map-selected plot, then fall back to explicit farm id. */
+/** Prefer the map-selected plot, then explicit plot/farm ids. */
 function resolveSaveFarmChoice(
   choices: FarmChoice[],
   activePlotKey: string,
   selectedFarmId: string,
+  selectedPlotId: string,
 ): FarmChoice | undefined {
   const fromPlot = pickFarmChoice(choices, activePlotKey);
   if (fromPlot) return fromPlot;
+  if (selectedFarmId && selectedPlotId) {
+    const fromBoth = choices.find(
+      (c) => c.farmId === selectedFarmId && c.plotId === selectedPlotId,
+    );
+    if (fromBoth) return fromBoth;
+  }
+  if (selectedPlotId) {
+    const fromPlotId = choices.find((c) => c.plotId === selectedPlotId);
+    if (fromPlotId) return fromPlotId;
+  }
+  // Only fall back to farm_id alone when there is a single matching choice.
   if (selectedFarmId) {
-    const fromId = choices.find((c) => c.farmId === selectedFarmId);
-    if (fromId) return fromId;
+    const farmMatches = choices.filter((c) => c.farmId === selectedFarmId);
+    if (farmMatches.length === 1) return farmMatches[0];
   }
   return choices.length === 1 ? choices[0] : undefined;
 }
@@ -847,6 +1027,7 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
   const [profileData, setProfileData] = useState<any>(null);
   const [loadingProfile, setLoadingProfile] = useState(true);
   const lastSyncedPlotKeyRef = useRef<string>("");
+  const farmRefetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [editingUser, setEditingUser] = useState(false);
   const [editingFarm, setEditingFarm] = useState(false);
@@ -855,6 +1036,7 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
   const [farmForm, setFarmForm] = useState<FarmFormData>(emptyFarm);
   const [farmChoices, setFarmChoices] = useState<FarmChoice[]>([]);
   const [selectedFarmId, setSelectedFarmId] = useState("");
+  const [selectedPlotId, setSelectedPlotId] = useState("");
   const activePlotKey = selectedPlotName || currentPlotKey();
 
   const [savingUser, setSavingUser] = useState(false);
@@ -953,14 +1135,17 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
         const choices = collectFarmChoices(data);
         setFarmChoices(choices);
         const lastFarmId = readLastSavedFarmId();
+        const multiPlot = choices.length > 1;
         const first =
           pickFarmChoice(choices, selectedPlotName || currentPlotKey()) ??
-          (lastFarmId ? choices.find((c) => c.farmId === lastFarmId) : undefined) ??
-          (choices.length === 1 ? choices[0] : undefined) ??
-          choices[0];
+          (!multiPlot && lastFarmId
+            ? choices.find((c) => c.farmId === lastFarmId)
+            : undefined) ??
+          (choices.length === 1 ? choices[0] : undefined);
         if (first) {
-          lastSyncedPlotKeyRef.current = selectedPlotName || currentPlotKey() || first.farmId;
+          lastSyncedPlotKeyRef.current = selectedPlotName || currentPlotKey() || first.plotId || first.farmId;
           setSelectedFarmId(first.farmId);
+          setSelectedPlotId(first.plotId);
           setFarmForm(formFromFarm(first.farm, first.farmId, first.plotId));
           setPlotBoundaryMeta(plotMetaFromChoice(first));
         } else {
@@ -987,24 +1172,46 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
   }, []);
 
   useEffect(() => {
+    return () => {
+      if (farmRefetchTimerRef.current) clearTimeout(farmRefetchTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!farmChoices.length) return;
     // Only follow the map plot when that plot actually changes. Do not
     // overwrite the form after a save just because farmChoices was replaced.
-    if (lastSyncedPlotKeyRef.current === activePlotKey && selectedFarmId) return;
+    if (lastSyncedPlotKeyRef.current === activePlotKey && selectedFarmId && selectedPlotId) return;
     lastSyncedPlotKeyRef.current = activePlotKey;
+
+    const multiPlot = farmChoices.length > 1;
+    const fromMap = pickFarmChoice(farmChoices, activePlotKey);
+    const fromExact =
+      selectedFarmId && selectedPlotId
+        ? farmChoices.find(
+            (c) => c.farmId === selectedFarmId && c.plotId === selectedPlotId,
+          )
+        : undefined;
+    // Multi-plot: never fall back to "last saved farm" — that mixes plot data.
     const next =
-      pickFarmChoice(farmChoices, activePlotKey) ??
-      farmChoices.find((c) => c.farmId === selectedFarmId) ??
-      (readLastSavedFarmId()
+      fromMap ??
+      fromExact ??
+      (!multiPlot && selectedFarmId
+        ? farmChoices.find((c) => c.farmId === selectedFarmId)
+        : undefined) ??
+      (!multiPlot && readLastSavedFarmId()
         ? farmChoices.find((c) => c.farmId === readLastSavedFarmId())
-        : undefined);
+        : undefined) ??
+      (!multiPlot ? farmChoices[0] : undefined);
+
     if (!next) return;
     setSelectedFarmId(next.farmId);
+    setSelectedPlotId(next.plotId);
     setFarmForm(formFromFarm(next.farm, next.farmId, next.plotId));
     setPlotBoundaryMeta(plotMetaFromChoice(next));
     setEditingFarm(false);
     setFarmMsg(null);
-  }, [activePlotKey, farmChoices, selectedFarmId]);
+  }, [activePlotKey, farmChoices, selectedFarmId, selectedPlotId]);
 
   // ── Save user profile ─────────────────────────────────────────────────────
   const handleSaveUser = async () => {
@@ -1024,6 +1231,7 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
         aadhaar_number: userForm.aadhaar_number,
       });
       await refreshApiEndpoints();
+      window.dispatchEvent(new Event("cropeye:profile-updated"));
       setUserMsg({ type: "success", text: "Profile updated successfully!" });
       setEditingUser(false);
       setTimeout(() => setUserMsg(null), 4000);
@@ -1037,6 +1245,7 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
 
   const applyFarmChoice = (choice: FarmChoice, formOverride?: FarmFormData) => {
     setSelectedFarmId(choice.farmId);
+    setSelectedPlotId(choice.plotId);
     setFarmForm(formOverride ?? formFromFarm(choice.farm, choice.farmId, choice.plotId));
     setPlotBoundaryMeta(plotMetaFromChoice(choice));
   };
@@ -1047,7 +1256,12 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
       setSavingFarm(true);
       setFarmMsg(null);
 
-      const choice = resolveSaveFarmChoice(farmChoices, activePlotKey, selectedFarmId);
+      const choice = resolveSaveFarmChoice(
+        farmChoices,
+        activePlotKey,
+        selectedFarmId,
+        selectedPlotId,
+      );
       if (!choice?.farmId) {
         setFarmMsg({
           type: "error",
@@ -1058,6 +1272,9 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
 
       if (choice.farmId !== selectedFarmId) {
         setSelectedFarmId(choice.farmId);
+      }
+      if (choice.plotId && choice.plotId !== selectedPlotId) {
+        setSelectedPlotId(choice.plotId);
       }
 
       const irrigation = farmForm.irrigation_type.trim().toLowerCase();
@@ -1072,6 +1289,7 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
       const plantationType = toApiPlantationType(farmForm.variety_type);
       const plantingMethod = toApiPlantingMethod(farmForm.variety_subtype);
       const farmIdNum = Number(choice.farmId);
+      const plotIdNum = choice.plotId ? Number(choice.plotId) : NaN;
       const existingCropTypeId = readCropTypeId(choice.farm);
       const cropTypeId = resolveCropTypeId(
         farmForm.variety_type,
@@ -1094,6 +1312,11 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
 
       const payload: Record<string, unknown> = {
         farm_id: Number.isFinite(farmIdNum) ? farmIdNum : choice.farmId,
+        ...(choice.plotId
+          ? {
+              plot_id: Number.isFinite(plotIdNum) ? plotIdNum : choice.plotId,
+            }
+          : {}),
         plantation_date: farmForm.plantation_date
           ? String(farmForm.plantation_date).slice(0, 10)
           : undefined,
@@ -1110,8 +1333,13 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
 
       if (farmForm.address.trim()) payload.address = farmForm.address.trim();
       if (farmForm.area_size.trim()) payload.area_size = farmForm.area_size.trim();
-      if (farmForm.sugarcane_yield.trim()) {
-        payload.sugarcane_yield = farmForm.sugarcane_yield.trim();
+      if (farmForm.sugarcane_type === "old" && farmForm.sugarcane_yield.trim()) {
+        const yieldNum = Number(farmForm.sugarcane_yield.trim());
+        payload.sugarcane_yield = Number.isFinite(yieldNum)
+          ? yieldNum
+          : farmForm.sugarcane_yield.trim();
+      } else if (farmForm.sugarcane_type === "new") {
+        payload.sugarcane_yield = null;
       }
       if (farmForm.plants_in_field.trim()) {
         payload.plants_in_field = Number(farmForm.plants_in_field);
@@ -1151,6 +1379,7 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
       } else {
         // Multi-plot: send the full farm payload so the correct farm_id is fully updated.
         for (const key of Object.keys(payload)) {
+          if (key === "farm_id" || key === "plot_id") continue;
           const val = payload[key];
           if (val === undefined || val === "") delete payload[key];
         }
@@ -1176,6 +1405,15 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
         setFarmMsg({ type: "error", text: "Missing farm_id — cannot save this plot." });
         return;
       }
+
+      if (multiPlot && !payload.plot_id) {
+        setFarmMsg({
+          type: "error",
+          text: "Missing plot_id — select the plot on the map before saving.",
+        });
+        return;
+      }
+
       const resp = await patchFarmMyProfile(payload as Parameters<typeof patchFarmMyProfile>[0]);
       // Quick check: ensure response appears to reference the farm we updated.
       try {
@@ -1206,6 +1444,9 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
       if (choice.plotId) persistSavedFarmFields(`plot:${choice.plotId}`, sentForm);
       const plotKey = normalizePlotKey(activePlotKey || currentPlotKey());
       if (plotKey) persistSavedFarmFields(`plotkey:${plotKey}`, sentForm);
+      for (const key of choicePlotKeys(choice)) {
+        if (key) persistSavedFarmFields(`plotkey:${key}`, sentForm);
+      }
 
       // Show saved values immediately so view mode never snaps back to stale GET.
       const optimistic = mergeFarmFormIntoProfile(
@@ -1216,44 +1457,104 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
       );
       setProfileData(optimistic);
       const optimisticChoices = collectFarmChoices(optimistic);
-      setFarmChoices(optimisticChoices.length ? optimisticChoices : farmChoices);
+      const retainedChoices = mergeFarmChoices(farmChoices, optimisticChoices);
+      setFarmChoices(retainedChoices);
       applyFarmChoice(
-        optimisticChoices.find((c) => c.farmId === choice.farmId) ?? choice,
+        optimisticChoices.find(
+          (c) => c.farmId === choice.farmId && c.plotId === choice.plotId,
+        ) ??
+          optimisticChoices.find((c) => c.farmId === choice.farmId) ??
+          choice,
         sentForm,
       );
       setCache("farmerProfile", optimistic);
       notifyFarmFieldsUpdated(optimistic);
-      lastSyncedPlotKeyRef.current = activePlotKey || currentPlotKey() || choice.farmId;
+      lastSyncedPlotKeyRef.current =
+        activePlotKey || currentPlotKey() || choice.plotId || choice.farmId;
       setEditingFarm(false);
 
       let staleFields: string[] = [];
       try {
-        const refreshed = (await getFarmerMyProfile({ force: true })) as { data?: any };
-        const nextRaw = overlaySavedFarmsOnProfile(refreshed?.data ?? refreshed);
-        if (nextRaw) {
-          const serverFarm = findFarmInProfile(nextRaw, choice.farmId);
-          const mergedProfile = serverFarm
-            ? overlaySavedFarmsOnProfile(
-                mergeServerFarmIntoProfile(profileData ?? nextRaw, serverFarm, choice.farmId),
-              )
-            : nextRaw;
+        const refreshed = (await getFarmerMyProfile({
+          force: true,
+          farmId: choice.farmId,
+        })) as { data?: any };
+        const mergedProfile = mergeFarmGetIntoProfile(
+          optimistic,
+          refreshed?.data ?? refreshed,
+          choice.farmId,
+          choice.plotId,
+        );
+        if (mergedProfile) {
+          const serverFarm = findFarmInProfile(
+            mergedProfile,
+            choice.farmId,
+            choice.plotId,
+          );
           if (serverFarm) {
-            staleFields = findMismatchedFarmFields(payload, findFarmInProfile(mergedProfile, choice.farmId) ?? serverFarm);
+            staleFields = findMismatchedFarmFields(payload, serverFarm);
           }
           setProfileData(mergedProfile);
           const nextChoices = collectFarmChoices(mergedProfile);
-          setFarmChoices(nextChoices.length ? nextChoices : farmChoices);
+          setFarmChoices(mergeFarmChoices(retainedChoices, nextChoices));
           const keep =
+            nextChoices.find(
+              (c) => c.farmId === choice.farmId && c.plotId === choice.plotId,
+            ) ??
+            retainedChoices.find(
+              (c) => c.farmId === choice.farmId && c.plotId === choice.plotId,
+            ) ??
             nextChoices.find((c) => c.farmId === choice.farmId) ??
             pickFarmChoice(nextChoices, activePlotKey) ??
             choice;
-          applyFarmChoice(keep, formFromFarm(keep.farm, keep.farmId, keep.plotId));
+          applyFarmChoice(
+            keep,
+            formFromFarm(keep.farm, keep.farmId, keep.plotId),
+          );
           setCache("farmerProfile", mergedProfile);
           notifyFarmFieldsUpdated(mergedProfile);
         }
       } catch {
         // Optimistic values already applied.
       }
+
+      if (farmRefetchTimerRef.current) clearTimeout(farmRefetchTimerRef.current);
+      farmRefetchTimerRef.current = setTimeout(() => {
+        void (async () => {
+          try {
+            const later = (await getFarmerMyProfile({
+              force: true,
+              farmId: choice.farmId,
+            })) as { data?: any };
+            const laterMerged = mergeFarmGetIntoProfile(
+              optimistic,
+              later?.data ?? later,
+              choice.farmId,
+              choice.plotId,
+            );
+            if (!laterMerged) return;
+            setProfileData(laterMerged);
+            const laterChoices = collectFarmChoices(laterMerged);
+            setFarmChoices(mergeFarmChoices(retainedChoices, laterChoices));
+            const keep =
+              laterChoices.find(
+                (c) => c.farmId === choice.farmId && c.plotId === choice.plotId,
+              ) ??
+              retainedChoices.find(
+                (c) => c.farmId === choice.farmId && c.plotId === choice.plotId,
+              ) ??
+              laterChoices.find((c) => c.farmId === choice.farmId) ??
+              pickFarmChoice(laterChoices, activePlotKey) ??
+              choice;
+            applyFarmChoice(keep, formFromFarm(keep.farm, keep.farmId, keep.plotId));
+            setCache("farmerProfile", laterMerged);
+            notifyFarmFieldsUpdated(laterMerged);
+          } catch {
+            // Keep the values already shown in the form.
+          }
+        })();
+      }, 2000);
+
       await refreshApiEndpoints();
       if (staleFields.length) {
         setFarmMsg({
@@ -1282,7 +1583,10 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
 
   const cancelUser = () => setEditingUser(false);
   const cancelFarm = () => {
-    const choice = farmChoices.find((c) => c.farmId === selectedFarmId);
+    const choice =
+      farmChoices.find(
+        (c) => c.farmId === selectedFarmId && c.plotId === selectedPlotId,
+      ) ?? farmChoices.find((c) => c.farmId === selectedFarmId);
     if (choice) applyFarmChoice(choice);
     setFarmMsg(null);
     setEditingFarm(false);
@@ -1392,6 +1696,7 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
                 <h2 className="text-base font-bold text-gray-800">Farm & Plot Details</h2>
                 <p className="text-xs text-gray-500">
                   Crop, irrigation and spacing information
+                  {selectedPlotId ? ` · plot_id ${selectedPlotId}` : ""}
                   {selectedFarmId ? ` · farm_id ${selectedFarmId}` : ""}
                 </p>
               </div>
@@ -1400,7 +1705,15 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
               <button
                 onClick={() => {
                   const choice =
-                    resolveSaveFarmChoice(farmChoices, activePlotKey, selectedFarmId) ??
+                    resolveSaveFarmChoice(
+                      farmChoices,
+                      activePlotKey,
+                      selectedFarmId,
+                      selectedPlotId,
+                    ) ??
+                    farmChoices.find(
+                      (c) => c.farmId === selectedFarmId && c.plotId === selectedPlotId,
+                    ) ??
                     farmChoices.find((c) => c.farmId === selectedFarmId);
                   if (choice) applyFarmChoice(choice);
                   setEditingFarm(true);
@@ -1433,7 +1746,6 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
             <FeedbackBanner msg={farmMsg} />
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <InputField label="Farm Address" value={farmForm.address} onChange={setFarm("address")} icon={<MapPin size={14} />} readOnly={!editingFarm} />
-              <InputField label="Area Size (acres)" value={farmForm.area_size} onChange={setFarm("area_size")} icon={<Ruler size={14} />} type="number" readOnly={!editingFarm} />
               <InputField label="Plantation Date" value={farmForm.plantation_date} onChange={setFarm("plantation_date")} icon={<Calendar size={14} />} type="date" readOnly={!editingFarm} />
               <InputField label="Crop Variety" value={farmForm.crop_variety} onChange={setFarm("crop_variety")} icon={<Leaf size={14} />} readOnly={!editingFarm} />
 
@@ -1484,10 +1796,24 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
                 label="Sugarcane Type"
                 value={farmForm.sugarcane_type}
                 options={["new", "old"]}
-                onChange={setFarm("sugarcane_type")}
+                onChange={(val) => {
+                  setFarmForm((f) => ({
+                    ...f,
+                    sugarcane_type: val,
+                    sugarcane_yield: val === "new" ? "" : f.sugarcane_yield,
+                  }));
+                }}
                 readOnly={!editingFarm}
               />
-              <InputField label="Sugarcane Yield (tonnes)" value={farmForm.sugarcane_yield} onChange={setFarm("sugarcane_yield")} icon={<Leaf size={14} />} type="number" readOnly={!editingFarm} />
+              <InputField
+                label="Sugarcane Yield (tonnes)"
+                value={farmForm.sugarcane_yield}
+                onChange={setFarm("sugarcane_yield")}
+                icon={<Leaf size={14} />}
+                type="number"
+                readOnly={!editingFarm || farmForm.sugarcane_type !== "old"}
+                placeholder={farmForm.sugarcane_type === "new" ? "Not applicable for new crop" : ""}
+              />
               <InputField label="Plants in Field" value={farmForm.plants_in_field} onChange={setFarm("plants_in_field")} icon={<Leaf size={14} />} type="number" readOnly={!editingFarm} />
             </div>
 

@@ -4,9 +4,15 @@
  * Shows alerts for missing user profile fields and missing farm/plot fields.
  */
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Bell, User, Leaf, X, ChevronRight, CheckCircle, AlertTriangle, Info, RefreshCw } from "lucide-react";
-import { getFarmerMyProfile } from "../api";
+import { Bell, User, Leaf, X, ChevronRight, CheckCircle, Info, RefreshCw } from "lucide-react";
+import api, { getFarmerMyProfile } from "../api";
 import { getUserRole } from "../utils/auth";
+import {
+  FARM_FIELDS_UPDATED_EVENT,
+  overlaySavedFarmsOnProfile,
+} from "../utils/farmSaveSync";
+
+export const PROFILE_UPDATED_EVENT = "cropeye:profile-updated";
 
 export interface Notification {
   id: string;
@@ -24,55 +30,264 @@ interface Props {
   onNavigate?: (view: string) => void; // callback to switch view in App.tsx
 }
 
+function hasValue(...values: unknown[]): boolean {
+  for (const value of values) {
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text && text !== "null" && text !== "undefined") return true;
+  }
+  return false;
+}
+
+function pickObj(...values: any[]): any {
+  for (const value of values) {
+    if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  }
+  return {};
+}
+
+function cropTypeOf(farm: any): any {
+  const raw = farm?.crop_type ?? farm?.crop_types;
+  if (Array.isArray(raw) && raw.length) return raw[0] ?? {};
+  if (raw && typeof raw === "object") return raw;
+  return {};
+}
+
+function irrigationOf(farm: any): any {
+  if (Array.isArray(farm?.irrigations) && farm.irrigations.length) {
+    return farm.irrigations[0] ?? {};
+  }
+  if (farm?.irrigation && typeof farm.irrigation === "object") return farm.irrigation;
+  return {};
+}
+
+function normalizeIrrigationType(farm: any, irr: any): string {
+  const raw = String(
+    farm?.irrigation_type ??
+      irr?.irrigation_type_code ??
+      irr?.irrigation_type_name ??
+      irr?.irrigation_type ??
+      "",
+  )
+    .trim()
+    .toLowerCase();
+  if (raw.includes("flood")) return "flood";
+  if (raw.includes("drip")) return "drip";
+  return raw;
+}
+
+function resolveFarm(data: any): any {
+  // Prefer the map-selected plot so multi-plot farmers aren't scored on plot 1 only.
+  let selectedKey = "";
+  try {
+    selectedKey = String(localStorage.getItem("selectedPlot") || "").trim();
+  } catch {
+    selectedKey = "";
+  }
+  const plots = Array.isArray(data?.plots) ? data.plots : [];
+  let foundPlot: any = null;
+  let targetFarm: any = null;
+
+  if (selectedKey && plots.length) {
+    const want = selectedKey.replace(/\//g, "_").toLowerCase();
+    foundPlot = plots.find((plot: any) => {
+      const keys = [
+        plot?.id,
+        plot?.fastapi_plot_id,
+        plot?.gat_number && plot?.plot_number
+          ? `${plot.gat_number}_${plot.plot_number}`
+          : "",
+        plot?.gat_number && plot?.plot_number
+          ? `${plot.gat_number}/${plot.plot_number}`
+          : "",
+      ]
+        .filter(Boolean)
+        .map((v) => String(v).replace(/\//g, "_").toLowerCase());
+      return keys.some((k) => k === want || k === selectedKey.toLowerCase());
+    });
+    if (foundPlot) {
+      targetFarm =
+        (Array.isArray(foundPlot.farms) && foundPlot.farms[0]) ||
+        (foundPlot.farm && typeof foundPlot.farm === "object"
+          ? foundPlot.farm
+          : null);
+    }
+  }
+
+  if (!targetFarm) {
+    foundPlot = plots[0] ?? null;
+    if (Array.isArray(foundPlot?.farms) && foundPlot.farms[0])
+      targetFarm = foundPlot.farms[0];
+    else if (foundPlot?.farm && typeof foundPlot.farm === "object")
+      targetFarm = foundPlot.farm;
+    else if (Array.isArray(data?.farms) && data.farms[0])
+      targetFarm = data.farms[0];
+    else if (data?.farm && typeof data.farm === "object")
+      targetFarm = data.farm;
+    else if (
+      data?.plantation_date != null ||
+      data?.crop_type != null ||
+      Array.isArray(data?.irrigations) ||
+      data?.irrigation
+    ) {
+      targetFarm = data;
+    } else {
+      targetFarm = {};
+    }
+  }
+
+  const activePlot = foundPlot ?? {};
+  return {
+    ...activePlot,
+    ...targetFarm,
+  };
+}
+
+function settledData(result: PromiseSettledResult<any>): any {
+  if (result.status !== "fulfilled") return {};
+  const value = result.value;
+  return value?.data ?? value ?? {};
+}
+
 // ── Field completeness checkers ────────────────────────────────────────────
-function checkUserFields(data: any): string[] {
+function checkUserFields(data: any, user: any): string[] {
   const missing: string[] = [];
-  const fp = data?.farmer_profile ?? data ?? {};
-  const pi = fp.personal_info ?? {};
-  const ai = fp.address_info ?? {};
+  const fp = pickObj(data?.farmer_profile, data, user?.farmer_profile, user);
+  const pi = pickObj(fp.personal_info, user?.personal_info, user);
+  const ai = pickObj(fp.address_info, user?.address_info, user);
 
-  if (!pi.first_name && !fp.first_name) missing.push("First Name");
-  if (!pi.last_name && !fp.last_name) missing.push("Last Name");
-  if (!fp.email) missing.push("Email");
-  if (!pi.phone_number && !fp.phone_number) missing.push("Phone Number");
-  if (!ai.village && !fp.village) missing.push("Village");
-  if (!ai.district && !fp.district) missing.push("District");
-  if (!ai.state && !fp.state) missing.push("State");
-  if (!ai.taluka && !fp.taluka) missing.push("Taluka");
-  if (!pi.aadhaar_number && !fp.aadhaar_number) missing.push("Aadhaar Number");
+  if (!hasValue(pi.first_name, fp.first_name, user?.first_name)) missing.push("First Name");
+  if (!hasValue(pi.last_name, fp.last_name, user?.last_name)) missing.push("Last Name");
+  if (!hasValue(fp.email, pi.email, user?.email, data?.email)) missing.push("Email");
+  if (!hasValue(pi.phone_number, fp.phone_number, user?.phone_number, user?.phone)) {
+    missing.push("Phone Number");
+  }
+  if (!hasValue(ai.village, fp.village, user?.village)) missing.push("Village");
+  if (!hasValue(ai.district, fp.district, user?.district, data?.district)) missing.push("District");
+  if (!hasValue(ai.state, fp.state, user?.state, data?.state)) missing.push("State");
+  if (!hasValue(ai.taluka, fp.taluka, user?.taluka, data?.taluka)) missing.push("Taluka");
+  if (!hasValue(pi.aadhaar_number, fp.aadhaar_number, user?.aadhaar_number, user?.aadhaar)) {
+    missing.push("Aadhaar Number");
+  }
   return missing;
 }
 
-function checkFarmFields(data: any): string[] {
+/** Same required list used for missing alerts and % — totals stay consistent. */
+function analyzeFarmFields(data: any): { missing: string[]; requiredTotal: number } {
   const missing: string[] = [];
-  const plot = (data?.plots ?? [])[0];
-  const farm = (plot?.farms ?? [])[0] ?? data?.farm ?? {};
+  const farm = resolveFarm(data);
+  const crop = cropTypeOf(farm);
+  const irr = irrigationOf(farm);
+  const irrigation = normalizeIrrigationType(farm, irr);
 
-  if (!farm.plantation_date) missing.push("Plantation Date");
-  if (!farm.area_size) missing.push("Area Size");
-  const variety = farm.crop_variety ?? farm.crop_type?.crop_variety;
-  if (!variety) missing.push("Crop Variety");
-  const plantationType = farm.variety_type ?? farm.crop_type?.plantation_type;
-  if (!plantationType) missing.push("Plantation Type");
-  const plantingMethod = farm.variety_subtype ?? farm.crop_type?.planting_method;
-  if (!plantingMethod) missing.push("Planting Method");
-  const irr = (farm.irrigations ?? [])[0];
-  if (!irr?.flow_rate_lph && !farm.flow_rate_liter_per_hour) missing.push("Flow Rate");
-  if (!irr?.emitters_count && !farm.emitters_per_plant) missing.push("Emitters Per Plant");
-  if (!farm.spacing_a) missing.push("Spacing A");
-  if (!farm.spacing_b) missing.push("Spacing B");
-  if (!farm.plants_in_field) missing.push("Plants in Field");
-  return missing;
+  // Base farm fields (aligned with My Profile editable fields; Area Size excluded).
+  const required: Array<{ label: string; ok: boolean }> = [
+    {
+      label: "Plantation Date",
+      ok: hasValue(farm.plantation_date, crop.plantation_date),
+    },
+    {
+      label: "Crop Variety",
+      ok: hasValue(farm.crop_variety, crop.crop_variety),
+    },
+    {
+      label: "Plantation Type",
+      ok: hasValue(
+        farm.variety_type,
+        farm.plantation_type,
+        crop.plantation_type,
+        crop.plantation_type_display,
+      ),
+    },
+    {
+      label: "Planting Method",
+      ok: hasValue(
+        farm.variety_subtype,
+        farm.planting_method,
+        crop.planting_method,
+        crop.planting_method_display,
+      ),
+    },
+    {
+      label: "Irrigation Type",
+      ok: irrigation === "drip" || irrigation === "flood",
+    },
+    {
+      label: "Spacing A",
+      ok: hasValue(farm.spacing_a),
+    },
+    {
+      label: "Spacing B",
+      ok: hasValue(farm.spacing_b),
+    },
+    {
+      label: "Plants in Field",
+      ok: hasValue(farm.plants_in_field),
+    },
+  ];
+
+  // Irrigation-specific — only after type is known (matches My Profile UI).
+  if (irrigation === "drip") {
+    required.push(
+      {
+        label: "Flow Rate",
+        ok: hasValue(
+          farm.flow_rate_liter_per_hour,
+          farm.flow_rate_lph,
+          farm.flow_rate,
+          farm.flow_Rate,
+          farm.flow_rate_liter_per_hr,
+          irr.flow_rate_lph,
+          irr.flow_rate_liter_per_hour,
+          irr.flow_Rate,
+          irr.flow_rate,
+          irr.flow_rate_liter_per_hr,
+        ),
+      },
+      {
+        label: "Emitters Per Plant",
+        ok: hasValue(
+          farm.emitters_per_plant,
+          farm.emitters_count,
+          farm.emitters,
+          farm.emitter_count,
+          irr.emitters_count,
+          irr.emitters_per_plant,
+          irr.emitters,
+          irr.emitter_count,
+        ),
+      },
+    );
+  } else if (irrigation === "flood") {
+    required.push({
+      label: "Motor Horsepower",
+      ok: hasValue(farm.motor_horsepower, irr.motor_horsepower),
+    });
+  }
+
+  for (const field of required) {
+    if (!field.ok) missing.push(field.label);
+  }
+
+  return { missing, requiredTotal: required.length };
 }
 
-// Build completion percentage (user: 50%, farm: 50%)
-function calcCompletion(userMissing: string[], farmMissing: string[]): number {
+/**
+ * completion =
+ *   (filled_user / 9) * 50
+ * + (filled_farm / farm_required) * 50
+ */
+function calcCompletion(
+  userMissing: string[],
+  farmMissing: string[],
+  farmRequiredTotal: number,
+): number {
   const USER_TOTAL = 9;
-  const FARM_TOTAL = 9;
+  const FARM_TOTAL = Math.max(1, farmRequiredTotal);
   const userDone = Math.max(0, USER_TOTAL - userMissing.length);
   const farmDone = Math.max(0, FARM_TOTAL - farmMissing.length);
-  const pct = ((userDone / USER_TOTAL) * 50) + ((farmDone / FARM_TOTAL) * 50);
-  return Math.round(pct);
+  const pct = (userDone / USER_TOTAL) * 50 + (farmDone / FARM_TOTAL) * 50;
+  return Math.min(100, Math.max(0, Math.round(pct)));
 }
 
 // Build notification list from missing fields
@@ -161,13 +376,26 @@ const NotificationSystem: React.FC<Props> = ({ onNavigate }) => {
     if (!isFarmer) return;
     try {
       setLoading(true);
-      const res = await getFarmerMyProfile();
-      const data = res.data ?? res;
-      const uMissing = checkUserFields(data);
-      const fMissing = checkFarmFields(data);
-      const pct = calcCompletion(uMissing, fMissing);
+      const [farmResult, userMeResult, userProfileResult] = await Promise.allSettled([
+        getFarmerMyProfile({ force: true }),
+        api.get("/users/me/"),
+        api.get("/users/my-profile/"),
+      ]);
+      const farmRaw = settledData(farmResult);
+      const data = overlaySavedFarmsOnProfile(farmRaw);
+      const user = {
+        ...settledData(userMeResult),
+        ...settledData(userProfileResult),
+      };
+      const uMissing = checkUserFields(data, user);
+      const farmAnalysis = analyzeFarmFields(data);
+      const pct = calcCompletion(
+        uMissing,
+        farmAnalysis.missing,
+        farmAnalysis.requiredTotal,
+      );
       setCompletion(pct);
-      setNotifications(buildNotifications(uMissing, fMissing));
+      setNotifications(buildNotifications(uMissing, farmAnalysis.missing));
     } catch {
       // silent
     } finally {
@@ -177,9 +405,52 @@ const NotificationSystem: React.FC<Props> = ({ onNavigate }) => {
 
   useEffect(() => {
     fetchAndAnalyse();
-    // Poll every 5 minutes
     pollRef.current = setInterval(fetchAndAnalyse, 5 * 60 * 1000);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+
+    // When MyProfile saves farm data, it dispatches FARM_FIELDS_UPDATED_EVENT
+    // with the full optimistic profile as the event detail. Use it directly
+    // instead of re-fetching (which would return stale server data).
+    const onFarmUpdated = (e: Event) => {
+      const payload = (e as CustomEvent).detail;
+      if (payload && typeof payload === "object") {
+        try {
+          const uMissing = checkUserFields(payload, payload);
+          const farmAnalysis = analyzeFarmFields(payload);
+          const pct = calcCompletion(uMissing, farmAnalysis.missing, farmAnalysis.requiredTotal);
+          setCompletion(pct);
+          setNotifications(buildNotifications(uMissing, farmAnalysis.missing));
+          return;
+        } catch {
+          // fall through to API re-fetch
+        }
+      }
+      void fetchAndAnalyse();
+    };
+
+    const onProfileUpdated = (e: Event) => {
+      const payload = (e as CustomEvent).detail;
+      if (payload && typeof payload === "object") {
+        try {
+          const uMissing = checkUserFields(payload, payload);
+          const farmAnalysis = analyzeFarmFields(payload);
+          const pct = calcCompletion(uMissing, farmAnalysis.missing, farmAnalysis.requiredTotal);
+          setCompletion(pct);
+          setNotifications(buildNotifications(uMissing, farmAnalysis.missing));
+          return;
+        } catch {
+          // fall through to API re-fetch
+        }
+      }
+      void fetchAndAnalyse();
+    };
+
+    window.addEventListener(FARM_FIELDS_UPDATED_EVENT, onFarmUpdated);
+    window.addEventListener(PROFILE_UPDATED_EVENT, onProfileUpdated);
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      window.removeEventListener(FARM_FIELDS_UPDATED_EVENT, onFarmUpdated);
+      window.removeEventListener(PROFILE_UPDATED_EVENT, onProfileUpdated);
+    };
   }, [fetchAndAnalyse]);
 
   // ── Close on outside click ───────────────────────────────────────────────

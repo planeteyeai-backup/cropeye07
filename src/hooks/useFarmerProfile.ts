@@ -9,6 +9,10 @@ import {
   type PlotBoundaryUpdatedDetail,
 } from '../utils/plotBoundarySync';
 import { plotKeyFromRecord } from '../utils/plotName';
+import {
+  FARM_FIELDS_UPDATED_EVENT,
+  overlaySavedFarmsOnProfile,
+} from '../utils/farmSaveSync';
 
 interface FarmerProfile {
   success?: boolean;
@@ -202,7 +206,9 @@ export const useFarmerProfile = () => {
       setLoading(true);
       setError(null);
       const response = await getFarmerMyProfile();
-      let data = (response as { data?: any })?.data ?? response;
+      let data = overlaySavedFarmsOnProfile(
+        (response as { data?: any })?.data ?? response,
+      );
 
       // Prefer last saved boundary from sessionStorage if GET lags behind PATCH.
       const plots = Array.isArray(data?.plots) ? data.plots : [];
@@ -266,11 +272,18 @@ export const useFarmerProfile = () => {
       return;
     }
 
-    // Cache-first: use prefetched profile to avoid blocking dashboard (10 min TTL)
-    const cached = getCache('farmerProfile', 10 * 60 * 1000);
+    // Cache-first: serve cached data immediately for fast render,
+    // then always fetch fresh data in the background so stale data
+    // (e.g. fertilizer schedule after profile save) is corrected without
+    // requiring a hard page refresh.
+    const cached = overlaySavedFarmsOnProfile(
+      getCache('farmerProfile', 10 * 60 * 1000),
+    );
     if (cached && (cached.plots?.length || cached.farmer_profile)) {
       setProfile(cached);
       setLoading(false);
+      // Still fetch fresh data silently in the background
+      void fetchMyProfile();
       return;
     }
 
@@ -301,6 +314,19 @@ export const useFarmerProfile = () => {
         PLOT_BOUNDARY_UPDATED_EVENT,
         refreshAfterBoundaryEdit,
       );
+    };
+  }, []);
+
+  useEffect(() => {
+    const onFarmFieldsUpdated = (event: Event) => {
+      const payload = (event as CustomEvent).detail;
+      if (!payload) return;
+      setProfile(payload as FarmerProfile);
+      setCache("farmerProfile", payload);
+    };
+    window.addEventListener(FARM_FIELDS_UPDATED_EVENT, onFarmFieldsUpdated);
+    return () => {
+      window.removeEventListener(FARM_FIELDS_UPDATED_EVENT, onFarmFieldsUpdated);
     };
   }, []);
 
