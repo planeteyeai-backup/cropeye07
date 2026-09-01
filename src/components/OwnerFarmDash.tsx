@@ -58,6 +58,11 @@ import { useFieldIndicesCropStage } from "../hooks/useFieldIndicesCropStage";
 import { enrichPlotsWithFarmDetails } from "../utils/fertilizerStage";
 import { fetchPlotBoundaryCoordinates } from "../utils/plotBoundary";
 import {
+  PLOT_BOUNDARY_UPDATED_EVENT,
+  resolveLeafletBoundaryForPlotRecord,
+  type PlotBoundaryUpdatedDetail,
+} from "../utils/plotBoundarySync";
+import {
   cropConditionStyleFromCci,
   fetchWaterStressAnalysis,
   parseWaterStressMetrics,
@@ -72,16 +77,12 @@ import api, {
   parseFarmersByFieldOfficerResponse,
   PLANTATION_DATE_NOT_PROVIDED_MSG,
 } from "../api"; // Import the authenticated api instance + hierarchy helpers
-import CommonSpinner from "./CommanSpinner";
 
 // Constants (same as FarmerDashboard)
 const BASE_URL = "https://events-cropeye.up.railway.app";
 
 /** indices / stress / irrigation on this host are often slow; 10s caused AbortController + axios to cancel (Network shows "(canceled)" ~10s). */
 const OWNER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS = 90_000;
-const OPTIMAL_BIOMASS = 150;
-const SOIL_API_URL = "https://main-cropeye.up.railway.app";
-const SOIL_DATE = "2025-10-03";
 
 const OTHER_FARMERS_RECOVERY = {
   regional_average: 7.85,
@@ -357,10 +358,6 @@ function getFarmerId(farmer: any): string | null {
   return id != null ? String(id) : null;
 }
 
-function normalizePhone(phone: unknown): string {
-  return `${phone ?? ""}`.replace(/\D/g, "");
-}
-
 function isUuidLike(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     value.trim(),
@@ -395,40 +392,6 @@ function buildGatPlotName(record: any): string | null {
   return null;
 }
 
-function filterFarmsForFarmer(
-  farms: any[],
-  farmerId: string,
-  teamFarmer?: any,
-): any[] {
-  const idStr = String(farmerId);
-  const username = `${teamFarmer?.username ?? ""}`.trim().toLowerCase();
-  const phone = normalizePhone(teamFarmer?.phone_number ?? teamFarmer?.phone);
-
-  return (farms || []).filter((farm) => {
-    const farmFarmerId =
-      farm?.farmer_id ??
-      farm?.farmer?.id ??
-      farm?.farmer?.user_id ??
-      farm?.user_id ??
-      farm?.user?.id ??
-      null;
-    if (farmFarmerId != null && String(farmFarmerId) === idStr) return true;
-
-    const nested = farm?.farmer ?? farm?.user ?? {};
-    if (nested?.id != null && String(nested.id) === idStr) return true;
-    if (
-      username &&
-      `${nested?.username ?? ""}`.trim().toLowerCase() === username
-    ) {
-      return true;
-    }
-    if (phone && normalizePhone(nested?.phone_number ?? nested?.phone) === phone) {
-      return true;
-    }
-    return false;
-  });
-}
-
 function normalizePlotFromFieldOfficer(plot: any, farmer?: any): any | null {
   const fastapiId =
     plot?.fastapi_plot_id != null && `${plot.fastapi_plot_id}`.trim() !== ""
@@ -445,7 +408,10 @@ function normalizePlotFromFieldOfficer(plot: any, farmer?: any): any | null {
     events_plot_id: plotKey,
     plot_id: plot?.plot_id ?? plotKey,
     plot_name: plotKey,
-    boundary: plot?.boundary ?? plot?.coordinates?.boundary,
+    boundary:
+      plot?.boundary ??
+      plot?.coordinates?.boundary ??
+      plot?.plot?.boundary,
     coordinates: plot?.coordinates,
     farmer,
   };
@@ -512,7 +478,11 @@ function farmRecordToPlot(farm: any, farmerCtx?: any): any {
     fastapi_plot_id: eventsPlotId,
     plot_id: farm?.plot_id ?? eventsPlotId,
     plot_name: eventsPlotId,
-    boundary: farm?.boundary ?? farm?.coordinates?.boundary,
+    boundary:
+      farm?.boundary ??
+      farm?.coordinates?.boundary ??
+      farm?.plot?.boundary ??
+      farm?.plot?.coordinates?.boundary,
     coordinates: farm?.coordinates,
   };
 }
@@ -530,7 +500,10 @@ function normalizePlotRecord(plot: any, farmer?: any): any {
     fastapi_plot_id: eventsPlotId,
     plot_id: plot?.plot_id ?? eventsPlotId,
     plot_name: eventsPlotId,
-    boundary: plot?.boundary ?? plot?.coordinates?.boundary,
+    boundary:
+      plot?.boundary ??
+      plot?.coordinates?.boundary ??
+      plot?.plot?.boundary,
     coordinates: plot?.coordinates,
   };
 }
@@ -595,42 +568,6 @@ function dedupePlotRecords(records: any[]): any[] {
   return unique;
 }
 
-/** Expand farm list into plot rows so each entry has gat_number + plot_number when nested. */
-function farmsToPlotRecords(farms: any[], farmerCtx?: any): any[] {
-  const records: any[] = [];
-
-  for (const farm of farms || []) {
-    if (buildGatPlotName(farm)) {
-      records.push(farmRecordToPlot(farm, farmerCtx));
-      continue;
-    }
-
-    const nestedPlots = farm?.plots ?? farm?.farm_plots ?? farm?.plot_list ?? [];
-    if (Array.isArray(nestedPlots) && nestedPlots.length > 0) {
-      for (const plot of nestedPlots) {
-        const plotName = buildGatPlotName(plot);
-        if (!plotName) continue;
-        records.push(
-          farmRecordToPlot(
-            {
-              ...farm,
-              ...plot,
-              plot,
-              boundary: plot?.boundary ?? plot?.coordinates?.boundary ?? farm?.boundary,
-            },
-            farmerCtx,
-          ),
-        );
-      }
-      continue;
-    }
-
-    records.push(farmRecordToPlot(farm, farmerCtx));
-  }
-
-  return dedupePlotRecords(records);
-}
-
 function boundaryToLeafletCoords(boundary: any): [number, number][] {
   const coordsList = boundary?.coordinates;
   if (!coordsList || !Array.isArray(coordsList) || coordsList.length === 0) {
@@ -643,6 +580,21 @@ function boundaryToLeafletCoords(boundary: any): [number, number][] {
     .map(([lng, lat]: [number, number]) => [lat, lng]);
 }
 
+function applyLeafletCoords(
+  coords: [number, number][],
+  setPlotCoordinates: React.Dispatch<
+    React.SetStateAction<[number, number][]>
+  >,
+  setMapCenter: React.Dispatch<React.SetStateAction<[number, number]>>,
+  setMapKey: React.Dispatch<React.SetStateAction<number>>,
+): boolean {
+  if (coords.length === 0) return false;
+  setPlotCoordinates(coords);
+  setMapCenter(calculateCenterFromCoords(coords));
+  setMapKey((prev) => prev + 1);
+  return true;
+}
+
 function calculateCenterFromCoords(
   coords: [number, number][],
 ): [number, number] {
@@ -650,13 +602,6 @@ function calculateCenterFromCoords(
   const sumLat = coords.reduce((sum, [lat]) => sum + lat, 0);
   const sumLng = coords.reduce((sum, [, lng]) => sum + lng, 0);
   return [sumLat / coords.length, sumLng / coords.length];
-}
-
-function getPlotIdsFromFarmer(farmer: any): string[] {
-  return extractPlotsFromFarmer(farmer)
-    .map((plot: any) => plot?.fastapi_plot_id ?? plot?.events_plot_id ?? plot?.plot_id)
-    .filter((plotId) => plotId != null && `${plotId}`.trim() !== "")
-    .map((plotId) => String(plotId));
 }
 
 const OwnerFarmDash: React.FC = () => {
@@ -688,7 +633,7 @@ const OwnerFarmDash: React.FC = () => {
   const [loadingFarmerPlots, setLoadingFarmerPlots] = useState<boolean>(false);
   const [loadingData, setLoadingData] = useState<boolean>(false);
   const [plotStatsError, setPlotStatsError] = useState<string | null>(null);
-  const [showDebugInfo, setShowDebugInfo] = useState(false);
+  const [showDebugInfo] = useState(false);
   const [loadingSections, setLoadingSections] = useState<{
     plotStats: boolean;
     indices: boolean;
@@ -764,7 +709,7 @@ const OwnerFarmDash: React.FC = () => {
   const [stressEvents, setStressEvents] = useState<StressEvent[]>([]);
   const [showStressEvents] = useState<boolean>(false);
   const [ndreStressEvents, setNdreStressEvents] = useState<StressEvent[]>([]);
-  const [showNDREEvents, setShowNDREEvents] = useState<boolean>(false);
+  const [showNDREEvents] = useState<boolean>(false);
   const [combinedChartData, setCombinedChartData] = useState<LineChartData[]>(
     [],
   );
@@ -814,48 +759,29 @@ const OwnerFarmDash: React.FC = () => {
     selectedPlotIdRef.current = selectedPlotId;
   }, [selectedPlotId]);
 
-  // NEW: Function to set plot coordinates from existing state
-  const setPlotCoordinatesFromState = (plotId: string): void => {
-    // Only rely on the currently loaded farmers list.
-    const farmer = farmersForSelectedOfficer.find(
-      (f: any) => getFarmerId(f) === String(selectedFarmerId),
+  const applyCoordinatesFromPlot = (plot: any, plotKey?: string): boolean => {
+    const coords = resolveLeafletBoundaryForPlotRecord(
+      plot,
+      plotKey ?? plot?.fastapi_plot_id ?? plot?.plot_id ?? plot?.id,
     );
-
-    const plot =
-      farmer?.plots?.find((p: any) => {
-        const pid = p?.fastapi_plot_id ?? p?.plot_id ?? p?.id;
-        return pid != null && String(pid) === String(plotId);
-      }) ?? null;
-
-    const boundary = plot?.boundary;
-    const coordsList = boundary?.coordinates;
-
-    if (coordsList && Array.isArray(coordsList) && coordsList.length > 0) {
-      const geom = coordsList[0];
-      if (geom) {
-        // The API gives [lng, lat], Leaflet needs [lat, lng]
-        const coords = geom.map(
-          ([lng, lat]: [number, number]) => [lat, lng],
-        );
-        setPlotCoordinates(coords);
-        setMapCenter(calculateCenterFromCoords(coords));
-        setMapKey((prev) => prev + 1);
-        return;
-      }
+    if (coords.length > 0) {
+      return applyLeafletCoords(
+        coords,
+        setPlotCoordinates,
+        setMapCenter,
+        setMapKey,
+      );
     }
 
-    setPlotCoordinates([]);
-  };
-
-  const applyCoordinatesFromPlot = (plot: any): boolean => {
-    const coords = boundaryToLeafletCoords(
+    const legacy = boundaryToLeafletCoords(
       plot?.boundary ?? plot?.coordinates?.boundary,
     );
-    if (coords.length === 0) return false;
-    setPlotCoordinates(coords);
-    setMapCenter(calculateCenterFromCoords(coords));
-    setMapKey((prev) => prev + 1);
-    return true;
+    return applyLeafletCoords(
+      legacy,
+      setPlotCoordinates,
+      setMapCenter,
+      setMapKey,
+    );
   };
 
   const findPlotInSelection = (plotId: string): any | null => {
@@ -1145,8 +1071,8 @@ const OwnerFarmDash: React.FC = () => {
     });
     fetchAllData();
     const plot = findPlotInSelection(selectedPlotId);
-    if (!plot || !applyCoordinatesFromPlot(plot)) {
-      setPlotCoordinatesFromState(selectedPlotId);
+    if (!plot || !applyCoordinatesFromPlot(plot, selectedPlotId)) {
+      void fetchPlotCoordinates(selectedPlotId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- load dashboard once per plot id
   }, [selectedPlotId]);
@@ -1377,8 +1303,8 @@ const OwnerFarmDash: React.FC = () => {
           recovery: toNumberOrNull(plot?.brix_sugar?.recovery?.mean),
           area:
             plot?.area_acres ??
-            plot?.area ??
-            plot?.area_ha ??
+            plot?.soil?.area_acres ??
+            (plot?.area_ha != null ? Number(plot.area_ha) * 2.47105 : plot?.area) ??
             null,
           biomass: calculatedBiomass,
           totalBiomass: totalBiomassForMetric,
@@ -1949,14 +1875,29 @@ const OwnerFarmDash: React.FC = () => {
 
   // Fetch plot coordinates immediately when plot is selected
   const fetchPlotCoordinates = async (plotId: string): Promise<void> => {
-    // Check cache first
+    const plot = findPlotInSelection(plotId);
+    const savedCoords = resolveLeafletBoundaryForPlotRecord(plot, plotId);
+    if (savedCoords.length > 0) {
+      applyLeafletCoords(
+        savedCoords,
+        setPlotCoordinates,
+        setMapCenter,
+        setMapKey,
+      );
+      setPlotCoordinatesCache((prev) => new Map(prev.set(plotId, savedCoords)));
+      return;
+    }
+
+    // Check cache only after saved boundary lookup.
     if (plotCoordinatesCache.has(plotId)) {
       const cachedCoords = plotCoordinatesCache.get(plotId);
       if (cachedCoords && cachedCoords.length > 0) {
-        setPlotCoordinates(cachedCoords);
-        // Calculate center from coordinates
-        setMapCenter(calculateCenterFromCoords(cachedCoords));
-        setMapKey((prev) => prev + 1);
+        applyLeafletCoords(
+          cachedCoords,
+          setPlotCoordinates,
+          setMapCenter,
+          setMapKey,
+        );
         return;
       }
     }
@@ -1964,13 +1905,40 @@ const OwnerFarmDash: React.FC = () => {
     try {
       const coords = await fetchPlotBoundaryCoordinates(plotId);
       if (coords && coords.length > 0) {
-        setPlotCoordinates(coords);
+        applyLeafletCoords(
+          coords,
+          setPlotCoordinates,
+          setMapCenter,
+          setMapKey,
+        );
         setPlotCoordinatesCache((prev) => new Map(prev.set(plotId, coords)));
-        setMapCenter(calculateCenterFromCoords(coords));
-        setMapKey((prev) => prev + 1);
       }
     } catch (error) {}
   };
+
+  useEffect(() => {
+    const onBoundaryUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<PlotBoundaryUpdatedDetail>).detail;
+      setPlotCoordinatesCache(new Map());
+      if (!selectedPlotIdRef.current) return;
+      const plot = findPlotInSelection(selectedPlotIdRef.current);
+      if (
+        !applyCoordinatesFromPlot(plot, selectedPlotIdRef.current) &&
+        selectedPlotIdRef.current
+      ) {
+        void fetchPlotCoordinates(selectedPlotIdRef.current);
+      }
+      if (detail?.plotKey && selectedFarmerId) {
+        lastFetchedFarmerIdRef.current = "";
+      }
+    };
+
+    window.addEventListener(PLOT_BOUNDARY_UPDATED_EVENT, onBoundaryUpdated);
+    return () => {
+      window.removeEventListener(PLOT_BOUNDARY_UPDATED_EVENT, onBoundaryUpdated);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refresh map when farmer edits KML
+  }, [selectedFarmerId]);
 
   // Aggregation logic (same as FarmerDashboard)
   const aggregateDataByPeriod = (
@@ -2126,26 +2094,6 @@ const OwnerFarmDash: React.FC = () => {
         />
       </g>
     );
-  };
-
-  const fetchNDREStressEvents = async (): Promise<void> => {
-    if (!selectedPlotId) {
-      return;
-    }
-
-    try {
-      const data = await makeRequestWithRetry(
-        `${BASE_URL}/plots/${selectedPlotId}/stress?index_type=NDRE&threshold=0.15`,
-        1,
-        OWNER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
-      );
-      setNdreStressEvents(data.events ?? []);
-      setShowNDREEvents(true);
-    } catch (err: any) {
-      // Optionally show user-friendly error message
-      if (err.message) {
-      }
-    }
   };
 
   // Map auto-center component (from Harvest Dashboard)
@@ -2786,14 +2734,12 @@ const OwnerFarmDash: React.FC = () => {
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
                   {!selectedPlotId ? (
-                    "-"
+                    "0"
                   ) : loadingData ||
                     (metrics.fieldScore === null && loadingSections.irrigation) ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : metrics.fieldScore != null ? (
-                    metrics.fieldScore.toFixed(1)
                   ) : (
-                    "-"
+                    (metrics.fieldScore ?? 0).toFixed(1)
                   )}
                 </div>
                 <div className="text-sm font-semibold text-emerald-600">%</div>
@@ -2837,13 +2783,11 @@ const OwnerFarmDash: React.FC = () => {
                   <div className="text-right min-w-0">
                     <div className="text-2xl font-bold text-gray-800">
                       {!selectedPlotId ? (
-                        "-"
+                        "0"
                       ) : loadingSections.waterStress ? (
                         <Loader2 className="w-5 h-5 animate-spin inline-block" />
-                      ) : showCciValue ? (
-                        metrics.cropConditionValue!.toFixed(1)
                       ) : (
-                        "-"
+                        (metrics.cropConditionValue ?? 0).toFixed(1)
                       )}
                     </div>
                     <div
@@ -2857,7 +2801,7 @@ const OwnerFarmDash: React.FC = () => {
                     >
                       {!selectedPlotId || loadingSections.waterStress
                         ? "CCI"
-                        : (cciStyle?.label ?? metrics.cropConditionLabel ?? "-")}
+                        : (cciStyle?.label ?? metrics.cropConditionLabel ?? "CCI")}
                     </div>
                   </div>
                 </div>
@@ -2874,19 +2818,17 @@ const OwnerFarmDash: React.FC = () => {
               <div className="text-right">
                 <div className="text-lg font-bold text-gray-800">
                   {!selectedPlotId ? (
-                    "-"
+                    "0"
                   ) : loadingSections.waterStress ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : (
-                    (metrics.stressCount ?? "-")
+                    (metrics.stressCount ?? 0)
                   )}
                 </div>
                 <div className="text-xs font-semibold text-red-600">
                   {!selectedPlotId || loadingSections.waterStress
                     ? "Total days"
-                    : metrics.stressTotalDays != null
-                      ? `${metrics.stressTotalDays} days`
-                      : "-"}
+                    : `${metrics.stressTotalDays ?? 0} days`}
                 </div>
               </div>
             </div>

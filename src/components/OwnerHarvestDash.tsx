@@ -10,7 +10,10 @@ import api, {
   normalizeDistrictForEventsApi,
   resolveManagerDistrictForEventsApi,
   type DistrictTotalPlotAreaResponse,
+  FARMS_ALL_CACHE_KEY,
 } from "../api";
+import { removeCache } from "../utils/cache";
+import { PLOT_BOUNDARY_UPDATED_EVENT } from "../utils/plotBoundarySync";
 import {
   buildOwnerHarvestRows,
   collectCropVarietiesFromFarmRows,
@@ -30,6 +33,9 @@ import {
   rowBelongsToManager,
   rowBelongsToFieldOfficer,
   rowMatchesRegion,
+  inferDistrictSlugFromHarvestRows,
+  sumHarvestAreaFromAgroStats,
+  sumHarvestAreaFromRows,
   type TeamConnectHarvestRow,
   type TeamConnectHierarchy,
 } from "../utils/teamConnectHarvest";
@@ -529,6 +535,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
     hierarchy: TeamConnectHierarchy;
     me: any;
     farmRows: any[];
+    agroStats: Record<string, unknown>;
   } | null>(null);
   const ownerHarvestCtxRef = useRef<{
     hierarchy: TeamConnectHierarchy;
@@ -537,7 +544,23 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
     industries: any[];
     agroStats: Record<string, unknown>;
   } | null>(null);
+  const [managerAgroStats, setManagerAgroStats] = useState<Record<string, unknown>>(
+    {},
+  );
   const agroRefreshingRef = useRef(false);
+  const districtFetchAttemptRef = useRef("");
+  const applyHarvestRowsRef = useRef<
+    | ((
+        hierarchy: TeamConnectHierarchy,
+        agroStats: Record<string, unknown>,
+        farmRows: any[],
+        me: any,
+        industries: any[],
+        opts?: { resetFilters?: boolean },
+      ) => TeamConnectHarvestRow[])
+    | null
+  >(null);
+  const [boundaryRefreshToken, setBoundaryRefreshToken] = useState(0);
 
   // Dynamic filter options
   const [regionOptions, setRegionOptions] = useState<FilterOption[]>([
@@ -612,6 +635,23 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isManagerMode, managerUserId, managerDistrict]);
 
+  // If profile did not yield a district slug, infer Mandya/etc. from loaded plot regions.
+  useEffect(() => {
+    if (!isManagerMode || !managerUserId || !rawData.length) return;
+    const inferred = inferDistrictSlugFromHarvestRows(rawData);
+    if (!inferred) return;
+
+    if (!managerDistrict) {
+      setManagerDistrict(inferred);
+    }
+
+    if (!districtAreaData && districtFetchAttemptRef.current !== inferred) {
+      districtFetchAttemptRef.current = inferred;
+      void fetchDistrictArea(inferred);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isManagerMode, managerUserId, managerDistrict, rawData, districtAreaData]);
+
   const isLoadingHarvest = loading || dropdownsLoading;
 
 
@@ -658,6 +698,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
       industries: any[],
       opts?: { resetFilters?: boolean },
     ) => {
+      applyHarvestRowsRef.current = applyHarvestRows;
       const enriched = enrichHierarchyWithFarmRows(hierarchy, farmRows);
       const factoryCenter = extractFactoryLatLng(
         me,
@@ -770,15 +811,17 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
             meSettled.status === "fulfilled"
               ? (meSettled.value?.data ?? null)
               : null;
-          const hierarchy = parseManagerFieldOfficersResponse(
-            officersSettled.value?.data,
-          );
+          const officersPayload = officersSettled.value?.data;
+          const hierarchy = parseManagerFieldOfficersResponse(officersPayload);
           setManagerUserId(String(me?.id ?? me?.user_id ?? ""));
           const districtSlug = resolveManagerDistrictForEventsApi(
             me,
             hierarchy.fieldOfficers,
+            officersPayload?.manager ?? hierarchy.managers?.[0],
+            me?.industry,
           );
           setManagerDistrict(districtSlug);
+          districtFetchAttemptRef.current = districtSlug;
           setDistrictAreaData(null);
 
           let agroStats: Record<string, unknown> = {};
@@ -788,6 +831,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
             agroStats = (await getManagerFieldOfficersAgroStats(undefined, {
               force: true,
             })) as Record<string, unknown>;
+            setManagerAgroStats(agroStats);
           } catch (err) {
             if (import.meta.env.DEV) {
               console.warn("[Harvest] manager agroStats failed:", err);
@@ -798,6 +842,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
             hierarchy,
             me,
             farmRows: [],
+            agroStats,
           };
 
           // First paint: FO hierarchy + agroStats (map/KPIs). Farms only enrich variety.
@@ -836,6 +881,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
               const fresh = (await getManagerFieldOfficersAgroStats(undefined, {
                 force: true,
               })) as Record<string, unknown>;
+              setManagerAgroStats(fresh);
               lastAgroFetchAt = Date.now();
               if (!alive) return;
               let farmRows = ctx.farmRows;
@@ -851,6 +897,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                 managerHarvestCtxRef.current = {
                   ...managerHarvestCtxRef.current,
                   farmRows,
+                  agroStats: fresh,
                 };
               }
               applyHarvestRows(
@@ -1005,6 +1052,14 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
 
         if (!alive) return;
 
+        ownerHarvestCtxRef.current = {
+          hierarchy,
+          me,
+          farmRows: [],
+          industries: [],
+          agroStats,
+        };
+
         // First paint: map/KPIs. Keep dropdowns loading until farms fill variety.
         const firstRows = applyHarvestRows(hierarchy, agroStats, [], me, [], {
           resetFilters: true,
@@ -1046,6 +1101,13 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
             industries || [],
             { resetFilters: false },
           );
+          if (ownerHarvestCtxRef.current) {
+            ownerHarvestCtxRef.current = {
+              ...ownerHarvestCtxRef.current,
+              farmRows: farmRows || [],
+              industries: industries || [],
+            };
+          }
           if (enrichedRows.length > 0) setFetchError(null);
         } finally {
           if (alive) {
@@ -1077,6 +1139,57 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
       cleanups.forEach((fn) => fn());
     };
   }, [isManagerMode]);
+
+  // After farmer KML save: bust farms cache and remap polygons from GET /farms/.
+  useEffect(() => {
+    const onBoundaryUpdated = () => {
+      removeCache(FARMS_ALL_CACHE_KEY);
+      setBoundaryRefreshToken((token) => token + 1);
+    };
+    window.addEventListener(PLOT_BOUNDARY_UPDATED_EVENT, onBoundaryUpdated);
+    return () => {
+      window.removeEventListener(PLOT_BOUNDARY_UPDATED_EVENT, onBoundaryUpdated);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (boundaryRefreshToken === 0) return;
+    const applyRows = applyHarvestRowsRef.current;
+    if (!applyRows) return;
+
+    const ctx = isManagerMode
+      ? managerHarvestCtxRef.current
+      : ownerHarvestCtxRef.current;
+    if (!ctx) return;
+
+    void (async () => {
+      try {
+        const farmRows = await getAllFarmsWithFarmerDetails({ force: true });
+        if (isManagerMode && managerHarvestCtxRef.current) {
+          managerHarvestCtxRef.current = {
+            ...managerHarvestCtxRef.current,
+            farmRows: farmRows || [],
+          };
+        }
+        if (!isManagerMode && ownerHarvestCtxRef.current) {
+          ownerHarvestCtxRef.current = {
+            ...ownerHarvestCtxRef.current,
+            farmRows: farmRows || [],
+          };
+        }
+        applyRows(
+          ctx.hierarchy,
+          ctx.agroStats ?? {},
+          farmRows || [],
+          ctx.me,
+          isManagerMode ? [] : ownerHarvestCtxRef.current?.industries ?? [],
+          { resetFilters: false },
+        );
+      } catch {
+        // Best-effort — user can hard refresh.
+      }
+    })();
+  }, [boundaryRefreshToken, isManagerMode]);
 
   // Cascade dropdown options from harvest rows only (values present in response data).
   // Do not seed from hierarchy/scopedOptions — that shows empty/unavailable varieties & regions.
@@ -1384,20 +1497,55 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
     }));
   }, [filteredData]);
 
+  const extractRowArea = (item: any): number => {
+    if (!item) return 0;
+    const val =
+      item["Area (acre)"] ??
+      item["Area (acer)"] ??
+      item.area_acres ??
+      item.area_size ??
+      item.area ??
+      item.acreage ??
+      item.raw?.area_acres ??
+      item.raw?.area_size ??
+      item.raw?.area ??
+      item.raw?.farm?.area_acres ??
+      item.raw?.farm?.area_size ??
+      item.raw?.farm?.area ??
+      item.raw?.plot?.area_acres ??
+      item.raw?.plot?.area_size ??
+      item.raw?.plot?.area ??
+      0;
+    if (typeof val === "number" && Number.isFinite(val)) return val > 0 ? val : 0;
+    if (typeof val === "string") {
+      const parsed = parseFloat(val.replace(/[^\d.-]/g, ""));
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+    }
+    return 0;
+  };
+
   const keyMetrics = useMemo(() => {
     const summedArea = filteredData.reduce(
-      (sum, item) => sum + (item["Area (acre)"] || 0),
+      (sum, item) => sum + extractRowArea(item),
       0,
     );
+    const allManagerPlotArea = sumHarvestAreaFromRows(rawData);
+    const agroAreaTotal = sumHarvestAreaFromAgroStats(managerAgroStats);
+    const fallbackArea = Math.max(summedArea, allManagerPlotArea, agroAreaTotal);
+
     const totalAreaValue = isManagerMode
-      ? districtAreaLoading
+      ? districtAreaLoading && !districtAreaData && fallbackArea <= 0
         ? "..."
         : districtAreaData
           ? districtAreaData.total_area_acres.toFixed(2)
-          : "-"
-      : summedArea
+          : fallbackArea > 0
+            ? fallbackArea.toFixed(2)
+            : "-"
+      : summedArea > 0
         ? summedArea.toFixed(2)
-        : "-";
+        : filteredData.length > 0
+          ? "0.00"
+          : "-";
     // Average only values present in agroStats (including API 0). Never invent static numbers.
     const yields = filteredData
       .map((item) => item["Prediction Yield (T/acre)"])
@@ -1422,7 +1570,9 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
         sub:
           isManagerMode && districtAreaData
             ? `${districtAreaData.plot_count} plots · ${districtAreaData.district}`
-            : undefined,
+            : isManagerMode && fallbackArea > 0 && !districtAreaData
+              ? `${rawData.length} assigned plots`
+              : undefined,
       },
       {
         label: "Avg. Distance (KM)",
@@ -1454,9 +1604,11 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
     ];
   }, [
     filteredData,
+    rawData,
     isManagerMode,
     districtAreaData,
     districtAreaLoading,
+    managerAgroStats,
   ]);
 
   const mapCenter = useMemo((): [number, number] | null => {

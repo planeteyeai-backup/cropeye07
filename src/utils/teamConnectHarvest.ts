@@ -1,5 +1,6 @@
 import { normalizePlotKey, plotKeyFromRecord } from "./plotName";
 import { collectFarmsFromRecord } from "./plantation";
+import { resolvePlotBoundaryFromAnyRecord } from "./plotBoundarySync";
 
 export interface TeamConnectHarvestRow {
   id?: string;
@@ -7,7 +8,7 @@ export interface TeamConnectHarvestRow {
   Latitude: number;
   Longitude: number;
   "Sugarcane Status": string;
-  "Area (Hect)": number;
+  "Area (acre)": number;
   Days: number;
   "Prediction Yield (T/acre)": number | null;
   "Prediction Yield (T/acer)"?: number | null;
@@ -670,7 +671,12 @@ export function collectCropVarietiesFromFarmRows(
         ? farm.farmer.crop_type?.crop_variety
         : null,
       Array.isArray(farm?.plots)
-        ? farm.plots[0]?.crop_variety
+        ? firstNonEmpty(
+            farm.plots[0]?.crop_variety,
+            typeof farm.plots[0]?.crop_type === "object"
+              ? farm.plots[0].crop_type?.crop_variety
+              : null,
+          )
         : null,
     );
     if (variety) set.add(variety);
@@ -1098,12 +1104,35 @@ function readRegion(plot: any, farmer: any, fo: any, agro?: any): string {
   return value || "Unknown";
 }
 
-function extractCoordinatesFromRecord(record: any): number[][] {
+function polygonRingFromRecord(record: any): number[][] {
   if (!record) return [];
 
-  const boundary = record.boundary ?? record.geometry;
-  if (boundary?.coordinates?.[0]?.length) {
-    return boundary.coordinates[0];
+  const fromBoundary = resolvePlotBoundaryFromAnyRecord(record);
+  if (fromBoundary?.coordinates?.[0]?.length) {
+    return fromBoundary.coordinates[0];
+  }
+
+  const geometry = record?.geometry;
+  if (geometry?.coordinates?.[0]?.length) {
+    return geometry.coordinates[0];
+  }
+  if (Array.isArray(geometry) && geometry.length >= 3 && Array.isArray(geometry[0])) {
+    return geometry as number[][];
+  }
+
+  return [];
+}
+
+function pointCoordsFromRecord(record: any): number[][] {
+  if (!record) return [];
+
+  const location = record?.location;
+  if (Array.isArray(location?.coordinates) && location.coordinates.length >= 2) {
+    const lng = Number(location.coordinates[0]);
+    const lat = Number(location.coordinates[1]);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      return [[lng, lat]];
+    }
   }
 
   const lat =
@@ -1308,18 +1337,29 @@ function resolveCenter(
   farmer: any,
   fo: any,
 ): ReturnType<typeof centerFromCoordinates> {
-  const sources = [
-    agro?.geometry,
-    plot,
-    farm,
-    farmer,
-    fo,
-    agro ? { geometry: agro.geometry } : null,
-  ];
+  // Pass 1: Django saved polygons (/farms/ boundary) — never lose to a point-only plot row.
+  const djangoSources = [plot, farm, farmer, fo].filter(Boolean);
+  for (const source of djangoSources) {
+    const ring = polygonRingFromRecord(source);
+    if (ring.length >= 3) {
+      const center = centerFromCoordinates(ring);
+      if (center) return center;
+    }
+  }
 
-  for (const source of sources) {
-    const coords = extractCoordinatesFromRecord(source);
-    const center = centerFromCoordinates(coords);
+  // Pass 2: Events agroStats polygon (often stale after farmer KML edit).
+  for (const source of [agro, agro ? { geometry: agro.geometry } : null]) {
+    const ring = polygonRingFromRecord(source);
+    if (ring.length >= 3) {
+      const center = centerFromCoordinates(ring);
+      if (center) return center;
+    }
+  }
+
+  // Pass 3: point-only fallbacks (center marker, no polygon).
+  for (const source of [...djangoSources, agro]) {
+    const point = pointCoordsFromRecord(source);
+    const center = centerFromCoordinates(point);
     if (center) return center;
   }
 
@@ -1601,7 +1641,10 @@ function mergeFarmDetailsOntoRecord(target: any, farmRow: any): any {
 
   return {
     ...target,
-    area_size: firstNonEmpty(target.area_size, farmRow.area_size) || target.area_size,
+    // Prefer /farms/ row (My Profile save) over stale hierarchy area.
+    area_size: firstNonEmpty(farmRow.area_size, target.area_size) || target.area_size,
+    area_size_numeric:
+      farmRow.area_size_numeric ?? target.area_size_numeric ?? target.area_size_numeric,
     crop_variety:
       firstNonEmpty(
         target.crop_variety,
@@ -1714,7 +1757,13 @@ function mergeFarmDetailsOntoRecord(target: any, farmRow: any): any {
     fastapi_plot_id:
       firstNonEmpty(target.fastapi_plot_id, farmRow.fastapi_plot_id) ||
       target.fastapi_plot_id,
-    boundary: target.boundary ?? farmRow.boundary,
+    boundary:
+      resolvePlotBoundaryFromAnyRecord(farmRow) ??
+      resolvePlotBoundaryFromAnyRecord(target) ??
+      farmRow.boundary ??
+      target.boundary ??
+      farmRow.plot?.boundary ??
+      target.plot?.boundary,
     location: target.location ?? farmRow.location,
   };
 }
@@ -1825,7 +1874,10 @@ export function enrichHierarchyWithFarmRows(
         district: farm?.district,
         region: farm?.region,
         village: farm?.village,
-        boundary: farm?.boundary,
+        boundary:
+          farm?.boundary ??
+          farm?.plot?.boundary ??
+          farm?.coordinates?.boundary,
         location: farm?.location,
         crop_variety: farm?.crop_variety ?? farm?.crop_type?.crop_variety,
         variety_type: farm?.variety_type,
@@ -1888,6 +1940,137 @@ function buildPlotContextMap(
   return map;
 }
 
+function parsePositiveArea(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const n =
+    typeof value === "number" ? value : parseFloat(String(value).replace(/,/g, ""));
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+
+/** Sum plot acres from harvest table rows (fallback when district API unavailable). */
+export function sumHarvestAreaFromRows(
+  rows: Array<Pick<TeamConnectHarvestRow, "Area (acre)"> | null | undefined>,
+): number {
+  let total = 0;
+  for (const row of rows) {
+    const area = parsePositiveArea(row?.["Area (acre)"]);
+    if (area != null) total += area;
+  }
+  return total;
+}
+
+/** Sum acres across Events agroStats plot dict (manager FO merge). */
+export function sumHarvestAreaFromAgroStats(
+  agroStats: Record<string, unknown> | null | undefined,
+): number {
+  if (!agroStats || typeof agroStats !== "object") return 0;
+  let total = 0;
+  for (const plot of Object.values(agroStats)) {
+    if (!plot || typeof plot !== "object") continue;
+    const area = resolveHarvestAreaAcres(plot as any);
+    if (area > 0) total += area;
+  }
+  return total;
+}
+
+/** Infer Events district slug (mandya, bagalkot, …) from loaded harvest rows. */
+export function inferDistrictSlugFromHarvestRows(
+  rows: Array<Pick<TeamConnectHarvestRow, "Region" | "regionKeys">>,
+): string {
+  const labels: string[] = [];
+  for (const row of rows) {
+    if (row.Region && row.Region !== "Unknown") {
+      labels.push(row.Region);
+    }
+    for (const key of row.regionKeys ?? []) {
+      if (key && key !== "Unknown") labels.push(String(key));
+    }
+  }
+  return majorityDistrictSlugFromLabels(labels);
+}
+
+function majorityDistrictSlugFromLabels(labels: string[]): string {
+  const counts = new Map<string, number>();
+  for (const label of labels) {
+    const slug = slugFromDistrictLabelForHarvest(String(label));
+    if (!slug) continue;
+    counts.set(slug, (counts.get(slug) ?? 0) + 1);
+  }
+  let best = "";
+  let bestCount = 0;
+  for (const [slug, count] of counts) {
+    if (count > bestCount) {
+      best = slug;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+function slugFromDistrictLabelForHarvest(label: string): string {
+  const normalized = label.trim().toLowerCase().replace(/\s+/g, "");
+  if (!normalized) return "";
+  if (/mandya/.test(normalized)) return "mandya";
+  if (/bagalk/.test(normalized)) return "bagalkot";
+  if (/kalbur|gulbarga|kalaburagi/.test(normalized)) return "kalburgi";
+  if (/vijay|bijapur|vijapura/.test(normalized)) return "vijaypura";
+  const aliases: Record<string, string> = {
+    kalburagi: "kalburgi",
+    kalaburagi: "kalburgi",
+    gulbarga: "kalburgi",
+    vijapura: "vijaypura",
+    bijapur: "vijaypura",
+    bagalakote: "bagalkot",
+  };
+  const slug = aliases[normalized] ?? normalized;
+  const known = new Set([
+    "bagalkot",
+    "bagalkote",
+    "kalburgi",
+    "mandya",
+    "vijaypura",
+    "vijayapura",
+    "gulbarga",
+  ]);
+  return known.has(slug) ? slug : "";
+}
+
+/** Plot acres from Events agroStats or farm/plot records (correct Total Area). */
+function resolveHarvestAreaAcres(
+  agro: any,
+  farm?: any,
+  plot?: any,
+  farmer?: any,
+): number {
+  const fromAgro =
+    parsePositiveArea(agro?.area_acres) ??
+    parsePositiveArea(agro?.soil?.area_acres) ??
+    parsePositiveArea(agro?.properties?.area_acres) ??
+    parsePositiveArea(agro?.properties?.area_size) ??
+    parsePositiveArea(agro?.properties?.area) ??
+    parsePositiveArea(agro?.area_size) ??
+    parsePositiveArea(agro?.area) ??
+    parsePositiveArea(agro?.acres);
+  if (fromAgro != null) return fromAgro;
+
+  return (
+    parsePositiveArea(farm?.area_acres) ??
+    parsePositiveArea(farm?.area_size_numeric) ??
+    parsePositiveArea(farm?.area_size) ??
+    parsePositiveArea(farm?.plot?.area_size) ??
+    parsePositiveArea(farm?.area) ??
+    parsePositiveArea(plot?.area_acres) ??
+    parsePositiveArea(plot?.area_size_numeric) ??
+    parsePositiveArea(plot?.area_size) ??
+    parsePositiveArea(plot?.area) ??
+    parsePositiveArea(farmer?.area_acres) ??
+    parsePositiveArea(farmer?.area_size) ??
+    parsePositiveArea(farmer?.area) ??
+    0
+  );
+}
+
 function buildRowFromContext(
   ctx: PlotContext,
   agro: any | null,
@@ -1902,10 +2085,7 @@ function buildRowFromContext(
   const plantationDate = readPlantationDate(farm, plot, farmer, agro);
   const days = computeDaysSincePlantation(plantationDate);
 
-  const area =
-    agro?.area_acres ??
-    agro?.soil?.area_acres ??
-    (parseFloat(String(farm?.area_size ?? "0")) || 0);
+  const area = resolveHarvestAreaAcres(agro, farm, plot, farmer);
 
   const yieldValue = extractSugarYield(agro);
   const brixValue = extractBrix(agro);
@@ -1928,7 +2108,7 @@ function buildRowFromContext(
     Latitude: center.lat,
     Longitude: center.lng,
     "Sugarcane Status": computeStatus(days, agro),
-    "Area (Hect)": area,
+    "Area (acre)": area,
     Days: days,
     "Prediction Yield (T/acre)": yieldValue,
     "Prediction Yield (T/acer)": yieldValue,
@@ -2009,9 +2189,23 @@ function enrichRowFromContext(
     agro,
     factoryCenter,
   );
+  const centerFromSavedBoundary = resolveCenter(
+    null,
+    ctx.plot,
+    ctx.farm,
+    ctx.farmer,
+    ctx.fo,
+  );
 
   return {
     ...row,
+    ...(centerFromSavedBoundary?.boundary?.length
+      ? {
+          Latitude: centerFromSavedBoundary.lat,
+          Longitude: centerFromSavedBoundary.lng,
+          boundaryCoordinates: centerFromSavedBoundary.boundary,
+        }
+      : {}),
     managerId: row.managerId || ctx.managerId || undefined,
     fieldOfficerId: row.fieldOfficerId || fieldOfficerId(ctx.fo) || undefined,
     Manager:
@@ -2112,7 +2306,7 @@ function buildRowFromAgroOnly(
 
   const plantationDate = readPlantationDate(null, null, null, agro);
   const days = computeDaysSincePlantation(plantationDate);
-  const area = agro?.area_acres ?? agro?.soil?.area_acres ?? 0;
+  const area = resolveHarvestAreaAcres(agro, null);
   const cleanPlotKey = plotKey.replace(/^"|"$/g, "");
   const regionKeys = collectLocationKeys(agro, fo);
   const primaryRegion =
@@ -2125,7 +2319,7 @@ function buildRowFromAgroOnly(
     Latitude: center.lat,
     Longitude: center.lng,
     "Sugarcane Status": computeStatus(days, agro),
-    "Area (Hect)": area,
+    "Area (acre)": area,
     Days: days,
     "Prediction Yield (T/acre)": extractSugarYield(agro),
     "Brix (Degree)": extractBrix(agro),

@@ -2043,28 +2043,57 @@ function majorityDistrictSlug(labels: string[]): string {
   return best;
 }
 
-/** Pick Events district slug for the logged-in manager (not shared region labels). */
-export function resolveManagerDistrictForEventsApi(
-  me: unknown,
-  fieldOfficers?: unknown[],
-): string {
-  const profileDistricts: string[] = [];
-  const officerDistricts: string[] = [];
-  const push = (value: unknown, bucket: string[]) => {
+function collectDistrictLabelsFromRecord(
+  record: unknown,
+  bucket: string[],
+): void {
+  if (!record || typeof record !== "object") return;
+  const row = record as Record<string, unknown>;
+  const push = (value: unknown) => {
     const text = String(value ?? "").trim();
     if (text) bucket.push(text);
   };
 
-  const profile = me as Record<string, unknown> | null | undefined;
-  push(profile?.district, profileDistricts);
-  const address = profile?.address as Record<string, unknown> | undefined;
-  if (address) push(address.district, profileDistricts);
+  push(row.district);
+  push(row.region);
+  push(row.taluka);
+  push(row.state);
+
+  const addressInfo = row.address_info as Record<string, unknown> | undefined;
+  if (addressInfo) {
+    push(addressInfo.district);
+    push(addressInfo.region);
+    push(addressInfo.taluka);
+    push(addressInfo.state);
+  }
+
+  const address = row.address as Record<string, unknown> | undefined;
+  if (address && typeof address === "object") {
+    push(address.district);
+    push(address.region);
+    push(address.taluka);
+    push(address.state);
+  } else if (typeof row.address === "string" && row.address.trim()) {
+    bucket.push(row.address.trim());
+  }
+}
+
+/** Pick Events district slug for the logged-in manager (not shared region labels). */
+export function resolveManagerDistrictForEventsApi(
+  me: unknown,
+  fieldOfficers?: unknown[],
+  manager?: unknown,
+  industry?: unknown,
+): string {
+  const profileDistricts: string[] = [];
+  const officerDistricts: string[] = [];
+
+  collectDistrictLabelsFromRecord(me, profileDistricts);
+  collectDistrictLabelsFromRecord(manager, profileDistricts);
+  collectDistrictLabelsFromRecord(industry, profileDistricts);
 
   for (const officer of fieldOfficers ?? []) {
-    const fo = officer as Record<string, unknown>;
-    push(fo.district, officerDistricts);
-    const foAddress = fo.address as Record<string, unknown> | undefined;
-    if (foAddress) push(foAddress.district, officerDistricts);
+    collectDistrictLabelsFromRecord(officer, officerDistricts);
   }
 
   for (const label of profileDistricts) {
@@ -2075,9 +2104,14 @@ export function resolveManagerDistrictForEventsApi(
   const fromOfficers = majorityDistrictSlug(officerDistricts);
   if (fromOfficers) return fromOfficers;
 
-  // Last resort only — region is often shared and must not override district.
-  const regionSlug = slugFromDistrictLabel(String(profile?.region ?? ""));
-  return regionSlug;
+  // Last resort — region/taluka labels often contain the district name (e.g. Mandya).
+  for (const label of [...profileDistricts, ...officerDistricts]) {
+    const slug = slugFromDistrictLabel(label);
+    if (slug) return slug;
+  }
+
+  const profile = me as Record<string, unknown> | null | undefined;
+  return slugFromDistrictLabel(String(profile?.region ?? ""));
 }
 
 /** GET /districts/{district}/total-plot-area — district-wide plot acreage. */
@@ -2096,11 +2130,27 @@ export const fetchDistrictTotalPlotArea = async (
   }
 
   const url = `/districts/${encodeURIComponent(d)}/total-plot-area`;
-  const response = await eventsApi.get<DistrictTotalPlotAreaResponse>(url);
-  if (response.data != null) {
-    setCache(cacheKey, response.data);
+  try {
+    const response = await eventsApi.get<DistrictTotalPlotAreaResponse>(url);
+    if (response.data != null) {
+      setCache(cacheKey, response.data);
+    }
+    return response.data;
+  } catch (primaryError) {
+    // Stale/wrong fastapi_token must not block district totals for managers.
+    try {
+      const response = await axios.get<DistrictTotalPlotAreaResponse>(
+        `${FASTAPI_AUTH_BASE_URL}${url}`,
+        { headers: { Accept: "application/json" }, timeout: 60_000 },
+      );
+      if (response.data != null) {
+        setCache(cacheKey, response.data);
+      }
+      return response.data;
+    } catch {
+      throw primaryError;
+    }
   }
-  return response.data;
 };
 
 /** Field officers assigned to the current manager (or owner).

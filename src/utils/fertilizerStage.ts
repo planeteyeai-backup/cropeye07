@@ -336,6 +336,12 @@ export function enrichPlotsWithFarmDetails(plots: any[], farms: any[]): any[] {
     return {
       ...matchedFarm,
       ...plot,
+      boundary:
+        matchedFarm?.plot?.boundary ??
+        matchedFarm?.boundary ??
+        matchedFarm?.coordinates?.boundary ??
+        plot?.boundary ??
+        plot?.coordinates?.boundary,
       plantation_date:
         plot?.plantation_date ??
         plot?.planting_date ??

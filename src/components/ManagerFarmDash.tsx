@@ -50,7 +50,9 @@ import {
   getSinglePlotAgroStats,
   isAnalyzeSinglePlotPlantationDateError,
   PLANTATION_DATE_NOT_PROVIDED_MSG,
+  FARMS_ALL_CACHE_KEY,
 } from "../api"; // Authenticated Django api + FastAPI events api
+import { removeCache } from "../utils/cache";
 import { MANAGER_FIELD_OFFICERS_CACHE_KEY } from "../services/prefetchService";
 import { useAppContext } from "../context/AppContext";
 import MapCropStatusOverlay from "./MapCropStatusOverlay";
@@ -68,6 +70,10 @@ import {
   protectManagerFarmDashSubtree,
   syncManagerDashSelectLocks,
 } from "../utils/protectManagerDashFromTranslate";
+import {
+  PLOT_BOUNDARY_UPDATED_EVENT,
+  resolveLeafletBoundaryForPlotRecord,
+} from "../utils/plotBoundarySync";
 
 // Constants (same as FarmerDashboard)
 const BASE_URL = "https://events-cropeye.up.railway.app";
@@ -328,16 +334,6 @@ function boundaryToLeafletCoords(boundary: any): [number, number][] {
         Number.isFinite(Number(pt[1])),
     )
     .map(([lng, lat]: [number, number]) => [Number(lat), Number(lng)]);
-}
-
-function resolvePlotBoundary(plot: any): any {
-  if (!plot || typeof plot !== "object") return null;
-  return (
-    plot.boundary ??
-    plot.coordinates?.boundary ??
-    plot.location?.boundary ??
-    null
-  );
 }
 
 function parseFarmsListResponse(data: unknown): any[] {
@@ -718,7 +714,7 @@ const ManagerFarmDash: React.FC = () => {
           normalizePlotKey(plotId),
       );
 
-      const coords = boundaryToLeafletCoords(resolvePlotBoundary(plot));
+      const coords = resolveLeafletBoundaryForPlotRecord(plot, plotId);
       if (coords.length >= 3) {
         setPlotCoordinates(coords);
         setMapCenter(calculateCenter(coords));
@@ -768,6 +764,50 @@ const ManagerFarmDash: React.FC = () => {
       cancelled = true;
     };
   }, [selectedFarmerId]);
+
+  // Re-fetch /farms/ boundaries after a farmer saves KML (same session or cache bust).
+  useEffect(() => {
+    const onBoundaryUpdated = () => {
+      removeCache(FARMS_ALL_CACHE_KEY);
+      setPlotCoordinatesCache(new Map());
+      const farmerId = selectedFarmerIdRef.current?.trim();
+      if (!farmerId || farmerId === "undefined") return;
+
+      void (async () => {
+        try {
+          const farmsRes = await getFarmsByFarmerId(farmerId);
+          const farms = parseFarmsListResponse(farmsRes?.data);
+          if (!farms.length) return;
+
+          setFarmersForSelectedOfficer((prev) =>
+            prev.map((farmer) => {
+              if (getFarmerId(farmer) !== farmerId) return farmer;
+              const plotList = Array.isArray(farmer?.plots) ? farmer.plots : [];
+              if (!plotList.length) return farmer;
+              return {
+                ...farmer,
+                plots: enrichPlotsWithFarmDetails(plotList, farms),
+              };
+            }),
+          );
+
+          const plotId = selectedPlotIdRef.current;
+          if (plotId) {
+            setPlotCoordinatesFromState(plotId);
+            void fetchPlotCoordinates(plotId);
+          }
+        } catch {
+          // Best-effort refresh.
+        }
+      })();
+    };
+
+    window.addEventListener(PLOT_BOUNDARY_UPDATED_EVENT, onBoundaryUpdated);
+    return () => {
+      window.removeEventListener(PLOT_BOUNDARY_UPDATED_EVENT, onBoundaryUpdated);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refresh map when KML saved
+  }, []);
 
   // Update plot id LIST only. Never assign selectedPlotId to plot[0] here.
   useEffect(() => {
@@ -1276,8 +1316,10 @@ const ManagerFarmDash: React.FC = () => {
           recovery: toNumberOrNull(recoveryStats?.mean ?? recoveryStats?.min),
           area:
             currentPlotData?.area_acres ??
-            currentPlotData?.area ??
-            currentPlotData?.area_ha ??
+            currentPlotData?.soil?.area_acres ??
+            (currentPlotData?.area_ha != null
+              ? Number(currentPlotData.area_ha) * 2.47105
+              : currentPlotData?.area) ??
             null,
           biomass: calculatedBiomass,
           totalBiomass: totalBiomassForMetric,
@@ -1406,12 +1448,28 @@ const ManagerFarmDash: React.FC = () => {
 
   // Fetch plot coordinates immediately when plot is selected
   const fetchPlotCoordinates = async (plotId: string): Promise<void> => {
-    // Check cache first
+    const farmer = farmersForSelectedOfficer.find(
+      (f) => getFarmerId(f) === String(selectedFarmerId),
+    );
+    const plot = farmer?.plots?.find(
+      (p: any) =>
+        normalizePlotKey(String(getPlotIdFromRecord(p) ?? "")) ===
+        normalizePlotKey(plotId),
+    );
+
+    const savedCoords = resolveLeafletBoundaryForPlotRecord(plot, plotId);
+    if (savedCoords.length >= 3) {
+      setPlotCoordinates(savedCoords);
+      setPlotCoordinatesCache((prev) => new Map(prev.set(plotId, savedCoords)));
+      setMapCenter(calculateCenter(savedCoords));
+      return;
+    }
+
+    // Check cache only after saved boundary lookup.
     if (plotCoordinatesCache.has(plotId)) {
       const cachedCoords = plotCoordinatesCache.get(plotId);
       if (cachedCoords && cachedCoords.length > 0) {
         setPlotCoordinates(cachedCoords);
-        // Calculate center from coordinates
         const center = calculateCenter(cachedCoords);
         setMapCenter(center);
         return;
@@ -1429,11 +1487,7 @@ const ManagerFarmDash: React.FC = () => {
       );
       if (coords.length >= 3) {
         setPlotCoordinates(coords);
-
-        // Cache the coordinates
         setPlotCoordinatesCache((prev) => new Map(prev.set(plotId, coords)));
-
-        // Calculate and set map center
         const center = calculateCenter(coords);
         setMapCenter(center);
       }
@@ -2147,13 +2201,11 @@ const ManagerFarmDash: React.FC = () => {
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
                   {!selectedPlotId ? (
-                    "-"
+                    "0"
                   ) : loadingData && metrics.fieldScore == null ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : metrics.fieldScore != null ? (
-                    metrics.fieldScore.toFixed(1)
                   ) : (
-                    "-"
+                    (metrics.fieldScore ?? 0).toFixed(1)
                   )}
                 </div>
                 <div className="text-sm font-semibold text-emerald-600">%</div>
@@ -2197,13 +2249,11 @@ const ManagerFarmDash: React.FC = () => {
                   <div className="text-right min-w-0">
                     <div className="text-2xl font-bold text-gray-800">
                       {!selectedPlotId ? (
-                        "-"
+                        "0"
                       ) : loadingWaterStress ? (
                         <Loader2 className="w-5 h-5 animate-spin inline-block" />
-                      ) : showCciValue ? (
-                        metrics.cropConditionValue!.toFixed(1)
                       ) : (
-                        "-"
+                        (metrics.cropConditionValue ?? 0).toFixed(1)
                       )}
                     </div>
                     <div
@@ -2217,7 +2267,7 @@ const ManagerFarmDash: React.FC = () => {
                     >
                       {!selectedPlotId || loadingWaterStress
                         ? "CCI"
-                        : (cciStyle?.label ?? metrics.cropConditionLabel ?? "-")}
+                        : (cciStyle?.label ?? metrics.cropConditionLabel ?? "CCI")}
                     </div>
                   </div>
                 </div>
@@ -2234,19 +2284,17 @@ const ManagerFarmDash: React.FC = () => {
               <div className="text-right">
                 <div className="text-lg font-bold text-gray-800">
                   {!selectedPlotId ? (
-                    "-"
+                    "0"
                   ) : loadingWaterStress ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : (
-                    (metrics.stressCount ?? "-")
+                    (metrics.stressCount ?? 0)
                   )}
                 </div>
                 <div className="text-xs font-semibold text-red-600">
                   {!selectedPlotId || loadingWaterStress
                     ? "Total days"
-                    : metrics.stressTotalDays != null
-                      ? `${metrics.stressTotalDays} days`
-                      : "-"}
+                    : `${metrics.stressTotalDays ?? 0} days`}
                 </div>
               </div>
             </div>

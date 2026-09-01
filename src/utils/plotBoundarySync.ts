@@ -130,6 +130,65 @@ export function resolvePlotBoundaryFromRecord(
   return null;
 }
 
+/** Walk common API shapes: record, nested plot, farms[].plot. */
+export function resolvePlotBoundaryFromAnyRecord(
+  record: unknown,
+): GeoJsonPolygon | null {
+  const direct = resolvePlotBoundaryFromRecord(record);
+  if (direct) return direct;
+
+  if (!record || typeof record !== "object") return null;
+  const row = record as Record<string, unknown>;
+
+  const nestedPlot = row.plot;
+  const fromNestedPlot = resolvePlotBoundaryFromRecord(nestedPlot);
+  if (fromNestedPlot) return fromNestedPlot;
+
+  const farms = row.farms;
+  if (Array.isArray(farms)) {
+    for (const farm of farms) {
+      const fromFarm =
+        resolvePlotBoundaryFromRecord(farm) ??
+        resolvePlotBoundaryFromRecord(
+          farm && typeof farm === "object"
+            ? (farm as Record<string, unknown>).plot
+            : null,
+        );
+      if (fromFarm) return fromFarm;
+    }
+  }
+
+  return null;
+}
+
+/** GeoJSON polygon ring → Leaflet `[lat, lng][]`. */
+export function boundaryPolygonToLeafletCoords(
+  boundary: GeoJsonPolygon | null | undefined,
+): [number, number][] {
+  const ring = boundary?.coordinates?.[0];
+  if (!Array.isArray(ring) || ring.length < 3) return [];
+  return ring
+    .filter((pt) => Array.isArray(pt) && pt.length >= 2)
+    .map(([lng, lat]) => [Number(lat), Number(lng)] as [number, number])
+    .filter(([lat, lng]) => Number.isFinite(lat) && Number.isFinite(lng));
+}
+
+/** Saved/profile boundary for a plot id, with optional sessionStorage overlay. */
+export function resolveLeafletBoundaryForPlotRecord(
+  plot: unknown,
+  plotKey?: string,
+  plots?: PlotRef[] | null,
+): [number, number][] {
+  if (plotKey?.trim()) {
+    const local = readLocalPlotBoundaryForPlot(plotKey, plots);
+    const localCoords = boundaryPolygonToLeafletCoords(local);
+    if (localCoords.length > 0) return localCoords;
+  }
+
+  const saved = resolvePlotBoundaryFromAnyRecord(plot);
+  return boundaryPolygonToLeafletCoords(saved);
+}
+
 /** Match my-profile plot record (plots array, farm.plot, or single nested plot). */
 export function findProfilePlotRecord(
   profile: unknown,
