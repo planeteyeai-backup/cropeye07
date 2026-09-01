@@ -121,6 +121,10 @@ export interface EditPlotBoundaryModalProps {
   open: boolean;
   onClose: () => void;
   plotId: number | string;
+  /** Django farm pk for PATCH /farms/my-profile/ when farmer has multiple plots. */
+  farmId?: number | string;
+  gatNumber?: string;
+  plotNumber?: string;
   plotLabel?: string;
   /** Extra plot name variants (fastapi id, gat_plot, etc.) so Home Map can find the saved boundary. */
   plotKeys?: string[];
@@ -133,6 +137,9 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
   open,
   onClose,
   plotId,
+  farmId,
+  gatNumber,
+  plotNumber,
   plotLabel,
   plotKeys = [],
   initialBoundary,
@@ -441,17 +448,33 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
     boundary: GeoJsonPolygon,
     location: GeoJsonPoint,
   ) => {
+    const resolvedPlotId = plotId != null && `${plotId}`.trim() !== "" ? plotId : undefined;
+    const resolvedFarmId =
+      farmId != null && `${farmId}`.trim() !== "" ? farmId : undefined;
+    const hasGatPlot =
+      Boolean(gatNumber?.trim()) && Boolean(plotNumber?.trim());
+
+    if (!resolvedPlotId && !hasGatPlot) {
+      throw new Error(
+        "Missing plot_id (and gat_number/plot_number) — cannot save boundary for this plot.",
+      );
+    }
+
     // Never send null — API returns:
     // "Cannot remove an existing plot boundary/location. Omit this field to keep…"
-    await updatePlotBoundary(plotId, {
+    await updatePlotBoundary(resolvedPlotId ?? plotId, {
       boundary,
       location,
+      farm_id: resolvedFarmId,
+      plot_id: resolvedPlotId,
+      gat_number: gatNumber?.trim() || undefined,
+      plot_number: plotNumber?.trim() || undefined,
     });
 
     try {
       await refreshApiEndpoints({
-        plotId,
-        plotName: plotLabel || String(plotId),
+        plotId: resolvedPlotId ?? plotId,
+        plotName: plotLabel || String(resolvedPlotId ?? plotId),
       });
     } catch {
       // PATCH succeeded; refresh is best-effort
@@ -479,6 +502,7 @@ const EditPlotBoundaryModal: React.FC<EditPlotBoundaryModalProps> = ({
     return (
       data?.detail ||
       data?.message ||
+      data?.error ||
       (typeof data === "object" ? JSON.stringify(data) : e.message) ||
       t("plotBoundary.saveFailed")
     );

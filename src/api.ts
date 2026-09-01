@@ -2640,19 +2640,33 @@ export const patchFarmMyProfile = (data: {
  * PATCH /api/farms/my-profile/ — plot boundary for logged-in farmer.
  * Farmers get 403 on PATCH /plots/{id}/; use this endpoint instead.
  * Never send null boundary/location — backend rejects clearing existing values.
+ * Multi-plot farmers must send farm_id + plot_id (or gat_number + plot_number).
  */
 export const patchFarmerPlotBoundary = (data: {
   boundary: { type: "Polygon"; coordinates: number[][][] };
   location: { type: "Point"; coordinates: [number, number] };
+  farm_id?: number | string;
+  plot_id?: number | string;
+  gat_number?: string;
+  plot_number?: string;
 }) => {
-  // Backend my-profile PATCH expects plot geometry nested under `plot`
-  // (same shape as the farm response: farm.plot.boundary / farm.plot.location).
-  return patchFarmMyProfile({
+  const payload: Parameters<typeof patchFarmMyProfile>[0] = {
+    ...(data.farm_id != null && `${data.farm_id}`.trim() !== ""
+      ? { farm_id: data.farm_id }
+      : {}),
+    ...(data.plot_id != null && `${data.plot_id}`.trim() !== ""
+      ? { plot_id: data.plot_id }
+      : {}),
+    ...(data.gat_number?.trim() ? { gat_number: data.gat_number.trim() } : {}),
+    ...(data.plot_number?.trim() ? { plot_number: data.plot_number.trim() } : {}),
+    boundary: data.boundary,
+    location: data.location,
     plot: {
       boundary: data.boundary,
       location: data.location,
     },
-  });
+  };
+  return patchFarmMyProfile(payload);
 };
 
 /** Route plot boundary updates: farmers → my-profile, staff → /plots/{id}/. */
@@ -2661,20 +2675,34 @@ export const updatePlotBoundary = async (
   data: {
     boundary: { type: "Polygon"; coordinates: number[][][] };
     location: { type: "Point"; coordinates: [number, number] };
+    farm_id?: number | string;
+    plot_id?: number | string;
+    gat_number?: string;
+    plot_number?: string;
   },
 ) => {
   const role = getUserRole()?.toLowerCase()?.replace(/\s+/g, "");
+  const resolvedPlotId = data.plot_id ?? plotId;
   if (role === "farmer") {
-    return patchFarmerPlotBoundary(data);
+    return patchFarmerPlotBoundary({
+      ...data,
+      plot_id: resolvedPlotId,
+    });
   }
 
   try {
-    return await patchPlot(String(plotId), data);
+    return await patchPlot(String(resolvedPlotId), {
+      boundary: data.boundary,
+      location: data.location,
+    });
   } catch (error: any) {
     const status = error?.response?.status;
     // Farmers sometimes have a missing/wrong role in localStorage; my-profile still works.
     if (status === 403 || status === 404) {
-      return patchFarmerPlotBoundary(data);
+      return patchFarmerPlotBoundary({
+        ...data,
+        plot_id: resolvedPlotId,
+      });
     }
     throw error;
   }

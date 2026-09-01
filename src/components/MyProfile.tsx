@@ -10,10 +10,7 @@ import {
   resolveGeoJsonPoint,
 } from "../utils/plotGeometry";
 import { normalizePlotKey, plotKeyFromRecord } from "../utils/plotName";
-import {
-  mergeBoundaryIntoProfilePayload,
-} from "../utils/plotBoundarySync";
-import { getCache, setCache } from "../utils/cache";
+import { setCache } from "../utils/cache";
 import { useAppContext } from "../context/AppContext";
 import { useI18nLite } from "../i18nLite";
 import {
@@ -894,27 +891,31 @@ function plotMetaFromChoice(choice: FarmChoice) {
   const plot = choice.plot ?? choice.farm?.plot ?? null;
   const farm = choice.farm;
   const plotId =
-    plot?.id ??
-    plot?.plot_id ??
-    farm?.plot_id ??
-    farm?.plot?.id ??
-    (choice.plotId || null) ??
-    (choice.farmId || null);
-  const gat = choice.gatNumber;
-  const plotNum = choice.plotNumber;
+    choice.plotId ||
+    (plot?.id != null ? String(plot.id) : "") ||
+    (plot?.plot_id != null ? String(plot.plot_id) : "") ||
+    (farm?.plot_id != null ? String(farm.plot_id) : "") ||
+    (farm?.plot?.id != null ? String(farm.plot.id) : "");
+  const farmId = choice.farmId || (farm?.id != null ? String(farm.id) : "");
+  const gat = choice.gatNumber || String(plot?.gat_number ?? farm?.gat_number ?? "").trim();
+  const plotNum =
+    choice.plotNumber || String(plot?.plot_number ?? farm?.plot_number ?? "").trim();
   const gatPlot = gat && plotNum ? `${gat}/${plotNum}` : gat || plotNum || "";
   const fastapi = plot?.fastapi_plot_id != null ? String(plot.fastapi_plot_id).trim() : "";
-  const primaryKey = plotKeyFromRecord(plot) || gatPlot || String(plotId ?? "");
+  const primaryKey = plotKeyFromRecord(plot) || gatPlot || plotId || farmId;
   return {
-    plotId: plotId != null && String(plotId).trim() !== "" ? String(plotId) : choice.farmId || "my-profile",
+    farmId,
+    plotId,
+    gatNumber: gat,
+    plotNumber: plotNum,
     plotLabel: primaryKey || gatPlot,
     plotKeys: [
       primaryKey,
       fastapi,
       gatPlot,
       gat && plotNum ? `${gat}_${plotNum}` : "",
-      plotId != null ? String(plotId) : "",
-      choice.farmId,
+      plotId,
+      farmId,
     ].filter(Boolean),
     boundary:
       resolvePlotBoundary(plot) ??
@@ -925,6 +926,62 @@ function plotMetaFromChoice(choice: FarmChoice) {
       resolveGeoJsonPoint(farm?.plot) ??
       resolveGeoJsonPoint(farm),
   };
+}
+
+function applyBoundaryToProfile(
+  data: any,
+  farmId: string,
+  plotId: string,
+  boundary: GeoJsonPolygon,
+  location: GeoJsonPoint | null,
+) {
+  const patchPlotRecord = (plot: any) => ({
+    ...plot,
+    boundary,
+    location,
+    coordinates: {
+      ...(plot?.coordinates ?? {}),
+      boundary,
+      location,
+    },
+  });
+
+  const plotMatches = (plot: any): boolean => {
+    if (!plot) return false;
+    if (plotId && plot?.id != null && String(plot.id) === String(plotId)) return true;
+    const farms = farmsOnPlot(plot);
+    return farms.some((farm: any) => String(farm?.id) === String(farmId));
+  };
+
+  if (Array.isArray(data?.plots) && data.plots.length > 0) {
+    const plots = data.plots.map((plot: any) =>
+      plotMatches(plot) ? patchPlotRecord(plot) : plot,
+    );
+    return { ...data, plots };
+  }
+
+  const nestedPlot = resolveNestedPlot(data);
+  if (nestedPlot && plotMatches(nestedPlot)) {
+    const updatedPlot = patchPlotRecord(nestedPlot);
+    if (data?.farm?.plot) {
+      return { ...data, farm: { ...data.farm, plot: updatedPlot } };
+    }
+    return { ...data, plot: updatedPlot };
+  }
+
+  if (data?.farm && String(data.farm.id) === String(farmId)) {
+    return {
+      ...data,
+      farm: {
+        ...data.farm,
+        boundary,
+        location,
+        plot: data.farm.plot ? patchPlotRecord(data.farm.plot) : data.farm.plot,
+      },
+    };
+  }
+
+  return data;
 }
 
 interface UserFormData {
@@ -1045,12 +1102,24 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
   const [farmMsg, setFarmMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   const [plotBoundaryMeta, setPlotBoundaryMeta] = useState<{
-    plotId: number | string | null;
+    farmId: string;
+    plotId: string;
+    gatNumber: string;
+    plotNumber: string;
     plotLabel: string;
     plotKeys: string[];
     boundary: GeoJsonPolygon | null;
     location: GeoJsonPoint | null;
-  }>({ plotId: null, plotLabel: "", plotKeys: [], boundary: null, location: null });
+  }>({
+    farmId: "",
+    plotId: "",
+    gatNumber: "",
+    plotNumber: "",
+    plotLabel: "",
+    plotKeys: [],
+    boundary: null,
+    location: null,
+  });
   const [showBoundaryEditor, setShowBoundaryEditor] = useState(false);
   const [boundaryMsg, setBoundaryMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [cropTypes, setCropTypes] = useState<CropTypeRecord[]>([]);
@@ -1153,10 +1222,10 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
           const farm = nestedPlot?.farms?.[0] ?? nestedPlot?.farm ?? data.farm ?? {};
           setFarmForm(formFromFarm(farm, farm?.id != null ? String(farm.id) : "", nestedPlot?.id != null ? String(nestedPlot.id) : ""));
           setPlotBoundaryMeta(plotMetaFromChoice({
-            farmId: "",
+            farmId: farm?.id != null ? String(farm.id) : "",
             plotId: nestedPlot?.id != null ? String(nestedPlot.id) : "",
-            gatNumber: String(nestedPlot?.gat_number ?? ""),
-            plotNumber: String(nestedPlot?.plot_number ?? ""),
+            gatNumber: String(nestedPlot?.gat_number ?? farm?.gat_number ?? ""),
+            plotNumber: String(nestedPlot?.plot_number ?? farm?.plot_number ?? ""),
             label: "",
             farm,
             plot: nestedPlot,
@@ -1846,52 +1915,27 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
         <EditPlotBoundaryModal
             open={showBoundaryEditor}
             onClose={() => setShowBoundaryEditor(false)}
-            plotId={plotBoundaryMeta.plotId || selectedFarmId || "my-profile"}
+            plotId={plotBoundaryMeta.plotId || selectedPlotId}
+            farmId={plotBoundaryMeta.farmId || selectedFarmId}
+            gatNumber={plotBoundaryMeta.gatNumber}
+            plotNumber={plotBoundaryMeta.plotNumber}
             plotLabel={plotBoundaryMeta.plotLabel}
             plotKeys={plotBoundaryMeta.plotKeys}
             initialBoundary={plotBoundaryMeta.boundary}
             initialLocation={plotBoundaryMeta.location}
             onSaved={(boundary, location) => {
+              if (!boundary) return;
               setPlotBoundaryMeta((prev) => ({ ...prev, boundary, location }));
               setProfileData((prev: any) => {
-                const nestedPlot = resolveNestedPlot(prev);
-                if (!nestedPlot) return prev;
-
-                const updatedPlot = {
-                  ...nestedPlot,
+                const farmId = plotBoundaryMeta.farmId || selectedFarmId;
+                const plotId = plotBoundaryMeta.plotId || selectedPlotId;
+                return applyBoundaryToProfile(
+                  prev,
+                  farmId,
+                  plotId,
                   boundary,
                   location,
-                  coordinates: {
-                    ...(nestedPlot.coordinates ?? {}),
-                    boundary,
-                    location,
-                  },
-                };
-
-                let next: any;
-                if (Array.isArray(prev?.plots) && prev.plots.length > 0) {
-                  const plots = [...prev.plots];
-                  plots[0] = updatedPlot;
-                  next = { ...prev, plots };
-                } else if (prev?.farm?.plot) {
-                  next = {
-                    ...prev,
-                    farm: { ...prev.farm, plot: updatedPlot },
-                  };
-                } else {
-                  next = { ...prev, plot: updatedPlot };
-                }
-
-                // Keep Home Map's shared farmerProfile cache in sync immediately.
-                const cached = getCache("farmerProfile");
-                const merged = mergeBoundaryIntoProfilePayload(
-                  cached ?? next,
-                  plotBoundaryMeta.plotLabel || String(plotBoundaryMeta.plotId ?? ""),
-                  boundary,
                 );
-                setCache("farmerProfile", merged);
-
-                return next;
               });
               setBoundaryMsg({
                 type: "success",
