@@ -89,7 +89,7 @@ interface FertilizerTableProps {
 }
 
 const FertilizerTable: React.FC<FertilizerTableProps> = ({
-  showNpkUpdate = true,
+  showNpkUpdate = false,
 }) => {
   const [data, setData] = useState<FertilizerEntry[]>([]);
   const [localError, setLocalError] = useState<string | null>(null);

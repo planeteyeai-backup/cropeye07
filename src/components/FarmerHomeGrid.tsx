@@ -89,9 +89,10 @@ function FarmerHomeGrid() {
       <Header />
       <main className="mx-auto w-full max-w-[1500px] px-3 sm:px-5 py-3 sm:py-5">
         <div className="space-y-4">
-          {/* Map + Irrigation / Soil Moisture / Field Score (side column) */}
+          {/* Map + Field Score + Irrigation — all same total height, cards equal size */}
           <section className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:items-stretch">
-            <div className="lg:col-span-9 lg:h-[140vh] rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden">
+            {/* Map — medium height */}
+            <div className="lg:col-span-8 h-[82vh] min-h-[580px] rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden">
               <Suspense fallback={<div className="flex h-full items-center justify-center text-slate-600">Loading map…</div>}>
                 <CropEyeMap
                   onHealthDataChange={handleHealthDataChange}
@@ -103,34 +104,33 @@ function FarmerHomeGrid() {
               </Suspense>
             </div>
 
-            <div className="lg:col-span-3 lg:h-[140vh] min-h-0 flex flex-col gap-4">
-              {/* Top half (50%): Field Score + Soil Moisture (each 25%) */}
-              <div className="min-h-0 flex flex-col gap-4 flex-1">
-                <div className="flex-1 min-h-0 rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden">
-                  <FieldHealthAnalysis fieldAnalysisData={fieldAnalysisData} compact />
-                </div>
-                <div className="flex-1 min-h-0 rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-auto">
-                  <SoilMoistureCard optimalRange={[40, 60]} compact />
-                </div>
+            {/* Side column — Field Score compact top, Irrigation fills rest */}
+            <div className="lg:col-span-4 h-[82vh] min-h-[580px] flex flex-col gap-3">
+              {/* Field Score — fixed compact height */}
+              <div className="h-[220px] flex-none rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden">
+                <FieldHealthAnalysis fieldAnalysisData={fieldAnalysisData} compact />
               </div>
 
-              {/* Bottom half (50%): Irrigation schedule */}
+              {/* Past 7-Day Irrigation — fills all remaining height, no scroll */}
               <div className="flex-1 min-h-0 rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden">
-                <div className="h-full overflow-hidden">
-                  <IrrigationSchedule />
-                </div>
+                <IrrigationSchedule />
               </div>
             </div>
           </section>
 
-          {/* Crop Health + Soil Analysis (side-by-side); Fertilizer below full width */}
+          {/* Soil Moisture; Crop Health + Soil Analysis (side-by-side); Fertilizer below */}
           <section className="space-y-4">
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-12 lg:items-start">
-              <div className="min-h-[60vh] max-h-[88vh] overflow-y-auto scroll-hide lg:col-span-5 rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden">
+            {/* Soil Moisture Card before Crop Health & Soil Analysis Report */}
+            <div className="w-full rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden p-3 sm:p-4">
+              <SoilMoistureCard optimalRange={[40, 60]} fullWidth />
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-12 items-stretch">
+              <div className="h-full overflow-y-auto scroll-hide lg:col-span-5 rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5">
                 <CropHealthAnalysis />
               </div>
 
-              <div className="min-h-0 lg:col-span-7">
+              <div className="h-full min-h-0 lg:col-span-7 rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden">
                 <SoilAnalysis
                   plotName={selectedPlotName}
                   phValue={soilData?.phValue || null}

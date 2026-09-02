@@ -1,10 +1,9 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useEffect } from "react";
 import "./App.css";
 import { useAppContext } from "../context/AppContext";
 import FertilizerTable from "./FertilizerTable";
 import { useFarmerProfile } from "../hooks/useFarmerProfile";
 import { useI18nLite, type AppLanguage } from "../i18nLite";
-import { fetchMittisenseRecommendation } from "../utils/mittisenseNpkApi";
 
 interface FertilizerEntry {
   day: number;
@@ -91,74 +90,7 @@ const Fertilizer: React.FC = () => {
   // Use global selectedPlotName, fallback to first plot if not available
   const PLOT_NAME = selectedPlotName || (profile?.plots && profile.plots.length > 0 ? profile.plots[0].fastapi_plot_id : "");
 
-  const API_BASE_URL = "https://main-cropeye.up.railway.app";
-
-  const { appState, setAppState, getCached, setCached } = useAppContext();
-  const npkData = appState.npkData || {};
-
-  const [npkLoading, setNpkLoading] = useState(false);
-  const [npkError, setNpkError] = useState<string | null>(null);
-
-  const npkFetchingRef = useRef(false);
-
-  const fetchNPKData = useCallback(async () => {
-    if (!PLOT_NAME) {
-      return;
-    }
-
-    // Prevent multiple simultaneous requests
-    if (npkFetchingRef.current) {
-      return;
-    }
-
-    npkFetchingRef.current = true;
-    setNpkLoading(true);
-    setNpkError(null);
-
-    const cacheKey = `npkData_${PLOT_NAME}`;
-    const cached = getCached(cacheKey);
-
-    if (cached) {
-      setAppState((prev: any) => ({ ...prev, npkData: cached }));
-      setNpkLoading(false);
-      npkFetchingRef.current = false;
-      return;
-    }
-
-    try {
-      const rec = await fetchMittisenseRecommendation(PLOT_NAME, profile?.plots ?? null);
-
-      if (!rec) {
-        throw new Error(
-          "Soil NPK not available for this plot. Values are shown only when the API returns data.",
-        );
-      }
-
-      // Extract NPK data from the recommendation response
-      if (
-        rec.N !== undefined && rec.P !== undefined && rec.K !== undefined
-      ) {
-        const npk = {
-          N: rec.N,
-          P: rec.P,
-          K: rec.K,
-        };
-        setAppState((prev: any) => ({ ...prev, npkData: npk }));
-        setCached(cacheKey, npk);
-      } else {
-        throw new Error(
-          "Soil NPK response incomplete — values are shown only when the API returns full N/P/K data.",
-        );
-      }
-    } catch (err: any) {
-      setNpkError(err.message || "Failed to fetch NPK data");
-      // No empty/fake NPK object — clear so cards show "No Data".
-      setAppState((prev: any) => ({ ...prev, npkData: null }));
-    } finally {
-      setNpkLoading(false);
-      npkFetchingRef.current = false;
-    }
-  }, [PLOT_NAME, getCached, setCached, setAppState]);
+  const { setAppState, getCached, setCached } = useAppContext();
 
   useEffect(() => {
     const cacheKey = "fertilizerData";
@@ -185,50 +117,9 @@ const Fertilizer: React.FC = () => {
         setAppState((prev: any) => ({ ...prev, fertilizerData: entries }));
         setCached(cacheKey, entries);
       })
-      .catch(() => {});
+      .catch(() => { });
   }, [getCached, setCached, setAppState]);
 
-  useEffect(() => {
-    if (PLOT_NAME && !profileLoading) {
-      fetchNPKData();
-    }
-  }, [PLOT_NAME, profileLoading, fetchNPKData]);
-
-  const infoCards = [
-    {
-      short: "N",
-      value: npkLoading
-        ? "Loading..."
-        : npkData.N !== undefined
-        ? Number(npkData.N).toFixed(2)
-        : "No Data",
-      bgColor: "bg-green-50",
-      iconBg: "bg-green-500",
-      textColor: "text-green-700",
-    },
-    {
-      short: "P",
-      value: npkLoading
-        ? "Loading..."
-        : npkData.P !== undefined
-        ? Number(npkData.P).toFixed(2)
-        : "No Data",
-      bgColor: "bg-blue-50",
-      iconBg: "bg-blue-500",
-      textColor: "text-blue-700",
-    },
-    {
-      short: "K",
-      value: npkLoading
-        ? "Loading..."
-        : npkData.K !== undefined
-        ? Number(npkData.K).toFixed(2)
-        : "No Data",
-      bgColor: "bg-yellow-50",
-      iconBg: "bg-yellow-500",
-      textColor: "text-yellow-700",
-    },
-  ];
   if (profileLoading) {
     return (
       <div className="min-h-screen bg-gray-100 pb-12">
@@ -282,10 +173,10 @@ const Fertilizer: React.FC = () => {
               >
                 {profile.plots?.map(plot => {
                   let displayName = '';
-                  
-                  if (plot.gat_number && plot.plot_number && 
-                      plot.gat_number.trim() !== "" && plot.plot_number.trim() !== "" &&
-                      !plot.gat_number.startsWith('GAT_') && !plot.plot_number.startsWith('PLOT_')) {
+
+                  if (plot.gat_number && plot.plot_number &&
+                    plot.gat_number.trim() !== "" && plot.plot_number.trim() !== "" &&
+                    !plot.gat_number.startsWith('GAT_') && !plot.plot_number.startsWith('PLOT_')) {
                     displayName = `${plot.gat_number}_${plot.plot_number}`;
                   } else if (plot.gat_number && plot.gat_number.trim() !== "" && !plot.gat_number.startsWith('GAT_')) {
                     displayName = plot.gat_number;
@@ -294,7 +185,7 @@ const Fertilizer: React.FC = () => {
                   } else {
                     const village = plot.address?.village;
                     const taluka = plot.address?.taluka;
-                    
+
                     if (village) {
                       displayName = `Plot in ${village}`;
                       if (taluka) displayName += `, ${taluka}`;
@@ -302,7 +193,7 @@ const Fertilizer: React.FC = () => {
                       displayName = 'Plot (No GAT/Plot Number)';
                     }
                   }
-                  
+
                   return (
                     <option key={plot.fastapi_plot_id} value={plot.fastapi_plot_id}>
                       {displayName}
@@ -314,52 +205,7 @@ const Fertilizer: React.FC = () => {
           </div>
         )}
 
-        <div className="flex justify-between items-center bg-white shadow-lg rounded-lg px-6 py-4 mb-8 border-l-4 border-green-500">
-          <div className="text-2xl font-bold text-green-700 flex items-center">
-            <span className="mr-3 text-3xl">🌱</span>
-            NPK Uptake & Requirements
-          </div>
-          <div className="text-right">
-            <div className="text-lg font-medium text-gray-700" />
-            {npkLoading && (
-              <div className="text-sm text-blue-600 mt-1">
-                Loading NPK data...
-              </div>
-            )}
-            {npkError && (
-              <div className="text-sm text-red-600 mt-1">⚠ {npkError}</div>
-            )}
-          </div>
-        </div>
-
-        {/* NPK Cards */}
-        <div className="mb-4"></div>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 mb-8">
-          {infoCards.map((card, idx) => (
-            <div
-              key={idx}
-              className={`${card.bgColor} shadow-lg rounded-xl p-6 text-center`}
-            >
-              <div
-                className={`${card.iconBg} w-20 h-20 rounded-full flex flex-col items-center justify-center mx-auto mb-4`}
-              >
-                <span className="text-4xl font-bold text-white">
-                  {card.short}
-                </span>
-              </div>
-              <div className="flex flex-col items-center">
-                <div className={`text-4xl font-extrabold ${card.textColor}`}>
-                  {card.value}
-                </div>
-                {card.value !== "Loading..." && card.value !== "No Data" && (
-                  <span className="text-sm text-gray-500 font-medium mt-1">kg/acre</span>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <FertilizerTable />
+        <FertilizerTable showNpkUpdate />
 
         {/* Videos */}
         <div className="mt-12">
