@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { getFarmerProfile, getFarmerMyProfile } from '../api';
+import { getFarmerProfile, getFarmerMyProfile, clearFarmerMyProfileInFlight } from '../api';
 import { getAuthToken, isValidToken, getUserRole, AUTH_SESSION_STARTED_EVENT } from '../utils/auth';
 import { setCache, removeCache } from '../utils/cache';
 import {
@@ -208,7 +208,8 @@ export const useFarmerProfile = () => {
       setLoading(true);
       setProfileSynced(false);
       setError(null);
-      const response = await getFarmerMyProfile();
+      clearFarmerMyProfileInFlight();
+      const response = await getFarmerMyProfile({ force: true });
       let data = overlaySavedFarmsOnProfile(
         (response as { data?: any })?.data ?? response,
       );
@@ -288,6 +289,7 @@ export const useFarmerProfile = () => {
       const token = getAuthToken();
       const userRole = getUserRole();
       if (!token || !isValidToken(token) || userRole !== 'farmer') return;
+      clearFarmerMyProfileInFlight();
       setProfile(null);
       setProfileSynced(false);
       void fetchMyProfile();

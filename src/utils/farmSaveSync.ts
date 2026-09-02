@@ -105,6 +105,23 @@ export function clearSavedFarmFields(id: string): void {
   }
 }
 
+/** Drop all pending farm-field overlays (e.g. on login so GET profile is not masked by stale local saves). */
+export function clearAllSavedFarmFieldEntries(): void {
+  const store = readStorage();
+  if (!store) return;
+  try {
+    const keys: string[] = [];
+    for (let i = 0; i < store.length; i += 1) {
+      const key = store.key(i);
+      if (key?.startsWith(STORAGE_PREFIX)) keys.push(key);
+    }
+    for (const key of keys) store.removeItem(key);
+    store.removeItem(LAST_FARM_ID_KEY);
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 function toApiPlantationType(display: string): string {
   const v = (display ?? "").trim().toLowerCase().replace(/\s+/g, "_").replace(/-/g, "_");
   if (v === "pre_seasonal" || v === "preseasonal") return "pre-seasonal";

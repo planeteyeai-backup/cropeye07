@@ -13,7 +13,6 @@ import CommonSpinner from "../components/CommanSpinner";
 import {
   getAuthToken,
   getUserRole,
-  clearAuthData,
   clearAllLocalStorage,
   setAuthData,
   prepareFreshAuthSession,
@@ -21,7 +20,7 @@ import {
   getUserData,
   resolveAppUserRole,
 } from "../utils/auth";
-import { getCurrentUser } from "../api";
+import { getCurrentUser, clearFarmerMyProfileInFlight } from "../api";
 import { initializeTokenRefresh } from "../utils/tokenManager";
 import { useAppContext } from "../context/AppContext";
 import {
@@ -206,6 +205,7 @@ const AppRoutesContent: React.FC = () => {
 
     // Clear stale profile cache before prefetch — must happen before dashboard mounts.
     prepareFreshAuthSession();
+    clearFarmerMyProfileInFlight();
     setAuthData(token, normalizedRole);
 
     // For farmer: prefetch profile BEFORE showing dashboard so fertilizer/irrigation

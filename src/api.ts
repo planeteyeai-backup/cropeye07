@@ -1151,6 +1151,11 @@ export const calculatePolygonArea = (
 // Get farmer profile using the dedicated my-profile endpoint
 let farmerMyProfileInFlight: ReturnType<typeof api.get> | null = null;
 
+/** Clear deduped in-flight GET so a new login never reuses the previous user's promise. */
+export function clearFarmerMyProfileInFlight(): void {
+  farmerMyProfileInFlight = null;
+}
+
 export const getFarmerMyProfile = (options?: {
   force?: boolean;
   farmId?: number | string;

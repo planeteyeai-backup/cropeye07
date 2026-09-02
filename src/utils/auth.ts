@@ -1,6 +1,7 @@
 import { clearAllAppCache } from "../components/utils/cache";
 import { removeCache } from "./cache";
 import { clearMittisenseInFlight } from "./mittisenseNpkApi";
+import { clearAllSavedFarmFieldEntries } from "./farmSaveSync";
 
 /** Fired after a new login session is stored — hooks refetch farmer profile. */
 export const AUTH_SESSION_STARTED_EVENT = "cropeye:auth-session-started";
@@ -150,6 +151,10 @@ export const prepareFreshAuthSession = (): void => {
   try {
     removeCache("farmerProfile");
     clearMittisenseInFlight();
+    clearAllSavedFarmFieldEntries();
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("selectedPlot");
+    }
   } catch {
     // Ignore cache clear errors
   }

@@ -109,6 +109,15 @@ const FertilizerTable: React.FC<FertilizerTableProps> = ({
   const [mittiSchedule, setMittiSchedule] =
     useState<FertilizerScheduleMittisense | null>(null);
   const [mittiLoading, setMittiLoading] = useState(false);
+  const [mittiFetchDone, setMittiFetchDone] = useState(false);
+
+  const MITTISENSE_RETRY_ATTEMPTS = 3;
+  const MITTISENSE_RETRY_DELAY_MS = 1500;
+
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve) => {
+      window.setTimeout(resolve, ms);
+    });
 
   const effectivePlotKey = useMemo(() => {
     if (selectedPlotName?.trim()) return selectedPlotName.trim();
@@ -138,17 +147,27 @@ const FertilizerTable: React.FC<FertilizerTableProps> = ({
     if (!profileSynced || !plotKey) {
       setMittiSchedule(null);
       setMittiLoading(false);
+      setMittiFetchDone(false);
       return;
     }
     let cancelled = false;
     setMittiSchedule(null);
     setMittiLoading(true);
+    setMittiFetchDone(false);
     void (async () => {
       try {
-        const rec = await fetchMittisenseRecommendation(
-          plotKey,
-          profile?.plots ?? null,
-        );
+        let rec: Awaited<ReturnType<typeof fetchMittisenseRecommendation>> = null;
+        for (let attempt = 0; attempt < MITTISENSE_RETRY_ATTEMPTS; attempt += 1) {
+          if (cancelled) return;
+          rec = await fetchMittisenseRecommendation(
+            plotKey,
+            profile?.plots ?? null,
+          );
+          if (rec) break;
+          if (attempt < MITTISENSE_RETRY_ATTEMPTS - 1) {
+            await sleep(MITTISENSE_RETRY_DELAY_MS);
+          }
+        }
         if (cancelled) return;
         setMittiSchedule(
           rec ? buildFertilizerScheduleFromMittisense(rec) : null,
@@ -156,7 +175,10 @@ const FertilizerTable: React.FC<FertilizerTableProps> = ({
       } catch {
         if (!cancelled) setMittiSchedule(null);
       } finally {
-        if (!cancelled) setMittiLoading(false);
+        if (!cancelled) {
+          setMittiLoading(false);
+          setMittiFetchDone(true);
+        }
       }
     })();
     return () => {
@@ -375,6 +397,9 @@ const FertilizerTable: React.FC<FertilizerTableProps> = ({
     if (profileLoading || !profileSynced) {
       return;
     }
+
+    // Reset bud.json rows when profile refreshes (e.g. after login).
+    setData([]);
 
     // Determine which plot to use: selectedPlotName > first plot from profile
     let plotToUse = selectedPlotName;
@@ -898,8 +923,11 @@ const FertilizerTable: React.FC<FertilizerTableProps> = ({
             );
           }
 
-          // Wait for mittisense before showing old bud.json fallback (prevents stale flash).
-          if (mittiLoading && effectivePlotKey) {
+          // Wait for mittisense retries before showing old bud.json fallback.
+          if (
+            effectivePlotKey &&
+            (!mittiFetchDone || mittiLoading)
+          ) {
             return (
               <div className="flex items-center justify-center py-12">
                 <div className="text-center">

@@ -18,6 +18,7 @@ import {
   fetchAnalysisTimeline,
 } from "./analysisTimeline";
 import { persistPlotImageEndDatesFromTimeline } from "../utils/plotImageEndDates";
+import { overlaySavedFarmsOnProfile } from "../utils/farmSaveSync";
 import {
   buildAdminEndDateCandidates,
   fetchAdminLayerWithDateFallback,
@@ -58,8 +59,8 @@ export const prefetchFarmerProfile = async (
   setCached: (key: string, data: any) => void
 ): Promise<boolean> => {
   try {
-    const response: any = await getFarmerMyProfile();
-    setCached('farmerProfile', response?.data);
+    const response: any = await getFarmerMyProfile({ force: true });
+    setCached('farmerProfile', overlaySavedFarmsOnProfile(response?.data));
     return true;
   } catch {
     return false;
@@ -208,9 +209,9 @@ export const prefetchAllData = async (
     // 3. Farmer-specific: use cached profile if available (avoids duplicate fetch after prefetchFarmerProfile)
     let profile = getContextCache('farmerProfile', 10 * 60 * 1000);
     if (!profile) {
-      const profilePromise = getFarmerMyProfile()
+      const profilePromise = getFarmerMyProfile({ force: true })
         .then((response: any) => {
-          setCached('farmerProfile', response?.data);
+          setCached('farmerProfile', overlaySavedFarmsOnProfile(response?.data));
           fetchedEndpoints.push('farmerProfile');
           return response?.data;
         })
