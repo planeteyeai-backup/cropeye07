@@ -1,4 +1,6 @@
 import { clearAllAppCache } from "../components/utils/cache";
+import { removeCache } from "./cache";
+import { clearMittisenseInFlight } from "./mittisenseNpkApi";
 
 // Authentication utility functions
 export const AUTH_TOKEN_KEY = 'token';
@@ -142,6 +144,15 @@ export const clearAllLocalStorage = (): void => {
 
 // Set all authentication data after successful login
 export const setAuthData = (token: string, role: string, userData?: any, refreshToken?: string): void => {
+  // Drop stale farmer profile / mittisense requests from a prior session so
+  // fertilizer schedule and farm fields load fresh after login (not only after F5).
+  try {
+    removeCache('farmerProfile');
+    clearMittisenseInFlight();
+  } catch {
+    // Ignore cache clear errors
+  }
+
   setAuthToken(token);
   if (refreshToken) {
     setRefreshToken(refreshToken);

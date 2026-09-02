@@ -74,6 +74,12 @@ const soilAnalysisInFlight = new Map<
   Promise<MittisenseSoilAnalysis | null>
 >();
 
+/** Clear in-flight dedupe so a new login/session always hits the API fresh. */
+export function clearMittisenseInFlight(): void {
+  inFlight.clear();
+  soilAnalysisInFlight.clear();
+}
+
 /** Display helper: API may return number or "less than 10". */
 export function mittisenseNutrientDisplay(
   value: unknown,

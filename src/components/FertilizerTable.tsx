@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { useFarmerProfile } from "../hooks/useFarmerProfile";
 import { useAppContext } from "../context/AppContext";
-import { getUserData, PROGRESS_LOCAL_STORAGE_PREFIX } from "../utils/auth";
 import budData from "./bud.json";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
@@ -10,6 +9,7 @@ import {
   fetchMittisenseRecommendation,
   type FertilizerScheduleMittisense,
 } from "../utils/mittisenseNpkApi";
+import FertilizerNpkCards from "./FertilizerNpkCards";
 
 interface FertilizerEntry {
   date: string;
@@ -26,17 +26,6 @@ interface FertilizerEntry {
   organic_inputs?: string[];
 }
 
-/** One checklist row = nutrient + chemical + organic line for that stage/date. */
-type FertilizerCheckRow = "N" | "P" | "K";
-
-type FertilizerChecklistState = Record<FertilizerCheckRow, boolean>;
-
-const EMPTY_CHECKLIST: FertilizerChecklistState = {
-  N: false,
-  P: false,
-  K: false,
-};
-
 // Plantation type to months mapping
 const PLANTATION_TYPE_MONTHS: Record<string, number> = {
   Suru: 10,
@@ -44,38 +33,6 @@ const PLANTATION_TYPE_MONTHS: Record<string, number> = {
   Preseasonal: 12,
   Ratoon: 9,
 };
-
-function fertilizerChecklistStorageKey(
-  plotKey: string,
-  stage: string,
-  startDate: string,
-  endDate: string,
-): string {
-  const user = getUserData();
-  const uid = user?.id ?? user?.user_id ?? "anon";
-  const safe = (v: string) =>
-    String(v || "none")
-      .trim()
-      .toLowerCase()
-      .replace(/\s+/g, "_")
-      .replace(/[^a-z0-9_\-/]/g, "");
-  return `${PROGRESS_LOCAL_STORAGE_PREFIX}fertilizer_checklist_v1__${uid}__${safe(plotKey)}__${safe(stage)}__${safe(startDate)}__${safe(endDate)}`;
-}
-
-function loadFertilizerChecklist(key: string): FertilizerChecklistState {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return { ...EMPTY_CHECKLIST };
-    const parsed = JSON.parse(raw) as Partial<FertilizerChecklistState>;
-    return {
-      N: Boolean(parsed.N),
-      P: Boolean(parsed.P),
-      K: Boolean(parsed.K),
-    };
-  } catch {
-    return { ...EMPTY_CHECKLIST };
-  }
-}
 
 function parsePlantationDateToLocal(plantationDate: string): Date | null {
   const raw = String(plantationDate || "").trim();
@@ -126,92 +83,66 @@ function getCurrentMonthStartAndEndDates() {
   };
 }
 
-function saveFertilizerChecklist(
-  key: string,
-  state: FertilizerChecklistState,
-): void {
-  try {
-    localStorage.setItem(key, JSON.stringify(state));
-  } catch {
-    /* ignore quota / private mode */
-  }
+interface FertilizerTableProps {
+  /** Industrial yield NPK cards — Fertilizer page only; hide on farmer home grid. */
+  showNpkUpdate?: boolean;
 }
 
-/** Clickable status: Pending until checked → Done (inputs applied for stage/date). */
-const FertilizerRowStatus: React.FC<{
-  done: boolean;
-  onToggle: () => void;
-  label: string;
-  title: string;
-}> = ({ done, onToggle, label, title }) => (
-  <label
-    className="inline-flex flex-col items-center gap-1.5 cursor-pointer select-none"
-    title={title}
-  >
-    <input
-      type="checkbox"
-      checked={done}
-      onChange={onToggle}
-      className="h-5 w-5 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500 cursor-pointer"
-      aria-label={label}
-    />
-    <span
-      className={[
-        "rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
-        done
-          ? "bg-emerald-100 text-emerald-700"
-          : "bg-amber-100 text-amber-700",
-      ].join(" ")}
-    >
-      {done ? "Done" : "Pending"}
-    </span>
-  </label>
-);
-
-const FertilizerTable: React.FC = () => {
+const FertilizerTable: React.FC<FertilizerTableProps> = ({
+  showNpkUpdate = true,
+}) => {
   const [data, setData] = useState<FertilizerEntry[]>([]);
   const [localError, setLocalError] = useState<string | null>(null);
   const [plantationType, setPlantationType] = useState<string | null>(null);
   const [monthsCompleted, setMonthsCompleted] = useState<number | null>(null);
   const [noFertilizerRequired, setNoFertilizerRequired] =
     useState<boolean>(false);
-  const [checklist, setChecklist] =
-    useState<FertilizerChecklistState>(EMPTY_CHECKLIST);
   const tableRef = useRef<HTMLDivElement>(null);
   const {
     profile,
     loading: profileLoading,
     error: profileError,
+    profileSynced,
+    profileVersion,
   } = useFarmerProfile();
   const { selectedPlotName, setAppState } = useAppContext();
   const [mittiSchedule, setMittiSchedule] =
     useState<FertilizerScheduleMittisense | null>(null);
+  const [mittiLoading, setMittiLoading] = useState(false);
 
-  const scheduleKey = useMemo(() => {
-    if (!data.length) return null;
-    const stage = data[0].stage || "stage";
-    const startDate = data[0].date || "";
-    const endDate = data[data.length - 1]?.date || startDate;
-    const plot = selectedPlotName || "no-plot";
-    return fertilizerChecklistStorageKey(plot, stage, startDate, endDate);
-  }, [data, selectedPlotName]);
+  const effectivePlotKey = useMemo(() => {
+    if (selectedPlotName?.trim()) return selectedPlotName.trim();
+    const first = profile?.plots?.[0];
+    if (!first) return "";
+    return (
+      first.fastapi_plot_id ||
+      `${first.gat_number}_${first.plot_number}` ||
+      ""
+    );
+  }, [selectedPlotName, profile?.plots]);
 
-  useEffect(() => {
-    if (!scheduleKey) {
-      setChecklist({ ...EMPTY_CHECKLIST });
-      return;
-    }
-    setChecklist(loadFertilizerChecklist(scheduleKey));
-  }, [scheduleKey]);
+  const mittisensePlotKey = useMemo(() => {
+    if (!effectivePlotKey || !profile?.plots?.length) return effectivePlotKey;
+    const plot = profile.plots.find(
+      (p) =>
+        p.fastapi_plot_id === effectivePlotKey ||
+        `${p.gat_number}_${p.plot_number}` === effectivePlotKey,
+    );
+    const plantationDate = plot?.farms?.[0]?.plantation_date ?? "";
+    return `${effectivePlotKey}|${plantationDate}`;
+  }, [effectivePlotKey, profile?.plots]);
 
   // Mittisense recommendation → Fertilizer Schedule (same headline map as Soil Recommendation)
   useEffect(() => {
-    const plotKey = selectedPlotName?.trim();
+    const plotKey = mittisensePlotKey.split("|")[0]?.trim();
     if (!plotKey) {
       setMittiSchedule(null);
+      setMittiLoading(false);
       return;
     }
     let cancelled = false;
+    setMittiSchedule(null);
+    setMittiLoading(true);
     void (async () => {
       try {
         const rec = await fetchMittisenseRecommendation(
@@ -219,26 +150,19 @@ const FertilizerTable: React.FC = () => {
           profile?.plots ?? null,
         );
         if (cancelled) return;
-        setMittiSchedule(buildFertilizerScheduleFromMittisense(rec));
+        setMittiSchedule(
+          rec ? buildFertilizerScheduleFromMittisense(rec) : null,
+        );
       } catch {
         if (!cancelled) setMittiSchedule(null);
+      } finally {
+        if (!cancelled) setMittiLoading(false);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [selectedPlotName, profile?.plots]);
-
-  const toggleChecklistRow = (row: FertilizerCheckRow) => {
-    if (!scheduleKey) return;
-    setChecklist((prev) => {
-      const next = { ...prev, [row]: !prev[row] };
-      saveFertilizerChecklist(scheduleKey, next);
-      return next;
-    });
-  };
-
-  const allInputsDone = checklist.N && checklist.P && checklist.K;
+  }, [mittisensePlotKey, profile?.plots, profileVersion]);
 
   // Helper function to calculate months since plantation
   const calculateMonthsSincePlantation = (plantationDate: string): number => {
@@ -768,6 +692,23 @@ const FertilizerTable: React.FC = () => {
 
   return (
     <div className="bg-white rounded-lg shadow-md p-6 min-h-[250px] flex flex-col h-full">
+      {showNpkUpdate && (
+        <>
+          <div className="flex items-center bg-white rounded-lg px-4 py-3 mb-4 border-l-4 border-green-500 shadow-sm">
+            <div className="text-xl sm:text-2xl font-bold text-green-700 flex items-center">
+              <span className="mr-3 text-2xl sm:text-3xl">🌱</span>
+              NPK UPDATE
+            </div>
+          </div>
+
+          <FertilizerNpkCards
+            profile={profile}
+            profileLoading={profileLoading}
+            compact
+          />
+        </>
+      )}
+
       <div className="flex justify-between items-center mb-4">
         <h2 className="text-2xl font-bold text-gray-800">
           Fertilizer Schedule
@@ -943,14 +884,28 @@ const FertilizerTable: React.FC = () => {
             return null;
           }
 
-          // Show loading state if profile is still loading
-          if (profileLoading) {
+          // Show loading until profile is fresh from API and mittisense has loaded.
+          if (profileLoading || !profileSynced) {
             return (
               <div className="flex items-center justify-center py-12">
                 <div className="text-center">
                   <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
                   <p className="text-sm text-gray-600">
                     Loading fertilizer data...
+                  </p>
+                </div>
+              </div>
+            );
+          }
+
+          // Wait for mittisense before showing old bud.json fallback (prevents stale flash).
+          if (mittiLoading && effectivePlotKey) {
+            return (
+              <div className="flex items-center justify-center py-12">
+                <div className="text-center">
+                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-500 mx-auto mb-4"></div>
+                  <p className="text-sm text-gray-600">
+                    Loading fertilizer schedule…
                   </p>
                 </div>
               </div>

@@ -179,6 +179,8 @@ export const useFarmerProfile = () => {
   const [profile, setProfile] = useState<FarmerProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [profileSynced, setProfileSynced] = useState(false);
+  const [profileVersion, setProfileVersion] = useState(0);
 
   const fetchProfile = async () => {
     try {
@@ -225,6 +227,7 @@ export const useFarmerProfile = () => {
 
       setProfile(data);
       setCache('farmerProfile', data);
+      setProfileVersion((v) => v + 1);
       setError(null);
     } catch (err: any) {
       // Handle authentication errors gracefully
@@ -254,6 +257,7 @@ export const useFarmerProfile = () => {
       }
     } finally {
       setLoading(false);
+      setProfileSynced(true);
     }
   };
 
@@ -267,22 +271,19 @@ export const useFarmerProfile = () => {
       userRole !== 'farmer'
     ) {
       setLoading(false);
+      setProfileSynced(true);
       setError(null);
       setProfile(null);
       return;
     }
 
-    // Cache-first: serve cached data immediately for fast render,
-    // then always fetch fresh data in the background so stale data
-    // (e.g. fertilizer schedule after profile save) is corrected without
-    // requiring a hard page refresh.
+    // Cache-first: show cached profile for fast paint, but keep loading=true
+    // until a fresh fetch completes so fertilizer/irrigation don't use stale fields.
     const cached = overlaySavedFarmsOnProfile(
       getCache('farmerProfile', 10 * 60 * 1000),
     );
     if (cached && (cached.plots?.length || cached.farmer_profile)) {
       setProfile(cached);
-      setLoading(false);
-      // Still fetch fresh data silently in the background
       void fetchMyProfile();
       return;
     }
@@ -386,6 +387,8 @@ export const useFarmerProfile = () => {
     profile,
     loading,
     error,
+    profileSynced,
+    profileVersion,
     refreshProfile: fetchProfile,
     refreshMyProfile: fetchMyProfile,
     getFarmerName,
