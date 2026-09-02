@@ -16,6 +16,7 @@ import {
   clearAuthData,
   clearAllLocalStorage,
   setAuthData,
+  prepareFreshAuthSession,
   isValidToken,
   getUserData,
   resolveAppUserRole,
@@ -203,17 +204,18 @@ const AppRoutesContent: React.FC = () => {
   const handleLoginSuccess = async (role: UserRole, token: string) => {
     const normalizedRole = role.toLowerCase() as UserRole;
 
-    // Store authentication data using utility function
+    // Clear stale profile cache before prefetch — must happen before dashboard mounts.
+    prepareFreshAuthSession();
     setAuthData(token, normalizedRole);
 
-    // Update state
-    setUserRole(normalizedRole);
-    setIsAuthenticated(true);
-
-    // For farmer: await profile prefetch before navigate so dashboard loads fast (no "Loading farmer profile...")
+    // For farmer: prefetch profile BEFORE showing dashboard so fertilizer/irrigation
+    // never render from a stale cache while the API fetch is still in flight.
     if (normalizedRole === "farmer") {
       await prefetchFarmerProfile(setCached);
     }
+
+    setUserRole(normalizedRole);
+    setIsAuthenticated(true);
 
     // For field officer: await agroStats prefetch so "View Field Plot" shows data instantly (no loading)
     if (normalizedRole === "fieldofficer") {

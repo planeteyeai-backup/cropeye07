@@ -135,7 +135,7 @@ const FertilizerTable: React.FC<FertilizerTableProps> = ({
   // Mittisense recommendation → Fertilizer Schedule (same headline map as Soil Recommendation)
   useEffect(() => {
     const plotKey = mittisensePlotKey.split("|")[0]?.trim();
-    if (!plotKey) {
+    if (!profileSynced || !plotKey) {
       setMittiSchedule(null);
       setMittiLoading(false);
       return;
@@ -162,7 +162,7 @@ const FertilizerTable: React.FC<FertilizerTableProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [mittisensePlotKey, profile?.plots, profileVersion]);
+  }, [mittisensePlotKey, profile?.plots, profileVersion, profileSynced]);
 
   // Helper function to calculate months since plantation
   const calculateMonthsSincePlantation = (plantationDate: string): number => {
@@ -371,8 +371,8 @@ const FertilizerTable: React.FC<FertilizerTableProps> = ({
   };
 
   useEffect(() => {
-    // Wait for profile to load
-    if (profileLoading) {
+    // Wait for a fresh profile fetch — never build schedule from stale cache.
+    if (profileLoading || !profileSynced) {
       return;
     }
 
@@ -676,7 +676,7 @@ const FertilizerTable: React.FC<FertilizerTableProps> = ({
         setNoFertilizerRequired(false);
       }
     }
-  }, [profile, profileLoading, profileError, selectedPlotName]);
+  }, [profile, profileLoading, profileError, selectedPlotName, profileSynced, profileVersion]);
 
   const handleDownloadPDF = async () => {
     if (tableRef.current) {

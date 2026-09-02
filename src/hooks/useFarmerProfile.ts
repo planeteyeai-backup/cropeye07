@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { getFarmerProfile, getFarmerMyProfile } from '../api';
-import { getAuthToken, isValidToken, getUserRole } from '../utils/auth';
-import { getCache, setCache, removeCache } from '../utils/cache';
+import { getAuthToken, isValidToken, getUserRole, AUTH_SESSION_STARTED_EVENT } from '../utils/auth';
+import { setCache, removeCache } from '../utils/cache';
 import {
   PLOT_BOUNDARY_UPDATED_EVENT,
   mergeBoundaryIntoProfilePayload,
@@ -206,6 +206,7 @@ export const useFarmerProfile = () => {
   const fetchMyProfile = async () => {
     try {
       setLoading(true);
+      setProfileSynced(false);
       setError(null);
       const response = await getFarmerMyProfile();
       let data = overlaySavedFarmsOnProfile(
@@ -277,18 +278,24 @@ export const useFarmerProfile = () => {
       return;
     }
 
-    // Cache-first: show cached profile for fast paint, but keep loading=true
-    // until a fresh fetch completes so fertilizer/irrigation don't use stale fields.
-    const cached = overlaySavedFarmsOnProfile(
-      getCache('farmerProfile', 10 * 60 * 1000),
-    );
-    if (cached && (cached.plots?.length || cached.farmer_profile)) {
-      setProfile(cached);
-      void fetchMyProfile();
-      return;
-    }
+    // Always fetch fresh profile on mount — do not paint from cache first.
+    void fetchMyProfile();
+  }, []);
 
-    fetchMyProfile();
+  // Re-fetch when a new login session starts (same tab, hook may already be mounted).
+  useEffect(() => {
+    const onSessionStarted = () => {
+      const token = getAuthToken();
+      const userRole = getUserRole();
+      if (!token || !isValidToken(token) || userRole !== 'farmer') return;
+      setProfile(null);
+      setProfileSynced(false);
+      void fetchMyProfile();
+    };
+    window.addEventListener(AUTH_SESSION_STARTED_EVENT, onSessionStarted);
+    return () => {
+      window.removeEventListener(AUTH_SESSION_STARTED_EVENT, onSessionStarted);
+    };
   }, []);
 
   useEffect(() => {

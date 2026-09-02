@@ -2,6 +2,9 @@ import { clearAllAppCache } from "../components/utils/cache";
 import { removeCache } from "./cache";
 import { clearMittisenseInFlight } from "./mittisenseNpkApi";
 
+/** Fired after a new login session is stored — hooks refetch farmer profile. */
+export const AUTH_SESSION_STARTED_EVENT = "cropeye:auth-session-started";
+
 // Authentication utility functions
 export const AUTH_TOKEN_KEY = 'token';
 export const REFRESH_TOKEN_KEY = 'refresh_token'; // Add refresh token key
@@ -142,17 +145,18 @@ export const clearAllLocalStorage = (): void => {
   }
 };
 
-// Set all authentication data after successful login
-export const setAuthData = (token: string, role: string, userData?: any, refreshToken?: string): void => {
-  // Drop stale farmer profile / mittisense requests from a prior session so
-  // fertilizer schedule and farm fields load fresh after login (not only after F5).
+/** Clear profile/mittisense caches at login start (before prefetch). */
+export const prepareFreshAuthSession = (): void => {
   try {
-    removeCache('farmerProfile');
+    removeCache("farmerProfile");
     clearMittisenseInFlight();
   } catch {
     // Ignore cache clear errors
   }
+};
 
+// Set all authentication data after successful login
+export const setAuthData = (token: string, role: string, userData?: any, refreshToken?: string): void => {
   setAuthToken(token);
   if (refreshToken) {
     setRefreshToken(refreshToken);
@@ -162,6 +166,13 @@ export const setAuthData = (token: string, role: string, userData?: any, refresh
     setUserData(userData);
   }
   localStorage.setItem(IS_AUTHENTICATED_KEY, 'true');
+
+  try {
+    clearMittisenseInFlight();
+    window.dispatchEvent(new CustomEvent(AUTH_SESSION_STARTED_EVENT));
+  } catch {
+    // Ignore event dispatch errors
+  }
 };
 
 // Get authorization header for API calls
