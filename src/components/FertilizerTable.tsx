@@ -9,7 +9,6 @@ import {
   fetchMittisenseRecommendation,
   type FertilizerScheduleMittisense,
 } from "../utils/mittisenseNpkApi";
-import FertilizerNpkCards from "./FertilizerNpkCards";
 
 interface FertilizerEntry {
   date: string;
@@ -83,14 +82,7 @@ function getCurrentMonthStartAndEndDates() {
   };
 }
 
-interface FertilizerTableProps {
-  /** Industrial yield NPK cards — Fertilizer page only; hide on farmer home grid. */
-  showNpkUpdate?: boolean;
-}
-
-const FertilizerTable: React.FC<FertilizerTableProps> = ({
-  showNpkUpdate = false,
-}) => {
+const FertilizerTable: React.FC = () => {
   const [data, setData] = useState<FertilizerEntry[]>([]);
   const [localError, setLocalError] = useState<string | null>(null);
   const [plantationType, setPlantationType] = useState<string | null>(null);
@@ -717,23 +709,6 @@ const FertilizerTable: React.FC<FertilizerTableProps> = ({
 
   return (
     <div className="bg-white rounded-lg shadow-md p-6 min-h-[250px] flex flex-col h-full">
-      {showNpkUpdate && (
-        <>
-          <div className="flex items-center bg-white rounded-lg px-4 py-3 mb-4 border-l-4 border-green-500 shadow-sm">
-            <div className="text-xl sm:text-2xl font-bold text-green-700 flex items-center">
-              <span className="mr-3 text-2xl sm:text-3xl">🌱</span>
-              NPK UPDATE
-            </div>
-          </div>
-
-          <FertilizerNpkCards
-            profile={profile}
-            profileLoading={profileLoading}
-            compact
-          />
-        </>
-      )}
-
       <div className="flex justify-between items-center mb-4">
         <h2 className="text-2xl font-bold text-gray-800">
           Fertilizer Schedule
