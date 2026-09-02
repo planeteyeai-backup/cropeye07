@@ -329,7 +329,7 @@ export function buildInChemicalCards(
 /** Row payloads for Fertilizer Schedule (N / P / K) from mittisense recommendation. */
 export type FertilizerScheduleMittisense = {
   headline: string;
-  /** First headline product qty for that nutrient card (not API N/P/K totals). */
+  /** API N/P/K nutrient requirement (kg/acre) — not fertilizer product kg (e.g. MOP). */
   N: number;
   P: number;
   K: number;
@@ -475,6 +475,11 @@ export function buildFertilizerScheduleFromMittisense(
   const pSlot = emptyIf(inP > 0, slots.P);
   const kSlot = emptyIf(inK > 0, slots.K);
 
+  // Nutrients column = API N/P/K (kg/acre nutrient), NOT fertilizer product kg (e.g. 25 kg MOP).
+  const nutrientN = inN > 0 ? (data.N ?? inN) : 0;
+  const nutrientP = inP > 0 ? (data.P ?? inP) : 0;
+  const nutrientK = inK > 0 ? (data.K ?? inK) : 0;
+
   // Prefer Apply lines in chemical column when present (matches Recommendation under-card text)
   const chemOrApply = (slot: Slot): string[] => {
     if (slot.applies.length) return slot.applies;
@@ -483,9 +488,9 @@ export function buildFertilizerScheduleFromMittisense(
 
   return {
     headline,
-    N: nSlot.value,
-    P: pSlot.value,
-    K: kSlot.value,
+    N: nutrientN,
+    P: nutrientP,
+    K: nutrientK,
     chemicalN: chemOrApply(nSlot),
     chemicalP: chemOrApply(pSlot),
     chemicalK: chemOrApply(kSlot),
