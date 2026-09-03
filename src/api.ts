@@ -14,6 +14,7 @@ import { checkAndRefreshToken, isTokenExpired } from "./utils/tokenManager";
 import {
   parseTeamConnectHierarchy,
   personDisplayName,
+  type OwnerFactoryBoundaryPlot,
 } from "./utils/teamConnectHarvest";
 import { getCache, setCache, removeCache } from "./utils/cache";
 
@@ -603,6 +604,68 @@ export const getFarmById = (id: string) => {
 // Get farms by farmer ID (include_farmer helps return plot gat/plot numbers)
 export const getFarmsByFarmerId = (farmerId: string) => {
   return api.get(`/farms/?farmer_id=${farmerId}&include_farmer=true`);
+};
+
+export type OwnerFactoryRef = {
+  factory_id: number;
+  factory_name: string;
+};
+
+export type { OwnerFactoryBoundaryPlot };
+
+/** Owner-only: list factories for the logged-in owner. GET, Bearer token. */
+export const getOwnerFactoryBoundaries = (factoryId?: number | string) => {
+  if (factoryId != null && `${factoryId}`.trim() !== "") {
+    return api.get("/plots/owner-factory-boundaries/", {
+      params: { factory_id: factoryId },
+    });
+  }
+  return api.get("/plots/owner-factory-boundaries/");
+};
+
+/**
+ * Fetch every factory's plot polygons for the owner.
+ * 401 is handled by the auth interceptor; 403/404 return [] so Harvest still works.
+ */
+export const fetchAllOwnerFactoryBoundaryPlots = async (): Promise<
+  OwnerFactoryBoundaryPlot[]
+> => {
+  try {
+    const listRes = await getOwnerFactoryBoundaries();
+    const factories: OwnerFactoryRef[] = Array.isArray(
+      listRes?.data?.factories,
+    )
+      ? listRes.data.factories
+      : [];
+
+    if (factories.length === 0) {
+      const nested = listRes?.data?.plots;
+      return Array.isArray(nested) ? nested : [];
+    }
+
+    const pages = await Promise.all(
+      factories.map(async (factory) => {
+        try {
+          const plotsRes = await getOwnerFactoryBoundaries(factory.factory_id);
+          return Array.isArray(plotsRes?.data?.plots)
+            ? (plotsRes.data.plots as OwnerFactoryBoundaryPlot[])
+            : [];
+        } catch (err: any) {
+          if (err?.response?.status === 403 || err?.response?.status === 404) {
+            return [] as OwnerFactoryBoundaryPlot[];
+          }
+          throw err;
+        }
+      }),
+    );
+
+    return pages.flat();
+  } catch (err: any) {
+    if (err?.response?.status === 403 || err?.response?.status === 404) {
+      return [];
+    }
+    throw err;
+  }
 };
 
 export const createFarm = async (data: {

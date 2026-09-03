@@ -129,7 +129,7 @@ const FertilizerNpkCards: React.FC<FertilizerNpkCardsProps> = ({
 
       if (!industrialFarmer?.yields?.length) {
         throw new Error(
-          "No industrial yield readings found for your farm. Check phone/name in profile matches SEF data.",
+          "No industrial yield readings found for your farm",
         );
       }
 

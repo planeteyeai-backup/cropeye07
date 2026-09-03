@@ -124,6 +124,98 @@
   height: 130px;
 }
 
+/* Medium dashboard card — comfortable size, centered, not full-page width */
+.irrigation-card.irrigation-card--medium {
+  width: 100%;
+  max-width: 620px;
+  height: auto;
+  margin: 0 auto;
+  padding: 1rem 1.25rem;
+  gap: 0.75rem;
+}
+
+.irrigation-card.irrigation-card--medium .card-content.soil-moisture {
+  padding: 0.5rem 0.25rem;
+  min-height: 0;
+}
+
+.irrigation-card.irrigation-card--medium .water-balance-kpi-row {
+  gap: 0.5rem;
+}
+
+.moisture-diverging-scroll--medium {
+  height: 180px;
+  min-height: 180px;
+  max-width: 100%;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0 2px 2px;
+}
+
+.irrigation-card.irrigation-card--medium .moisture-diverging-day {
+  flex: 0 0 56px;
+  min-width: 56px;
+  max-width: 56px;
+}
+
+.irrigation-card.irrigation-card--medium .water-balance-kpi-value {
+  font-size: 1.1rem;
+}
+
+.irrigation-card.irrigation-card--medium .card-header h3 {
+  font-size: 0.95rem;
+}
+
+/* Full-width dashboard row */
+.irrigation-card.irrigation-card--full {
+  width: 100%;
+  max-width: none;
+  height: auto;
+  margin: 0;
+  padding: 1rem 1.25rem;
+  gap: 0.75rem;
+}
+
+.irrigation-card.irrigation-card--full .card-content.soil-moisture {
+  padding: 0.5rem 0.25rem;
+  min-height: 0;
+  width: 100%;
+}
+
+.moisture-diverging-scroll--full {
+  width: 100%;
+  height: 200px;
+  min-height: 200px;
+  justify-content: space-around;
+  gap: 0.5rem;
+}
+
+.moisture-diverging-scroll--full.moisture-diverging-scroll--month {
+  justify-content: flex-start;
+  gap: 0.35rem;
+}
+
+.irrigation-card.irrigation-card--full .moisture-diverging-day {
+  flex: 1 1 0;
+  min-width: 48px;
+  max-width: 140px;
+}
+
+/* Month mode must win over full-width flex so only ~7 days fit */
+.irrigation-card.irrigation-card--full
+  .moisture-diverging-scroll--month
+  .moisture-diverging-day,
+.irrigation-card.irrigation-card--medium
+  .moisture-diverging-scroll--month
+  .moisture-diverging-day,
+.irrigation-card.irrigation-card--compact
+  .moisture-diverging-scroll--month
+  .moisture-diverging-day {
+  flex: 0 0 calc((100% - 6 * 0.35rem) / 7);
+  min-width: calc((100% - 6 * 0.35rem) / 7);
+  max-width: none;
+}
+
 /* Water Uptake Ring */
 .progress-ring {
   position: relative;
@@ -243,11 +335,38 @@
   text-align: left;
 }
 
+/* Month chart: only ~7 days visible; scroll horizontally for the rest */
+.moisture-diverging-scroll--month {
+  justify-content: flex-start;
+  gap: 0.35rem;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+}
+
+.moisture-diverging-scroll--month .moisture-diverging-day {
+  /* Exactly 7 columns fit in the viewport; remaining days scroll */
+  flex: 0 0 calc((100% - 6 * 0.35rem) / 7);
+  min-width: calc((100% - 6 * 0.35rem) / 7);
+  max-width: none;
+  margin: 0;
+  scroll-snap-align: start;
+}
+
+.moisture-diverging-scroll--month .moisture-diverging-label {
+  font-size: 10px;
+}
+
+.moisture-diverging-scroll--month .moisture-diverging-bar {
+  width: 28px;
+  margin-left: -14px;
+}
+
 .moisture-diverging-scroll {
   display: flex;
   flex-direction: row;
   align-items: stretch;
-  gap: 0.35rem;
+  justify-content: space-around;
+  gap: 0.5rem;
   overflow-x: auto;
   overflow-y: hidden;
   min-height: 140px;
@@ -265,13 +384,14 @@
 }
 
 .moisture-diverging-day {
-  flex: 0 0 58px;
-  width: 58px;
+  flex: 1 1 0;
+  min-width: 52px;
+  max-width: 120px;
   height: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
-  margin: 0 1px;
+  margin: 0 2px;
   padding: 0 2px 4px;
   border-radius: 10px;
   border: 1.5px solid transparent;
@@ -909,8 +1029,8 @@
 /* 7-Day Irrigation Schedule – compact grid cards (no horizontal scroll) */
 .irrigation-schedule-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.72fr) minmax(0, 0.78fr) minmax(0, 1fr) minmax(0, 0.82fr);
-  gap: 0.35rem;
+  grid-template-columns: minmax(52px, 1.6fr) minmax(0, 1.1fr) minmax(0, 0.85fr) minmax(0, 1.1fr);
+  gap: 0.3rem;
   align-items: center;
 }
 

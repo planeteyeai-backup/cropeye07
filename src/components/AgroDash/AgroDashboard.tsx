@@ -1,24 +1,20 @@
 import React, { useRef, useEffect, useState, useMemo } from "react";
 
 import {
-  Plus,
-  Minus,
-  Calendar,
-  MapPin,
-  ChevronDown,
-  TrendingUp,
-  BarChart3,
-  PieChart,
-  Activity,
   Maximize2,
   Loader2,
 } from "lucide-react";
 import GaugeChart from "./components/GaugeChart";
 import WeatherChart from "./components/WeatherChart";
 import RainfallChart from "./components/RainfallChart";
-import DistributionChart from "./components/DistributionChart";
 import FieldDistributionChart from "./components/FieldDistributionChart";
 import DropdownFilter from "./components/DropdownFilter";
+import {
+  AGRO_EMPTY_PLOTS,
+  fetchAgroWeatherSeries,
+  resolveAgroWeatherCoords,
+  type AgroWeatherDay,
+} from "../../utils/agroWeatherApi";
 
 import {
   MapContainer,
@@ -30,13 +26,6 @@ import {
 } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import { useMap } from "react-leaflet";
-import {
-  PieChart as RechartsPieChart,
-  Pie,
-  Cell,
-  ResponsiveContainer,
-  Tooltip as RechartsTooltip,
-} from "recharts";
 import { getUserRole } from "../../utils/auth";
 import { getCache, setCache } from "../utils/cache";
 import {
@@ -117,12 +106,6 @@ interface Filters {
   organicCarbon: string;
 }
 
-interface StatusData {
-  name: string;
-  value: number;
-  color: string;
-}
-
 interface MapAutoCenterProps {
   center: [number, number];
 }
@@ -172,6 +155,7 @@ const processApiData = (apiData: Record<string, ApiPlotData>): PlotPoint[] => {
         date: "2025-07-28",
         statistics: {
           bulk_density: 1.2, // Default value since not in API
+          soil_organic_carbon: organicCarbon,
           organic_carbon_stock: organicCarbon,
           total_nitrogen: 100, // Default value since not in API
           cation_exchange_capacity: 20, // Default value since not in API
@@ -223,7 +207,6 @@ const AgroDashboard: React.FC = () => {
     "daily" | "weekly" | "monthly" | "yearly"
   >("weekly");
   const gaugeRef = useRef<HTMLDivElement>(null);
-  const [mapHeight, setMapHeight] = useState<number>(500);
 
   // State for filters and data
   const [filters, setFilters] = useState<Filters>({
@@ -245,6 +228,9 @@ const AgroDashboard: React.FC = () => {
   const [apiData, setApiData] = useState<Record<string, ApiPlotData>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [weatherSeries, setWeatherSeries] = useState<AgroWeatherDay[]>([]);
+  const [weatherLoading, setWeatherLoading] = useState(false);
+  const [weatherError, setWeatherError] = useState<string | null>(null);
 
   // Fetch API data
   useEffect(() => {
@@ -310,13 +296,44 @@ const AgroDashboard: React.FC = () => {
     fetchData();
   }, []);
 
-  // Process API data into plots
+  // Process API data into plots (stable [] when empty — avoids weather fetch loop)
   const allPlots = useMemo(() => {
     if (Object.keys(apiData).length === 0) {
-      return [];
+      return AGRO_EMPTY_PLOTS as PlotPoint[];
     }
     return processApiData(apiData);
   }, [apiData]);
+
+  const weatherCoords = useMemo(
+    () => resolveAgroWeatherCoords(allPlots),
+    [allPlots],
+  );
+
+  // Weather / rainfall — refetch only when coords or period change (not every render)
+  useEffect(() => {
+    let cancelled = false;
+    const { lat, lon } = weatherCoords;
+    setWeatherLoading(true);
+    setWeatherError(null);
+    fetchAgroWeatherSeries(lat, lon, timePeriod)
+      .then((series) => {
+        if (!cancelled) setWeatherSeries(series);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setWeatherSeries([]);
+          setWeatherError(
+            err instanceof Error ? err.message : "Failed to load weather data",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setWeatherLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [weatherCoords.lat, weatherCoords.lon, timePeriod]);
 
   // Filter logic
   const filteredPlots = useMemo(() => {
@@ -426,22 +443,6 @@ const AgroDashboard: React.FC = () => {
     }
   }, [filters, totalArea, allPlotsTotalArea]);
 
-  const averagePH = useMemo(() => {
-    if (filteredPlots.length === 0) return 0;
-    return (
-      filteredPlots.reduce((sum, plot) => sum + plot.ph, 0) /
-      filteredPlots.length
-    );
-  }, [filteredPlots]);
-
-  const averageOrganicCarbon = useMemo(() => {
-    if (filteredPlots.length === 0) return 0;
-    return (
-      filteredPlots.reduce((sum, plot) => sum + plot.organicCarbon, 0) /
-      filteredPlots.length
-    );
-  }, [filteredPlots]);
-
   // Calculate map center from filtered plots
   const mapCenter = useMemo(() => {
     if (filteredPlots.length === 0) {
@@ -457,12 +458,6 @@ const AgroDashboard: React.FC = () => {
 
     return [avgLat, avgLng] as [number, number];
   }, [filteredPlots]);
-
-  useEffect(() => {
-    if (gaugeRef.current) {
-      setMapHeight(gaugeRef.current.offsetHeight);
-    }
-  }, []);
 
   function getStatusColor(status: string): string {
     switch (status) {
@@ -523,7 +518,6 @@ const AgroDashboard: React.FC = () => {
                 options={["All", "10-15", "15-20", "20-25", "25-30"]}
                 value={filters.brixRange}
                 onChange={(value) => handleFilterChange("brixRange", value)}
-                style={{ border: "none" }}
               />
             </div>
             <div className="flex flex-col p-2 bg-white rounded-lg border border-gray-200 shadow-md">
@@ -647,7 +641,7 @@ const AgroDashboard: React.FC = () => {
                     <div className="relative">
                       <GaugeChart
                         value={totalArea}
-                        maxValue={areaGaugeMaxValue.toFixed(2)}
+                        maxValue={areaGaugeMaxValue}
                         label="Total Area (acre)"
                         color="#10b981"
                       />
@@ -777,6 +771,7 @@ const AgroDashboard: React.FC = () => {
                           />
                           <CircleMarker
                             center={plot.position}
+                            radius={8}
                             pathOptions={{
                               color: getStatusColor(plot.status),
                               fillColor: getStatusColor(plot.status),
@@ -796,6 +791,7 @@ const AgroDashboard: React.FC = () => {
                                 <div className="text-gray-600 mb-1">
                                   Area:{" "}
                                   <span className="font-medium">{plot.area}</span>
+                                  
                                 </div>
                                 <div className="text-gray-600 mb-1">
                                   pH:{" "}
@@ -882,7 +878,7 @@ const AgroDashboard: React.FC = () => {
                       : "bg-white text-gray-700 hover:bg-gray-100 border border-gray-200"
                   }`}
                   onClick={() => setTimePeriod(period)}
-                  disabled={loading}
+                  disabled={weatherLoading}
                 >
                   {period}
                 </button>
@@ -896,9 +892,19 @@ const AgroDashboard: React.FC = () => {
                 <SkeletonBlock className="h-[240px] w-full" />
               </div>
             ) : weatherTab === "weather" ? (
-              <WeatherChart timePeriod={timePeriod} />
+              <WeatherChart
+                timePeriod={timePeriod}
+                series={weatherSeries}
+                loading={weatherLoading}
+                error={weatherError}
+              />
             ) : (
-              <RainfallChart timePeriod={timePeriod} />
+              <RainfallChart
+                timePeriod={timePeriod}
+                series={weatherSeries}
+                loading={weatherLoading}
+                error={weatherError}
+              />
             )}
           </div>
         </div>

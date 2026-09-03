@@ -751,8 +751,10 @@ const OfficerDashboard: React.FC = () => {
           recovery: toNumberOrNull(recoveryStats?.mean ?? recoveryStats?.min),
           area: toNumberOrNull(
             currentPlotData?.area_acres ??
-              currentPlotData?.area ??
-              currentPlotData?.area_ha,
+              currentPlotData?.soil?.area_acres ??
+              (currentPlotData?.area_ha != null
+                ? Number(currentPlotData.area_ha) * 2.47105
+                : currentPlotData?.area),
           ),
           biomass: calculatedBiomass,
           totalBiomass: totalBiomassForMetric,
@@ -1625,13 +1627,11 @@ const OfficerDashboard: React.FC = () => {
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
                   {!selectedPlotId ? (
-                    "-"
+                    "0"
                   ) : loadingData && metrics.fieldScore == null ? (
                     <Loader2 className="w-5 h-5 animate-spin inline-block" />
-                  ) : metrics.fieldScore != null ? (
-                    metrics.fieldScore.toFixed(1)
                   ) : (
-                    "-"
+                    (metrics.fieldScore ?? 0).toFixed(1)
                   )}
                 </div>
                 <div className="text-sm font-semibold text-emerald-600">%</div>
@@ -1672,13 +1672,11 @@ const OfficerDashboard: React.FC = () => {
                     <div className="text-right min-w-0">
                       <div className="text-2xl font-bold text-gray-800">
                         {!selectedPlotId ? (
-                          "-"
+                          "0"
                         ) : loadingCci ? (
                           <Loader2 className="w-5 h-5 animate-spin inline-block" />
-                        ) : showCciValue ? (
-                          metrics.cropConditionValue!.toFixed(1)
                         ) : (
-                          "-"
+                          (metrics.cropConditionValue ?? 0).toFixed(1)
                         )}
                       </div>
                       <div
@@ -1696,7 +1694,7 @@ const OfficerDashboard: React.FC = () => {
                           ? "CCI"
                           : (cciStyle?.label ??
                             metrics.cropConditionLabel ??
-                            "-")}
+                            "CCI")}
                       </div>
                     </div>
                   </div>

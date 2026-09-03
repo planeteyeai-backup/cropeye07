@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import {
   ComposedChart,
   Line,
@@ -7,458 +7,135 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  Legend,
   ResponsiveContainer,
+  Legend,
 } from "recharts";
-
-interface WeatherData {
-  date: string;
-  month: string;
-  precipitation: number;
-  tempHigh: number;
-  tempAvg: number;
-  tempMin: number;
-  wind: number;
-  highHumidity: number;
-  lowHumidity: number;
-}
-
-type TimePeriod = "daily" | "weekly" | "monthly" | "yearly";
+import {
+  aggregateAgroWeatherSeries,
+  type AgroTimePeriod,
+  type AgroWeatherDay,
+} from "../../../utils/agroWeatherApi";
 
 interface WeatherChartProps {
-  timePeriod: TimePeriod;
+  timePeriod: AgroTimePeriod;
+  series?: AgroWeatherDay[];
+  loading?: boolean;
+  error?: string | null;
 }
 
-const WeatherChart: React.FC<WeatherChartProps> = ({ timePeriod }) => {
-  // State for legend selection
-  const [visibleMetrics, setVisibleMetrics] = useState({
+type VisibleMetrics = {
+  precipitation: boolean;
+  tempHigh: boolean;
+  tempAvg: boolean;
+  tempMin: boolean;
+  wind: boolean;
+  highHumidity: boolean;
+  lowHumidity: boolean;
+};
+
+function roundUp(value: number, step: number): number {
+  return Math.ceil(value / step) * step;
+}
+
+function WeatherTooltip({
+  active,
+  payload,
+  label,
+}: {
+  active?: boolean;
+  payload?: Array<{ name?: string; value?: number; color?: string }>;
+  label?: string;
+}) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="rounded border border-gray-200 bg-white px-3 py-2 text-xs shadow-md">
+      <p className="mb-1 font-semibold text-gray-800">{label}</p>
+      {payload.map((entry) => {
+        const name = entry.name ?? "";
+        const value = entry.value ?? 0;
+        let unit = "";
+        if (name.includes("Precipitation")) unit = " mm";
+        else if (name.includes("Humidity")) unit = " %";
+        else if (name.includes("Wind")) unit = " km/h";
+        else if (name.includes("Temp")) unit = " °C";
+        return (
+          <p key={name} style={{ color: entry.color }} className="leading-5">
+            {name}: {Number(value).toFixed(1)}
+            {unit}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
+const WeatherChart: React.FC<WeatherChartProps> = ({
+  timePeriod,
+  series = [],
+  loading = false,
+  error = null,
+}) => {
+  const [visibleMetrics, setVisibleMetrics] = useState<VisibleMetrics>({
     precipitation: true,
     tempHigh: true,
     tempAvg: true,
     tempMin: true,
-    wind: true,
-    highHumidity: true,
-    lowHumidity: true,
+    wind: false,
+    highHumidity: false,
+    lowHumidity: false,
   });
-  // Extended weather data with dates for aggregation
-  const rawData: WeatherData[] = [
-    {
-      date: "2024-01-15",
-      month: "Jan 2024",
-      precipitation: 15,
-      tempHigh: 28,
-      tempAvg: 22,
-      tempMin: 16,
-      wind: 12,
-      highHumidity: 75,
-      lowHumidity: 45,
-    },
-    {
-      date: "2024-01-22",
-      month: "Jan 2024",
-      precipitation: 18,
-      tempHigh: 26,
-      tempAvg: 20,
-      tempMin: 14,
-      wind: 10,
-      highHumidity: 78,
-      lowHumidity: 42,
-    },
-    {
-      date: "2024-02-05",
-      month: "Feb 2024",
-      precipitation: 22,
-      tempHigh: 30,
-      tempAvg: 24,
-      tempMin: 18,
-      wind: 14,
-      highHumidity: 82,
-      lowHumidity: 48,
-    },
-    {
-      date: "2024-02-12",
-      month: "Feb 2024",
-      precipitation: 20,
-      tempHigh: 29,
-      tempAvg: 23,
-      tempMin: 17,
-      wind: 13,
-      highHumidity: 80,
-      lowHumidity: 46,
-    },
-    {
-      date: "2024-03-05",
-      month: "Mar 2024",
-      precipitation: 25,
-      tempHigh: 32,
-      tempAvg: 26,
-      tempMin: 20,
-      wind: 15,
-      highHumidity: 80,
-      lowHumidity: 50,
-    },
-    {
-      date: "2024-03-12",
-      month: "Mar 2024",
-      precipitation: 28,
-      tempHigh: 34,
-      tempAvg: 28,
-      tempMin: 22,
-      wind: 16,
-      highHumidity: 85,
-      lowHumidity: 52,
-    },
-    {
-      date: "2024-04-02",
-      month: "Apr 2024",
-      precipitation: 30,
-      tempHigh: 36,
-      tempAvg: 30,
-      tempMin: 24,
-      wind: 17,
-      highHumidity: 88,
-      lowHumidity: 54,
-    },
-    {
-      date: "2024-04-09",
-      month: "Apr 2024",
-      precipitation: 32,
-      tempHigh: 37,
-      tempAvg: 31,
-      tempMin: 25,
-      wind: 18,
-      highHumidity: 90,
-      lowHumidity: 56,
-    },
-    {
-      date: "2024-05-07",
-      month: "May 2024",
-      precipitation: 35,
-      tempHigh: 38,
-      tempAvg: 32,
-      tempMin: 26,
-      wind: 18,
-      highHumidity: 85,
-      lowHumidity: 55,
-    },
-    {
-      date: "2024-05-14",
-      month: "May 2024",
-      precipitation: 38,
-      tempHigh: 39,
-      tempAvg: 33,
-      tempMin: 27,
-      wind: 19,
-      highHumidity: 87,
-      lowHumidity: 57,
-    },
-    {
-      date: "2024-06-04",
-      month: "Jun 2024",
-      precipitation: 45,
-      tempHigh: 36,
-      tempAvg: 30,
-      tempMin: 24,
-      wind: 20,
-      highHumidity: 92,
-      lowHumidity: 65,
-    },
-    {
-      date: "2024-06-11",
-      month: "Jun 2024",
-      precipitation: 50,
-      tempHigh: 35,
-      tempAvg: 29,
-      tempMin: 23,
-      wind: 21,
-      highHumidity: 94,
-      lowHumidity: 68,
-    },
-    {
-      date: "2024-07-02",
-      month: "Jul 2024",
-      precipitation: 85,
-      tempHigh: 35,
-      tempAvg: 29,
-      tempMin: 23,
-      wind: 22,
-      highHumidity: 90,
-      lowHumidity: 70,
-    },
-    {
-      date: "2024-07-09",
-      month: "Jul 2024",
-      precipitation: 88,
-      tempHigh: 34,
-      tempAvg: 28,
-      tempMin: 22,
-      wind: 23,
-      highHumidity: 92,
-      lowHumidity: 72,
-    },
-    {
-      date: "2024-08-06",
-      month: "Aug 2024",
-      precipitation: 75,
-      tempHigh: 33,
-      tempAvg: 27,
-      tempMin: 21,
-      wind: 19,
-      highHumidity: 88,
-      lowHumidity: 62,
-    },
-    {
-      date: "2024-08-13",
-      month: "Aug 2024",
-      precipitation: 72,
-      tempHigh: 32,
-      tempAvg: 26,
-      tempMin: 20,
-      wind: 18,
-      highHumidity: 86,
-      lowHumidity: 60,
-    },
-    {
-      date: "2024-09-03",
-      month: "Sep 2024",
-      precipitation: 65,
-      tempHigh: 33,
-      tempAvg: 27,
-      tempMin: 21,
-      wind: 16,
-      highHumidity: 85,
-      lowHumidity: 60,
-    },
-    {
-      date: "2024-09-10",
-      month: "Sep 2024",
-      precipitation: 62,
-      tempHigh: 32,
-      tempAvg: 26,
-      tempMin: 20,
-      wind: 15,
-      highHumidity: 83,
-      lowHumidity: 58,
-    },
-    {
-      date: "2024-10-01",
-      month: "Oct 2024",
-      precipitation: 45,
-      tempHigh: 31,
-      tempAvg: 25,
-      tempMin: 19,
-      wind: 14,
-      highHumidity: 80,
-      lowHumidity: 52,
-    },
-    {
-      date: "2024-10-08",
-      month: "Oct 2024",
-      precipitation: 42,
-      tempHigh: 30,
-      tempAvg: 24,
-      tempMin: 18,
-      wind: 13,
-      highHumidity: 78,
-      lowHumidity: 50,
-    },
-    {
-      date: "2024-11-05",
-      month: "Nov 2024",
-      precipitation: 25,
-      tempHigh: 29,
-      tempAvg: 23,
-      tempMin: 17,
-      wind: 14,
-      highHumidity: 75,
-      lowHumidity: 45,
-    },
-    {
-      date: "2024-11-12",
-      month: "Nov 2024",
-      precipitation: 22,
-      tempHigh: 28,
-      tempAvg: 22,
-      tempMin: 16,
-      wind: 13,
-      highHumidity: 73,
-      lowHumidity: 43,
-    },
-    {
-      date: "2024-12-03",
-      month: "Dec 2024",
-      precipitation: 18,
-      tempHigh: 27,
-      tempAvg: 21,
-      tempMin: 15,
-      wind: 12,
-      highHumidity: 70,
-      lowHumidity: 40,
-    },
-    {
-      date: "2024-12-10",
-      month: "Dec 2024",
-      precipitation: 15,
-      tempHigh: 26,
-      tempAvg: 20,
-      tempMin: 14,
-      wind: 11,
-      highHumidity: 68,
-      lowHumidity: 38,
-    },
-    {
-      date: "2025-01-07",
-      month: "Jan 2025",
-      precipitation: 20,
-      tempHigh: 27,
-      tempAvg: 21,
-      tempMin: 15,
-      wind: 13,
-      highHumidity: 70,
-      lowHumidity: 40,
-    },
-    {
-      date: "2025-01-14",
-      month: "Jan 2025",
-      precipitation: 18,
-      tempHigh: 26,
-      tempAvg: 20,
-      tempMin: 14,
-      wind: 12,
-      highHumidity: 68,
-      lowHumidity: 38,
-    },
-  ];
 
-  // Aggregation logic similar to FarmerDashboard
-  const aggregateDataByPeriod = (
-    data: WeatherData[],
-    period: TimePeriod
-  ): WeatherData[] => {
-    if (period === "daily") {
-      if (data.length < 2) return data;
-      const sorted = [...data].sort(
-        (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
-      );
-      const last = sorted[sorted.length - 1];
-      const secondLast = sorted[sorted.length - 2];
-      return [secondLast, last];
+  const processedData = useMemo(
+    () => aggregateAgroWeatherSeries(series, timePeriod),
+    [series, timePeriod],
+  );
+
+  const rainDomain = useMemo((): [number, number] => {
+    const maxRain = Math.max(
+      ...processedData.map((row) => row.precipitation),
+      0,
+    );
+    return [0, Math.max(roundUp(maxRain * 1.2, 5), 10)];
+  }, [processedData]);
+
+  const tempDomain = useMemo((): [number, number] => {
+    const temps: number[] = [];
+    for (const row of processedData) {
+      if (visibleMetrics.tempHigh) temps.push(row.tempHigh);
+      if (visibleMetrics.tempAvg) temps.push(row.tempAvg);
+      if (visibleMetrics.tempMin) temps.push(row.tempMin);
+      if (visibleMetrics.wind) temps.push(row.wind);
     }
+    if (!temps.length) return [0, 40];
+    const min = Math.min(...temps);
+    const max = Math.max(...temps);
+    return [Math.floor(min - 3), Math.ceil(max + 3)];
+  }, [processedData, visibleMetrics]);
 
-    if (period === "yearly") {
-      // For yearly, show all data points (no aggregation)
-      return [...data].sort(
-        (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
-      );
-    }
+  const showHumidity =
+    visibleMetrics.highHumidity || visibleMetrics.lowHumidity;
+  const showTempOrWind =
+    visibleMetrics.tempHigh ||
+    visibleMetrics.tempAvg ||
+    visibleMetrics.tempMin ||
+    visibleMetrics.wind;
 
-    const groupedData: { [key: string]: WeatherData[] } = {};
-    data.forEach((item) => {
-      const date = new Date(item.date);
-      let key: string;
-
-      switch (period) {
-        case "weekly":
-          const weekStart = new Date(date);
-          weekStart.setDate(date.getDate() - date.getDay());
-          key = weekStart.toISOString().split("T")[0];
-          break;
-        case "monthly":
-          key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(
-            2,
-            "0"
-          )}`;
-          break;
-        default:
-          key = item.date;
-      }
-
-      if (!groupedData[key]) {
-        groupedData[key] = [];
-      }
-      groupedData[key].push(item);
-    });
-
-    return Object.entries(groupedData)
-      .map(([key, items]) => {
-        const avgPrecipitation =
-          items.reduce((sum, item) => sum + item.precipitation, 0) /
-          items.length;
-        const avgTempHigh =
-          items.reduce((sum, item) => sum + item.tempHigh, 0) / items.length;
-        const avgTempAvg =
-          items.reduce((sum, item) => sum + item.tempAvg, 0) / items.length;
-        const avgTempMin =
-          items.reduce((sum, item) => sum + item.tempMin, 0) / items.length;
-        const avgWind =
-          items.reduce((sum, item) => sum + item.wind, 0) / items.length;
-        const avgHighHumidity =
-          items.reduce((sum, item) => sum + item.highHumidity, 0) /
-          items.length;
-        const avgLowHumidity =
-          items.reduce((sum, item) => sum + item.lowHumidity, 0) / items.length;
-
-        let displayDate: string;
-        if (period === "monthly") {
-          const [year, month] = key.split("-");
-          displayDate = new Date(
-            parseInt(year),
-            parseInt(month) - 1
-          ).toLocaleDateString("en-US", {
-            month: "short",
-            year: "numeric",
-          });
-        } else if (period === "weekly") {
-          const date = new Date(key);
-          displayDate = date.toLocaleDateString("en-US", {
-            month: "short",
-            day: "numeric",
-          });
-        } else {
-          displayDate = key;
-        }
-
-        return {
-          date: key,
-          month: displayDate,
-          precipitation: avgPrecipitation,
-          tempHigh: avgTempHigh,
-          tempAvg: avgTempAvg,
-          tempMin: avgTempMin,
-          wind: avgWind,
-          highHumidity: avgHighHumidity,
-          lowHumidity: avgLowHumidity,
-        };
-      })
-      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-  };
-
-  // Process data based on selected time period
-  const processedData = useMemo(() => {
-    return aggregateDataByPeriod(rawData, timePeriod);
-  }, [timePeriod]);
-
-  // Handle legend click - solo mode: show only clicked metric
-  const handleLegendClick = (metric: keyof typeof visibleMetrics) => {
-    // If the metric is already the only one visible, show all
+  const handleLegendClick = (metric: keyof VisibleMetrics) => {
     const isOnlyVisible =
       visibleMetrics[metric] &&
-      Object.entries(visibleMetrics).filter(([key, value]) => value).length ===
-        1;
+      Object.entries(visibleMetrics).filter(([, value]) => value).length === 1;
 
     if (isOnlyVisible) {
-      // Show all metrics if only one is currently visible
       setVisibleMetrics({
         precipitation: true,
         tempHigh: true,
         tempAvg: true,
         tempMin: true,
-        wind: true,
-        highHumidity: true,
-        lowHumidity: true,
+        wind: false,
+        highHumidity: false,
+        lowHumidity: false,
       });
     } else {
-      // Show only the clicked metric
       setVisibleMetrics({
         precipitation: metric === "precipitation",
         tempHigh: metric === "tempHigh",
@@ -471,237 +148,228 @@ const WeatherChart: React.FC<WeatherChartProps> = ({ timePeriod }) => {
     }
   };
 
+  if (loading) {
+    return (
+      <div className="flex h-64 items-center justify-center text-sm text-gray-500">
+        Loading weather data…
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex h-64 items-center justify-center px-4 text-center text-sm text-red-600">
+        {error}
+      </div>
+    );
+  }
+
+  if (!processedData.length) {
+    return (
+      <div className="flex h-64 items-center justify-center text-sm text-gray-500">
+        No weather data available for this area.
+      </div>
+    );
+  }
+
   return (
-    <div className="bg-white p-2 rounded-lg relative items-start justify-start">
-      <div className="h-64 ">
+    <div className="relative items-start justify-start rounded-lg bg-white p-2">
+      <div className="h-64">
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart
+            key={timePeriod}
             data={processedData}
-            margin={{ top: 10, right: 18, bottom: 0, left: -30 }}
+            margin={{ top: 8, right: showHumidity ? 48 : 28, bottom: 0, left: 4 }}
           >
             <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
             <XAxis
               dataKey="month"
               tick={{ fontSize: 10 }}
-              angle={0}
-              textAnchor="middle"
-              height={60}
+              angle={timePeriod === "daily" ? -35 : 0}
+              textAnchor={timePeriod === "daily" ? "end" : "middle"}
+              height={timePeriod === "daily" ? 50 : 60}
             />
-            <YAxis tick={{ fontSize: 10 }} />
-            <Tooltip
-              contentStyle={{
-                backgroundColor: "white",
-                border: "1px solid #ccc",
-                borderRadius: "4px",
-                fontSize: "12px",
-              }}
-            />
+
+            {/* Left: rainfall (mm) */}
+            {visibleMetrics.precipitation && (
+              <YAxis
+                yAxisId="rain"
+                orientation="left"
+                domain={rainDomain}
+                tick={{ fontSize: 10, fill: "#2563eb" }}
+                tickFormatter={(v) => `${v}`}
+                label={{
+                  value: "mm",
+                  angle: -90,
+                  position: "insideLeft",
+                  offset: 8,
+                  style: { fontSize: 10, fill: "#2563eb" },
+                }}
+              />
+            )}
+
+            {/* Right: temperature + wind (°C / km/h) */}
+            {showTempOrWind && (
+              <YAxis
+                yAxisId="temp"
+                orientation="right"
+                domain={tempDomain}
+                tick={{ fontSize: 10, fill: "#ef4444" }}
+                tickFormatter={(v) => `${v}°`}
+                label={{
+                  value: "°C",
+                  angle: 90,
+                  position: "insideRight",
+                  offset: showHumidity ? -8 : 0,
+                  style: { fontSize: 10, fill: "#ef4444" },
+                }}
+              />
+            )}
+
+            {/* Second right: humidity (%) */}
+            {showHumidity && (
+              <YAxis
+                yAxisId="humidity"
+                orientation="right"
+                domain={[0, 100]}
+                tick={{ fontSize: 10, fill: "#16a34a" }}
+                tickFormatter={(v) => `${v}%`}
+                axisLine={false}
+                tickLine={false}
+                width={42}
+                label={{
+                  value: "% RH",
+                  angle: 90,
+                  position: "insideRight",
+                  offset: 12,
+                  style: { fontSize: 9, fill: "#16a34a" },
+                }}
+              />
+            )}
+
+            <Tooltip content={<WeatherTooltip />} />
+            <Legend wrapperStyle={{ display: "none" }} />
+
             {visibleMetrics.precipitation && (
               <Bar
+                yAxisId="rain"
                 dataKey="precipitation"
                 fill="#3b82f6"
                 name="Precipitation"
+                barSize={timePeriod === "daily" ? 18 : 12}
+                radius={[2, 2, 0, 0]}
               />
             )}
             {visibleMetrics.tempHigh && (
               <Line
+                yAxisId="temp"
                 type="monotone"
                 dataKey="tempHigh"
                 stroke="#ef4444"
                 strokeWidth={2}
+                dot={{ r: 2 }}
                 name="Temp High"
               />
             )}
             {visibleMetrics.tempAvg && (
               <Line
+                yAxisId="temp"
                 type="monotone"
                 dataKey="tempAvg"
-                stroke="#60a5fa"
+                stroke="#f59e0b"
                 strokeWidth={2}
+                dot={{ r: 2 }}
                 name="Temp Avg"
               />
             )}
             {visibleMetrics.tempMin && (
               <Line
+                yAxisId="temp"
                 type="monotone"
                 dataKey="tempMin"
-                stroke="#10b981"
+                stroke="#06b6d4"
                 strokeWidth={2}
+                dot={{ r: 2 }}
                 name="Temp Min"
               />
             )}
             {visibleMetrics.wind && (
               <Line
+                yAxisId="temp"
                 type="monotone"
                 dataKey="wind"
-                stroke="#6b7280"
+                stroke="#8b5cf6"
                 strokeWidth={2}
+                dot={{ r: 2 }}
                 name="Wind"
               />
             )}
             {visibleMetrics.highHumidity && (
               <Line
+                yAxisId="humidity"
                 type="monotone"
                 dataKey="highHumidity"
-                stroke="#eab308"
+                stroke="#22c55e"
                 strokeWidth={2}
+                dot={{ r: 2 }}
                 name="High Humidity"
               />
             )}
             {visibleMetrics.lowHumidity && (
               <Line
+                yAxisId="humidity"
                 type="monotone"
                 dataKey="lowHumidity"
-                stroke="#8b5cf6"
+                stroke="#84cc16"
                 strokeWidth={2}
+                dot={{ r: 2 }}
                 name="Low Humidity"
               />
             )}
           </ComposedChart>
         </ResponsiveContainer>
       </div>
-      <div className="flex items-center justify-center mt-5">
-        <div className="flex flex-wrap gap-3">
-          <div
-            className={`flex items-center text-sm cursor-pointer hover:bg-gray-100 rounded px-2 py-1 transition-colors ${
-              !visibleMetrics.precipitation ? "opacity-50" : ""
-            } ${
-              visibleMetrics.precipitation &&
-              Object.entries(visibleMetrics).filter(([key, value]) => value)
-                .length === 1
-                ? "bg-blue-100 ring-1 ring-blue-300"
-                : ""
-            }`}
-            onClick={() => handleLegendClick("precipitation")}
-          >
-            <div className="w-3.5 h-6 rounded-full bg-blue-500 mr-1"></div>
-            <span
-              className={`${
-                !visibleMetrics.precipitation
-                  ? "text-gray-400"
-                  : "text-gray-500"
-              } ${
-                visibleMetrics.precipitation &&
-                Object.entries(visibleMetrics).filter(([key, value]) => value)
-                  .length === 1
-                  ? "font-semibold text-blue-700"
-                  : ""
-              }`}
-            >
-              Precipitation
-            </span>
-          </div>
-          <div
-            className={`flex items-center text-sm cursor-pointer hover:bg-gray-100 rounded px-2 py-1 transition-colors ${
-              !visibleMetrics.tempHigh ? "opacity-50" : ""
-            }`}
-            onClick={() => handleLegendClick("tempHigh")}
-          >
-            <div className="w-3.5 h-6 rounded-full bg-red-500 mr-1"></div>
-            <span
-              className={`${
-                !visibleMetrics.tempHigh ? "text-gray-400" : "text-gray-500"
-              }`}
-            >
-              Temp(°C) High
-            </span>
-          </div>
-          <div
-            className={`flex items-center text-sm cursor-pointer hover:bg-gray-100 rounded px-2 py-1 transition-colors ${
-              !visibleMetrics.tempAvg ? "opacity-50" : ""
-            }`}
-            onClick={() => handleLegendClick("tempAvg")}
-          >
-            <div className="w-3.5 h-6 rounded-full bg-blue-400 mr-1"></div>
-            <span
-              className={`${
-                !visibleMetrics.tempAvg ? "text-gray-400" : "text-gray-500"
-              }`}
-            >
-              Temp(°C) Avg
-            </span>
-          </div>
-          <div
-            className={`flex items-center text-sm cursor-pointer hover:bg-gray-100 rounded px-2 py-1 transition-colors ${
-              !visibleMetrics.tempMin ? "opacity-50" : ""
-            }`}
-            onClick={() => handleLegendClick("tempMin")}
-          >
-            <div className="w-3.5 h-6 rounded-full bg-green-500 mr-1"></div>
-            <span
-              className={`${
-                !visibleMetrics.tempMin ? "text-gray-400" : "text-gray-500"
-              }`}
-            >
-              Temp(°C) Min
-            </span>
-          </div>
-          <div
-            className={`flex items-center text-sm cursor-pointer hover:bg-gray-100 rounded px-2 py-1 transition-colors ${
-              !visibleMetrics.wind ? "opacity-50" : ""
-            }`}
-            onClick={() => handleLegendClick("wind")}
-          >
-            <div className="w-3.5 h-6 rounded-full bg-gray-600 mr-1"></div>
-            <span
-              className={`${
-                !visibleMetrics.wind ? "text-gray-400" : "text-gray-500"
-              }`}
-            >
-              Wind(Km/hr)
-            </span>
-          </div>
-          <div
-            className={`flex items-center text-sm cursor-pointer hover:bg-gray-100 rounded px-2 py-1 transition-colors ${
-              !visibleMetrics.highHumidity ? "opacity-50" : ""
-            }`}
-            onClick={() => handleLegendClick("highHumidity")}
-          >
-            <div className="w-3.5 h-6 rounded-full bg-yellow-500 mr-1"></div>
-            <span
-              className={`${
-                !visibleMetrics.highHumidity ? "text-gray-400" : "text-gray-500"
-              }`}
-            >
-              High humidity
-            </span>
-          </div>
-          <div
-            className={`flex items-center text-sm cursor-pointer hover:bg-gray-100 rounded px-2 py-1 transition-colors ${
-              !visibleMetrics.lowHumidity ? "opacity-50" : ""
-            }`}
-            onClick={() => handleLegendClick("lowHumidity")}
-          >
-            <div className="w-3.5 h-6 rounded-full bg-purple-500 mr-1"></div>
-            <span
-              className={`${
-                !visibleMetrics.lowHumidity ? "text-gray-400" : "text-gray-500"
-              }`}
-            >
-              Low humidity
-            </span>
-          </div>
-        </div>
-        <div className="flex justify-center mt-3">
+
+      <div className="mt-2 flex flex-wrap justify-center gap-2 text-[10px] sm:text-xs">
+        {(
+          [
+            ["precipitation", "Precipitation (mm)", "#3b82f6"],
+            ["tempHigh", "Temp High (°C)", "#ef4444"],
+            ["tempAvg", "Temp Avg (°C)", "#f59e0b"],
+            ["tempMin", "Temp Min (°C)", "#06b6d4"],
+            ["wind", "Wind (km/h)", "#8b5cf6"],
+            ["highHumidity", "High Humidity (%)", "#22c55e"],
+            ["lowHumidity", "Low Humidity (%)", "#84cc16"],
+          ] as const
+        ).map(([key, label, color]) => (
           <button
-            onClick={() =>
-              setVisibleMetrics({
-                precipitation: true,
-                tempHigh: true,
-                tempAvg: true,
-                tempMin: true,
-                wind: true,
-                highHumidity: true,
-                lowHumidity: true,
-              })
-            }
-            className="text-xs text-blue-600 hover:text-blue-800 underline cursor-pointer"
+            key={key}
+            type="button"
+            onClick={() => handleLegendClick(key)}
+            className={`inline-flex items-center gap-1 rounded border px-2 py-1 ${
+              visibleMetrics[key]
+                ? "border-gray-300 bg-white text-gray-700"
+                : "border-gray-200 bg-gray-50 text-gray-400"
+            }`}
           >
-            {Object.entries(visibleMetrics).filter(([key, value]) => value)
-              .length === 1}
+            <span
+              className="inline-block h-2 w-2 rounded-sm"
+              style={{ backgroundColor: color }}
+            />
+            {label}
           </button>
-        </div>
+        ))}
       </div>
+      <p className="mt-1 text-center text-[10px] text-gray-400">
+        Live data · Open-Meteo (+ CropEye forecast when available) ·{" "}
+        {timePeriod === "daily"
+          ? "last 7 days (past)"
+          : timePeriod === "weekly"
+            ? "last 12 weeks"
+            : timePeriod === "monthly"
+              ? "last 12 complete months"
+              : "last 5 years (annual totals)"}
+      </p>
     </div>
   );
 };

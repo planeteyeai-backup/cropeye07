@@ -60,7 +60,6 @@ import { fetchPlotBoundaryCoordinates } from "../utils/plotBoundary";
 import {
   PLOT_BOUNDARY_UPDATED_EVENT,
   resolveLeafletBoundaryForPlotRecord,
-  type PlotBoundaryUpdatedDetail,
 } from "../utils/plotBoundarySync";
 import {
   cropConditionStyleFromCci,
@@ -615,6 +614,7 @@ const OwnerFarmDash: React.FC = () => {
   const [selectedFarmerId, setSelectedFarmerId] = useState<string>("");
   const [selectedPlotId, setSelectedPlotId] = useState<string>(""); // Start empty, will be set based on farmer selection
   const selectedPlotIdRef = useRef<string>("");
+  const selectedFarmerIdRef = useRef<string>("");
   const [managers, setManagers] = useState<any[]>([]);
   const [fieldOfficers, setFieldOfficers] = useState<any[]>([]);
   // Raw field officers list (used to filter per selected manager).
@@ -754,10 +754,14 @@ const OwnerFarmDash: React.FC = () => {
     fetchOwnerHierarchy();
   }, []);
 
-  // Keep a ref so background retries can verify they're updating the latest plot.
+  // Keep refs so async boundary refresh targets the latest selection.
   useEffect(() => {
     selectedPlotIdRef.current = selectedPlotId;
   }, [selectedPlotId]);
+
+  useEffect(() => {
+    selectedFarmerIdRef.current = selectedFarmerId;
+  }, [selectedFarmerId]);
 
   const applyCoordinatesFromPlot = (plot: any, plotKey?: string): boolean => {
     const coords = resolveLeafletBoundaryForPlotRecord(
@@ -821,6 +825,24 @@ const OwnerFarmDash: React.FC = () => {
     farmerPlotsCache,
     farmersForSelectedOfficer,
   ]);
+
+  // Prefer Django /farms/ edited KML once enrichment completes (over stale Events polygon).
+  useEffect(() => {
+    if (!selectedPlotId || !selectedPlotRecordForStage) return;
+    const savedCoords = resolveLeafletBoundaryForPlotRecord(
+      selectedPlotRecordForStage,
+      selectedPlotId,
+    );
+    if (savedCoords.length < 3) return;
+
+    applyLeafletCoords(
+      savedCoords,
+      setPlotCoordinates,
+      setMapCenter,
+      setMapKey,
+    );
+    setPlotCoordinatesCache((prev) => new Map(prev.set(selectedPlotId, savedCoords)));
+  }, [selectedPlotRecordForStage, selectedPlotId]);
 
   const currentCropStage = useFieldIndicesCropStage(
     selectedPlotRecordForStage,
@@ -1002,6 +1024,17 @@ const OwnerFarmDash: React.FC = () => {
           const farmsRes = await getFarmsByFarmerId(farmerId);
           const farms = parseFarmsListResponse(farmsRes?.data);
           enrichedPlots = enrichPlotsWithFarmDetails(farmPlots, farms);
+          // Drop Events/FO polygon cache so map redraws from Django KML.
+          setPlotCoordinatesCache((prev) => {
+            const next = new Map(prev);
+            for (const plot of enrichedPlots) {
+              const key = String(
+                plot?.fastapi_plot_id ?? plot?.plot_id ?? plot?.id ?? "",
+              ).trim();
+              if (key) next.delete(key);
+            }
+            return next;
+          });
         } catch {
           enrichedPlots = farmPlots;
         }
@@ -1875,8 +1908,68 @@ const OwnerFarmDash: React.FC = () => {
 
   // Fetch plot coordinates immediately when plot is selected
   const fetchPlotCoordinates = async (plotId: string): Promise<void> => {
-    const plot = findPlotInSelection(plotId);
-    const savedCoords = resolveLeafletBoundaryForPlotRecord(plot, plotId);
+    const farmerId = selectedFarmerIdRef.current?.trim();
+    let plot =
+      findPlotInSelection(plotId) ??
+      (farmerId ? findPlotRef(farmerPlotsCache[farmerId] ?? [], plotId) : null);
+
+    // Always re-fetch Django /farms/?farmer_id= — FO/Events polygons stay stale after KML edit.
+    if (farmerId) {
+      try {
+        const farmsRes = await getFarmsByFarmerId(farmerId);
+        const farms = parseFarmsListResponse(farmsRes?.data);
+        if (farms.length) {
+          const basePlots =
+            farmerPlotsCache[farmerId]?.length
+              ? farmerPlotsCache[farmerId]
+              : extractPlotsFromFarmer(
+                  farmersForSelectedOfficer.find(
+                    (f) => getFarmerId(f) === farmerId,
+                  ) ?? {},
+                );
+          const seed = plot ? [plot] : basePlots;
+          const enrichedSeed = enrichPlotsWithFarmDetails(
+            seed.length ? seed : basePlots,
+            farms,
+          );
+          const enrichedPlots = enrichPlotsWithFarmDetails(
+            basePlots.length ? basePlots : enrichedSeed,
+            farms,
+          );
+          plot =
+            findPlotRef(enrichedPlots, plotId) ??
+            findPlotRef(enrichedSeed, plotId) ??
+            (plot
+              ? enrichPlotsWithFarmDetails([plot], farms)[0] ?? plot
+              : null);
+
+          setFarmerPlotsCache((prev) => ({
+            ...prev,
+            [farmerId]: enrichedPlots.length ? enrichedPlots : enrichedSeed,
+          }));
+          setFarmersForSelectedOfficer((prev) =>
+            prev.map((row) => {
+              if (getFarmerId(row) !== farmerId) return row;
+              const plotList = extractPlotsFromFarmer(row);
+              if (!plotList.length) {
+                return enrichedPlots.length
+                  ? { ...row, plots: enrichedPlots, plots_count: enrichedPlots.length }
+                  : row;
+              }
+              return {
+                ...row,
+                plots: enrichPlotsWithFarmDetails(plotList, farms),
+              };
+            }),
+          );
+        }
+      } catch {
+        // Fall through to cached / Events boundary below.
+      }
+    }
+
+    let savedCoords = resolveLeafletBoundaryForPlotRecord(plot, plotId);
+
     if (savedCoords.length > 0) {
       applyLeafletCoords(
         savedCoords,
@@ -1917,18 +2010,61 @@ const OwnerFarmDash: React.FC = () => {
   };
 
   useEffect(() => {
-    const onBoundaryUpdated = (event: Event) => {
-      const detail = (event as CustomEvent<PlotBoundaryUpdatedDetail>).detail;
+    const onBoundaryUpdated = () => {
       setPlotCoordinatesCache(new Map());
-      if (!selectedPlotIdRef.current) return;
-      const plot = findPlotInSelection(selectedPlotIdRef.current);
-      if (
-        !applyCoordinatesFromPlot(plot, selectedPlotIdRef.current) &&
-        selectedPlotIdRef.current
-      ) {
-        void fetchPlotCoordinates(selectedPlotIdRef.current);
-      }
-      if (detail?.plotKey && selectedFarmerId) {
+      const farmerId = selectedFarmerIdRef.current?.trim();
+      const plotId = selectedPlotIdRef.current;
+      if (!plotId) return;
+
+      void (async () => {
+        let plot = findPlotInSelection(plotId);
+
+        if (farmerId) {
+          try {
+            const farmsRes = await getFarmsByFarmerId(farmerId);
+            const farms = parseFarmsListResponse(farmsRes?.data);
+            if (farms.length) {
+              const basePlots =
+                farmerPlotsCache[farmerId]?.length
+                  ? farmerPlotsCache[farmerId]
+                  : extractPlotsFromFarmer(
+                      farmersForSelectedOfficer.find(
+                        (f) => getFarmerId(f) === farmerId,
+                      ) ?? {},
+                    );
+              const enrichedPlots = enrichPlotsWithFarmDetails(basePlots, farms);
+              setFarmerPlotsCache((prev) => ({
+                ...prev,
+                [farmerId]: enrichedPlots,
+              }));
+              setFarmersForSelectedOfficer((prev) =>
+                prev.map((row) => {
+                  if (getFarmerId(row) !== farmerId) return row;
+                  const plotList = extractPlotsFromFarmer(row);
+                  if (!plotList.length) return row;
+                  return {
+                    ...row,
+                    plots: enrichPlotsWithFarmDetails(plotList, farms),
+                  };
+                }),
+              );
+              plot =
+                findPlotRef(enrichedPlots, plotId) ??
+                (plot
+                  ? enrichPlotsWithFarmDetails([plot], farms)[0] ?? plot
+                  : null);
+            }
+          } catch {
+            // Best-effort Django refresh.
+          }
+        }
+
+        if (!applyCoordinatesFromPlot(plot, plotId)) {
+          void fetchPlotCoordinates(plotId);
+        }
+      })();
+
+      if (farmerId) {
         lastFetchedFarmerIdRef.current = "";
       }
     };
@@ -1938,7 +2074,7 @@ const OwnerFarmDash: React.FC = () => {
       window.removeEventListener(PLOT_BOUNDARY_UPDATED_EVENT, onBoundaryUpdated);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refresh map when farmer edits KML
-  }, [selectedFarmerId]);
+  }, []);
 
   // Aggregation logic (same as FarmerDashboard)
   const aggregateDataByPeriod = (

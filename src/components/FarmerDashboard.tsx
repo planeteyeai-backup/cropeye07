@@ -42,6 +42,7 @@ import CommonSpinner from "./CommanSpinner";
 import { useI18nLite } from "../i18nLite.ts";
 import FieldIndicesStageBadge from "./FieldIndicesStageBadge";
 import { useFieldIndicesCropStage } from "../hooks/useFieldIndicesCropStage";
+import { normalizePlotKey } from "../utils/plotName";
 import {
   cropConditionStyleFromCci,
   fetchWaterStressAnalysis,
@@ -196,10 +197,50 @@ const PieChartWithNeedle: React.FC<PieChartWithNeedleProps> = ({
   );
 };
 
-const BASE_URL = "https://events-cropeye.up.railway.app";
-// const OPTIMAL_BIOMASS = 150;
-const SOIL_API_URL = "https://main-cropeye.up.railway.app";
-const SOIL_DATE = "2025-10-03";
+const BASE_URL =
+  String(import.meta.env.VITE_DEV_EVENTS_API_URL ?? "")
+    .trim()
+    .replace(/\/$/, "") || "https://events-cropeye.up.railway.app";
+const SOIL_API_URL =
+  String(import.meta.env.VITE_DEV_SOIL_API_URL ?? "")
+    .trim()
+    .replace(/\/$/, "") || "https://main-cropeye.up.railway.app";
+
+function toNumberOrNull(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function lookupAgroPlotData(
+  agroStats: Record<string, any> | null | undefined,
+  plotKey: string,
+): any | null {
+  if (!agroStats || !plotKey?.trim()) return null;
+  const direct =
+    agroStats[plotKey] ??
+    agroStats[`"${plotKey}"`] ??
+    agroStats[plotKey.replace(/_/g, "/")] ??
+    agroStats[plotKey.replace(/\//g, "_")];
+  if (direct) return direct;
+  const target = normalizePlotKey(plotKey);
+  const matched = Object.entries(agroStats).find(
+    ([key]) => normalizePlotKey(key) === target,
+  );
+  return matched?.[1] ?? null;
+}
+
+function extractSugarYieldMean(plotData: any): number | null {
+  return toNumberOrNull(
+    plotData?.brix_sugar?.sugar_yield?.mean ??
+      plotData?.brix_sugar?.sugar_yield?.avg ??
+      plotData?.brix_sugar?.sugar_yield?.average ??
+      plotData?.brix_sugar?.sugar_yield_mean ??
+      plotData?.sugar_yield_mean ??
+      plotData?.expected_yield ??
+      plotData?.brix_sugar?.sugar_yield?.min,
+  );
+}
 
 const OTHER_FARMERS_RECOVERY = {
   regional_average: 7.85,
@@ -553,12 +594,13 @@ const FarmerDashboard: React.FC = () => {
         setCache(irrigationCacheKey, irrigationData);
       }
 
-      const soilCacheKey = `soil_${currentPlotId}_${SOIL_DATE}`;
-      let soilData = getCache(soilCacheKey);
+      const soilDate = endDate;
+      const soilCacheKey = `soil_${currentPlotId}_${soilDate}`;
+      let soilData = getCache(soilCacheKey, 10 * 60 * 1000);
 
       if (!soilData) {
         const res = await axios.post(
-          `${SOIL_API_URL}/analyze?plot_name=${currentPlotId}&date=${SOIL_DATE}&fe_days_back=30`
+          `${SOIL_API_URL}/analyze?plot_name=${encodeURIComponent(currentPlotId)}&date=${soilDate}&fe_days_back=30`
         );
         soilData = res.data;
         setCache(soilCacheKey, soilData);
@@ -567,14 +609,14 @@ const FarmerDashboard: React.FC = () => {
       // Fetch harvest status from sugarcane-harvest endpoint
       const harvestCacheKey = `harvest_${currentPlotId}_${endDate}`;
       let harvestStatus = null;
-      let harvestData = getCache(harvestCacheKey);
+      let harvestData = getCache(harvestCacheKey, 10 * 60 * 1000);
       let harvestDate = null;
       let isHarvested = false;
 
       if (!harvestData) {
         try {
           const harvestRes = await eventsApi.post(
-            `${BASE_URL}/sugarcane-harvest?plot_name=${currentPlotId}&end_date=${endDate}`
+            `${BASE_URL}/sugarcane-harvest?plot_name=${encodeURIComponent(currentPlotId)}&end_date=${endDate}`
           );
           harvestData = harvestRes.data;
           setCache(harvestCacheKey, harvestData);
@@ -602,27 +644,29 @@ const FarmerDashboard: React.FC = () => {
 
       // Determine which date to use for fetching yield data
       // For harvested plots, use harvest_date; for others, use end_date
-      const yieldDataDate = isHarvested && harvestDate ? harvestDate : endDate;
+      const yieldDataDate = isHarvested && harvestDate ? String(harvestDate).slice(0, 10) : endDate;
 
-      // Prefer new single-plot agro stats endpoint for better performance
-      const singlePlotCacheKey = `agroSingle_v1_${currentPlotId}_${yieldDataDate}`;
-      let currentPlotData = getCache(singlePlotCacheKey);
+      // Always hit analyzeSinglePlot for Crop Status cards (short TTL only).
+      // Old long-lived cache caused UI values to differ from the live API.
+      const singlePlotCacheKey = `agroSingle_v2_${currentPlotId}_${yieldDataDate}`;
+      let currentPlotData = getCache(singlePlotCacheKey, 2 * 60 * 1000);
 
       if (!currentPlotData) {
         try {
-          currentPlotData = await getSinglePlotAgroStats(currentPlotId);
-          setCache(singlePlotCacheKey, currentPlotData);
+          currentPlotData = await getSinglePlotAgroStats(currentPlotId, {
+            endDate: yieldDataDate,
+          });
+          if (currentPlotData) setCache(singlePlotCacheKey, currentPlotData);
         } catch (singleErr) {
           console.error(
             "Error fetching single-plot agroStats, falling back to bulk agroStats:",
             singleErr,
           );
 
-          // Fallback to older bulk agroStats endpoint if new one fails
           const agroStatsCacheKey = `agroStats_v3_${yieldDataDate}`;
-          const agroStatsUrl = `https://events-cropeye.up.railway.app/plots/agroStats?end_date=${yieldDataDate}`;
+          const agroStatsUrl = `${BASE_URL}/plots/agroStats?end_date=${yieldDataDate}`;
 
-          let allPlotsData = getCache(agroStatsCacheKey);
+          let allPlotsData = getCache(agroStatsCacheKey, 2 * 60 * 1000);
 
           if (!allPlotsData) {
             try {
@@ -635,52 +679,54 @@ const FarmerDashboard: React.FC = () => {
             }
           }
 
-          if (allPlotsData) {
-            currentPlotData = allPlotsData[currentPlotId];
-            if (!currentPlotData) {
-              const quotedPlotId = `"${currentPlotId}"`;
-              currentPlotData = allPlotsData[quotedPlotId];
-            }
-          }
+          currentPlotData = lookupAgroPlotData(allPlotsData, currentPlotId);
         }
       }
 
-      // const stats = soilData?.features?.[0]?.properties?.statistics;
-      const sugarYieldMeanValue =
-        currentPlotData?.brix_sugar?.sugar_yield?.mean ?? null;
+      const sugarYieldMeanValue = extractSugarYieldMean(currentPlotData);
+      const biomassStats = currentPlotData?.biomass ?? null;
+      const biomassTotal = toNumberOrNull(biomassStats?.mean);
+      // Prefer API biomass; only then derive from sugar yield (legacy formula).
+      const totalBiomassForMetric =
+        biomassTotal ??
+        (sugarYieldMeanValue != null ? sugarYieldMeanValue * 1.27 : null);
+      const calculatedBiomass =
+        totalBiomassForMetric != null ? totalBiomassForMetric * 0.12 : null;
 
-      let calculatedBiomass = null;
-      let totalBiomassForMetric = null;
-
-      if (sugarYieldMeanValue !== null) {
-        const totalBiomass = sugarYieldMeanValue * 1.27;
-        const underGroundBiomassInTons = totalBiomass * 0.12;
-        calculatedBiomass = underGroundBiomassInTons;
-        totalBiomassForMetric = totalBiomass;
-      }
+      const brixStats = currentPlotData?.brix_sugar?.brix ?? null;
+      const recoveryStats = currentPlotData?.brix_sugar?.recovery ?? null;
 
       const newMetrics = {
-        brix: currentPlotData?.brix_sugar?.brix?.mean ?? null,
-        brixMin: currentPlotData?.brix_sugar?.brix?.min ?? null,
-        brixMax: currentPlotData?.brix_sugar?.brix?.max ?? null,
-        recovery: currentPlotData?.brix_sugar?.recovery?.mean ?? null,
-        area: currentPlotData?.area_acres ?? null,
+        brix: toNumberOrNull(brixStats?.mean ?? brixStats?.min),
+        brixMin: toNumberOrNull(brixStats?.min),
+        brixMax: toNumberOrNull(brixStats?.max),
+        recovery: toNumberOrNull(recoveryStats?.mean ?? recoveryStats?.min),
+        area:
+          toNumberOrNull(currentPlotData?.area_acres) ??
+          toNumberOrNull(currentPlotData?.soil?.area_acres) ??
+          (currentPlotData?.area_ha != null
+            ? Number(currentPlotData.area_ha) * 2.47105
+            : toNumberOrNull(currentPlotData?.area)),
         biomass: calculatedBiomass,
         totalBiomass: totalBiomassForMetric,
-        daysToHarvest: currentPlotData?.days_to_harvest ?? null,
+        daysToHarvest: toNumberOrNull(currentPlotData?.days_to_harvest),
         growthStage: harvestStatus || currentPlotData?.Sugarcane_Status || null,
-        soilPH: currentPlotData?.soil?.phh2o ?? null,
+        soilPH:
+          toNumberOrNull(currentPlotData?.soil?.phh2o) ??
+          toNumberOrNull(currentPlotData?.soil?.ph_h2o),
         organicCarbonDensity:
           currentPlotData?.soil?.organic_carbon_stock != null
-            ? parseFloat(currentPlotData.soil.organic_carbon_stock.toFixed(2))
+            ? toNumberOrNull(
+                Number(currentPlotData.soil.organic_carbon_stock).toFixed(2),
+              )
             : null,
-        actualYield: currentPlotData?.brix_sugar?.sugar_yield?.mean ?? null,
+        actualYield: sugarYieldMeanValue,
         stressCount: stressData?.total_events ?? 0,
         irrigationEvents: irrigationData?.total_events ?? null,
         sugarYieldMean: sugarYieldMeanValue,
         cnRatio: null,
-        sugarYieldMax: currentPlotData?.brix_sugar?.sugar_yield?.max ?? null,
-        sugarYieldMin: currentPlotData?.brix_sugar?.sugar_yield?.min ?? null,
+        sugarYieldMax: toNumberOrNull(currentPlotData?.brix_sugar?.sugar_yield?.max),
+        sugarYieldMin: toNumberOrNull(currentPlotData?.brix_sugar?.sugar_yield?.min),
       };
 
       setMetrics((prev) => ({
@@ -1242,13 +1288,11 @@ const FarmerDashboard: React.FC = () => {
                   <div className="text-right min-w-0">
                     <div className="text-2xl font-bold text-gray-800">
                       {!currentPlotId ? (
-                        "-"
+                        "0"
                       ) : loadingCci ? (
                         <Loader2 className="w-5 h-5 animate-spin inline-block" />
-                      ) : showCciValue ? (
-                        metrics.cropConditionValue!.toFixed(1)
                       ) : (
-                        "-"
+                        (metrics.cropConditionValue ?? 0).toFixed(1)
                       )}
                     </div>
                     <div
@@ -1262,7 +1306,7 @@ const FarmerDashboard: React.FC = () => {
                     >
                       {!currentPlotId || loadingCci
                         ? "CCI"
-                        : (cciStyle?.label ?? metrics.cropConditionLabel ?? "-")}
+                        : (cciStyle?.label ?? metrics.cropConditionLabel ?? "CCI")}
                     </div>
                   </div>
                 </div>

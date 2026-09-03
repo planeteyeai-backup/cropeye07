@@ -5,6 +5,7 @@ import api, {
   getMyFieldOfficers,
   getManagerFieldOfficersAgroStats,
   getAllFarmsWithFarmerDetails,
+  fetchAllOwnerFactoryBoundaryPlots,
   getIndustries,
   fetchDistrictTotalPlotArea,
   normalizeDistrictForEventsApi,
@@ -36,8 +37,11 @@ import {
   inferDistrictSlugFromHarvestRows,
   sumHarvestAreaFromAgroStats,
   sumHarvestAreaFromRows,
+  patchHarvestRowsWithBoundaryEvent,
+  applySavedBoundariesToHarvestRows,
   type TeamConnectHarvestRow,
   type TeamConnectHierarchy,
+  type OwnerFactoryBoundaryPlot,
 } from "../utils/teamConnectHarvest";
 import React, { useState, useRef, useEffect, useMemo } from "react";
 //import axios from "axios";
@@ -543,7 +547,9 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
     farmRows: any[];
     industries: any[];
     agroStats: Record<string, unknown>;
+    factoryPlots: OwnerFactoryBoundaryPlot[];
   } | null>(null);
+  const ownerFactoryPlotsRef = useRef<OwnerFactoryBoundaryPlot[]>([]);
   const [managerAgroStats, setManagerAgroStats] = useState<Record<string, unknown>>(
     {},
   );
@@ -678,7 +684,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
   }, [isLoadingHarvest]);
 
   const harvestLoadHint = isManagerMode
-    ? "Loading field officers & yield… variety filters may fill in a moment."
+    ? ""
     : "";
 
   const harvestLoadingLabel =
@@ -710,7 +716,13 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
       const allData = buildOwnerHarvestRows(
         enriched,
         agroStats as Record<string, any>,
-        { factoryCenter, farmRows },
+        {
+          factoryCenter,
+          farmRows,
+          ownerFactoryPlots: isManagerMode
+            ? []
+            : ownerFactoryPlotsRef.current,
+        },
       );
       const fromRows = collectHarvestFilterOptions(allData);
       const fromHierarchy = collectHarvestFilterOptionsFromHierarchy(enriched);
@@ -769,7 +781,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
           variety: "All",
         });
       }
-      setRawData(allData);
+      setRawData(applySavedBoundariesToHarvestRows(allData));
       return allData;
     };
 
@@ -1022,8 +1034,19 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
 
         setHierarchyMeta(hierarchy);
 
-        // Start farms/industries while agroStats runs (cuts total wait for variety).
+        // Start farms/industries/factory KML while agroStats runs.
         const farmsPromise = getAllFarmsWithFarmerDetails({ force: true });
+        const factoryPlotsPromise = fetchAllOwnerFactoryBoundaryPlots().catch(
+          (err) => {
+            if (import.meta.env.DEV) {
+              console.warn(
+                "[Harvest] /plots/owner-factory-boundaries/ failed:",
+                err,
+              );
+            }
+            return [] as OwnerFactoryBoundaryPlot[];
+          },
+        );
         const industriesPromise = getIndustries()
           .then((industriesRes) => {
             const data = industriesRes?.data;
@@ -1058,6 +1081,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
           farmRows: [],
           industries: [],
           agroStats,
+          factoryPlots: [],
         };
 
         // First paint: map/KPIs. Keep dropdowns loading until farms fill variety.
@@ -1072,10 +1096,12 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
         }
 
         try {
-          const [farmsSettled, industriesSettled] = await Promise.allSettled([
-            farmsPromise,
-            industriesPromise,
-          ]);
+          const [farmsSettled, industriesSettled, factoryPlotsSettled] =
+            await Promise.allSettled([
+              farmsPromise,
+              industriesPromise,
+              factoryPlotsPromise,
+            ]);
 
           if (!alive) return;
 
@@ -1093,6 +1119,12 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
               ? industriesSettled.value
               : [];
 
+          const factoryPlots =
+            factoryPlotsSettled.status === "fulfilled"
+              ? factoryPlotsSettled.value
+              : [];
+          ownerFactoryPlotsRef.current = factoryPlots || [];
+
           const enrichedRows = applyHarvestRows(
             hierarchy,
             agroStats,
@@ -1106,6 +1138,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
               ...ownerHarvestCtxRef.current,
               farmRows: farmRows || [],
               industries: industries || [],
+              factoryPlots: factoryPlots || [],
             };
           }
           if (enrichedRows.length > 0) setFetchError(null);
@@ -1115,6 +1148,47 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
             setVarietyLoading(false);
           }
         }
+
+        const refreshOwnerFarmBoundaries = async () => {
+          const ctx = ownerHarvestCtxRef.current;
+          const applyRows = applyHarvestRowsRef.current;
+          if (!alive || !ctx || !applyRows) return;
+          try {
+            const [farmRows, factoryPlots] = await Promise.all([
+              getAllFarmsWithFarmerDetails({ force: true }),
+              fetchAllOwnerFactoryBoundaryPlots().catch(
+                () => [] as OwnerFactoryBoundaryPlot[],
+              ),
+            ]);
+            if (!alive) return;
+            ownerFactoryPlotsRef.current = factoryPlots || [];
+            ownerHarvestCtxRef.current = {
+              ...ctx,
+              farmRows: farmRows || [],
+              factoryPlots: factoryPlots || [],
+            };
+            applyRows(
+              ctx.hierarchy,
+              ctx.agroStats ?? {},
+              farmRows || [],
+              ctx.me,
+              ctx.industries ?? [],
+              { resetFilters: false },
+            );
+          } catch {
+            // Best-effort — user can hard refresh.
+          }
+        };
+
+        const onOwnerVisible = () => {
+          if (document.visibilityState === "visible") {
+            void refreshOwnerFarmBoundaries();
+          }
+        };
+        document.addEventListener("visibilitychange", onOwnerVisible);
+        cleanups.push(() => {
+          document.removeEventListener("visibilitychange", onOwnerVisible);
+        });
 
         return;
       } catch (err: any) {
@@ -1140,9 +1214,28 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
     };
   }, [isManagerMode]);
 
-  // After farmer KML save: bust farms cache and remap polygons from GET /farms/.
+  // After farmer KML save: apply new polygon immediately, then refresh /farms/.
   useEffect(() => {
-    const onBoundaryUpdated = () => {
+    const onBoundaryUpdated = (event: Event) => {
+      const detail = (event as CustomEvent).detail as
+        | {
+            plotKey?: string;
+            plotId?: string;
+            boundary?: { type?: string; coordinates?: number[][][] } | null;
+          }
+        | undefined;
+
+      if (detail?.boundary?.coordinates?.[0]?.length) {
+        setRawData((prev) =>
+          patchHarvestRowsWithBoundaryEvent(
+            prev,
+            detail.plotKey || detail.plotId || "",
+            detail.plotId,
+            detail.boundary ?? null,
+          ),
+        );
+      }
+
       removeCache(FARMS_ALL_CACHE_KEY);
       setBoundaryRefreshToken((token) => token + 1);
     };
@@ -1165,6 +1258,13 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
     void (async () => {
       try {
         const farmRows = await getAllFarmsWithFarmerDetails({ force: true });
+        let factoryPlots: OwnerFactoryBoundaryPlot[] = [];
+        if (!isManagerMode) {
+          factoryPlots = await fetchAllOwnerFactoryBoundaryPlots().catch(
+            () => [] as OwnerFactoryBoundaryPlot[],
+          );
+          ownerFactoryPlotsRef.current = factoryPlots || [];
+        }
         if (isManagerMode && managerHarvestCtxRef.current) {
           managerHarvestCtxRef.current = {
             ...managerHarvestCtxRef.current,
@@ -1175,6 +1275,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
           ownerHarvestCtxRef.current = {
             ...ownerHarvestCtxRef.current,
             farmRows: farmRows || [],
+            factoryPlots: factoryPlots || [],
           };
         }
         applyRows(
@@ -1406,7 +1507,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
       position: [item.Latitude, item.Longitude] as [number, number],
       status: item["Sugarcane Status"],
       plotNo: item["Plot No"] || `P${idx + 1}`,
-      area: `${item["Area (acre)"]} acre`,
+      area: `${Number(item["Area (acre)"] || 0).toFixed(2)} acre`,
       raw: item,
       boundaryCoordinates: item.boundaryCoordinates,
     }));
@@ -1947,6 +2048,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                   <div ref={mapWrapperRef} className="w-full h-full">
                     {mapCenter ? (
                       <MapContainer
+                        key={`harvest-map-${boundaryRefreshToken}-${plotPoints.length}`}
                         center={mapCenter}
                         zoom={7.5}
                         minZoom={1}
@@ -1969,7 +2071,9 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                           zoomOffset={0}
                         />
                         {plotPoints.map((plot) => (
-                          <React.Fragment key={plot.id}>
+                          <React.Fragment
+                            key={`${plot.id}-${plot.boundaryCoordinates?.length ?? 0}-${plot.position[0]}-${plot.position[1]}`}
+                          >
                             {/* Plot Boundary Polygon */}
                             {plot.boundaryCoordinates &&
                               plot.boundaryCoordinates.length > 0 && (

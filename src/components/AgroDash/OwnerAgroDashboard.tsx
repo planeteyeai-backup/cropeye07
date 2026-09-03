@@ -19,6 +19,12 @@ import RainfallChart from "./components/RainfallChart";
 import DistributionChart from "./components/DistributionChart";
 import FieldDistributionChart from "./components/FieldDistributionChart";
 import DropdownFilter from "./components/DropdownFilter";
+import {
+  AGRO_EMPTY_PLOTS,
+  fetchAgroWeatherSeries,
+  resolveAgroWeatherCoords,
+  type AgroWeatherDay,
+} from "../../utils/agroWeatherApi";
 
 import {
   MapContainer,
@@ -242,6 +248,9 @@ const OwnerAgroDashboard: React.FC = () => {
   const [apiData, setApiData] = useState<Record<string, ApiPlotData>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [weatherSeries, setWeatherSeries] = useState<AgroWeatherDay[]>([]);
+  const [weatherLoading, setWeatherLoading] = useState(false);
+  const [weatherError, setWeatherError] = useState<string | null>(null);
 
   // Fetch API data
   useEffect(() => {
@@ -286,13 +295,44 @@ const OwnerAgroDashboard: React.FC = () => {
     fetchData();
   }, []);
 
-  // Process API data into plots
+  // Process API data into plots (stable [] when empty — avoids weather fetch loop)
   const allPlots = useMemo(() => {
     if (Object.keys(apiData).length === 0) {
-      return [];
+      return AGRO_EMPTY_PLOTS as PlotPoint[];
     }
     return processApiData(apiData);
   }, [apiData]);
+
+  const weatherCoords = useMemo(
+    () => resolveAgroWeatherCoords(allPlots),
+    [allPlots],
+  );
+
+  // Weather / rainfall — refetch only when coords or period change (not every render)
+  useEffect(() => {
+    let cancelled = false;
+    const { lat, lon } = weatherCoords;
+    setWeatherLoading(true);
+    setWeatherError(null);
+    fetchAgroWeatherSeries(lat, lon, timePeriod)
+      .then((series) => {
+        if (!cancelled) setWeatherSeries(series);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setWeatherSeries([]);
+          setWeatherError(
+            err instanceof Error ? err.message : "Failed to load weather data",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setWeatherLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [weatherCoords.lat, weatherCoords.lon, timePeriod]);
 
   // Filter logic
   const filteredPlots = useMemo(() => {
@@ -858,7 +898,7 @@ const OwnerAgroDashboard: React.FC = () => {
                       : "bg-white text-gray-700 hover:bg-gray-100 border border-gray-200"
                   }`}
                   onClick={() => setTimePeriod(period)}
-                  disabled={loading}
+                  disabled={weatherLoading}
                 >
                   {period}
                 </button>
@@ -872,9 +912,19 @@ const OwnerAgroDashboard: React.FC = () => {
                 <SkeletonBlock className="h-[240px] w-full" />
               </div>
             ) : weatherTab === "weather" ? (
-              <WeatherChart timePeriod={timePeriod} />
+              <WeatherChart
+                timePeriod={timePeriod}
+                series={weatherSeries}
+                loading={weatherLoading}
+                error={weatherError}
+              />
             ) : (
-              <RainfallChart timePeriod={timePeriod} />
+              <RainfallChart
+                timePeriod={timePeriod}
+                series={weatherSeries}
+                loading={weatherLoading}
+                error={weatherError}
+              />
             )}
           </div>
         </div>

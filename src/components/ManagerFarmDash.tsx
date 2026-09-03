@@ -539,6 +539,20 @@ const ManagerFarmDash: React.FC = () => {
     );
   }, [selectedPlotId, selectedFarmerId, farmersForSelectedOfficer]);
 
+  // When /farms/ enrichment adds the farmer-edited KML, replace stale Events polygon.
+  useEffect(() => {
+    if (!selectedPlotId || !selectedPlotRecord) return;
+    const savedCoords = resolveLeafletBoundaryForPlotRecord(
+      selectedPlotRecord,
+      selectedPlotId,
+    );
+    if (savedCoords.length < 3) return;
+
+    setPlotCoordinates(savedCoords);
+    setMapCenter(calculateCenter(savedCoords));
+    setPlotCoordinatesCache((prev) => new Map(prev.set(selectedPlotId, savedCoords)));
+  }, [selectedPlotRecord, selectedPlotId]);
+
   const selectedPlotPlantation = React.useMemo(
     () => extractPlantationInfo(selectedPlotRecord),
     [selectedPlotRecord],
@@ -755,6 +769,12 @@ const ManagerFarmDash: React.FC = () => {
             };
           }),
         );
+        // Drop stale Events/FO polygons so map redraws from Django KML.
+        setPlotCoordinatesCache(new Map());
+        const plotId = selectedPlotIdRef.current;
+        if (plotId) {
+          void fetchPlotCoordinates(plotId);
+        }
       } catch {
         // Stage hook falls back to its own farms fetch.
       }
@@ -1448,16 +1468,61 @@ const ManagerFarmDash: React.FC = () => {
 
   // Fetch plot coordinates immediately when plot is selected
   const fetchPlotCoordinates = async (plotId: string): Promise<void> => {
+    const farmerId = selectedFarmerIdRef.current?.trim();
     const farmer = farmersForSelectedOfficer.find(
       (f) => getFarmerId(f) === String(selectedFarmerId),
     );
-    const plot = farmer?.plots?.find(
+    let plot = farmer?.plots?.find(
       (p: any) =>
         normalizePlotKey(String(getPlotIdFromRecord(p) ?? "")) ===
         normalizePlotKey(plotId),
     );
 
-    const savedCoords = resolveLeafletBoundaryForPlotRecord(plot, plotId);
+    // Always re-fetch Django /farms/?farmer_id= — FO/Events polygons stay stale after KML edit.
+    if (farmerId && farmerId !== "undefined") {
+      try {
+        const farmsRes = await getFarmsByFarmerId(farmerId);
+        const farms = parseFarmsListResponse(farmsRes?.data);
+        if (farms.length) {
+          const plotList = Array.isArray(farmer?.plots) ? farmer.plots : [];
+          const enrichedPlots = enrichPlotsWithFarmDetails(
+            plotList.length ? plotList : plot ? [plot] : [],
+            farms,
+          );
+          plot =
+            enrichedPlots.find(
+              (p: any) =>
+                normalizePlotKey(String(getPlotIdFromRecord(p) ?? "")) ===
+                normalizePlotKey(plotId),
+            ) ??
+            (plot
+              ? enrichPlotsWithFarmDetails([plot], farms)[0] ?? plot
+              : null);
+
+          setFarmersForSelectedOfficer((prev) =>
+            prev.map((row) => {
+              if (getFarmerId(row) !== farmerId) return row;
+              const rows = Array.isArray(row?.plots) ? row.plots : [];
+              if (!rows.length) return row;
+              return {
+                ...row,
+                plots: enrichPlotsWithFarmDetails(rows, farms),
+              };
+            }),
+          );
+          setPlotCoordinatesCache((prev) => {
+            const next = new Map(prev);
+            next.delete(plotId);
+            return next;
+          });
+        }
+      } catch {
+        // Fall through to cached / Events boundary below.
+      }
+    }
+
+    let savedCoords = resolveLeafletBoundaryForPlotRecord(plot, plotId);
+
     if (savedCoords.length >= 3) {
       setPlotCoordinates(savedCoords);
       setPlotCoordinatesCache((prev) => new Map(prev.set(plotId, savedCoords)));

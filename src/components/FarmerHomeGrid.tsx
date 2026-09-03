@@ -89,9 +89,9 @@ function FarmerHomeGrid() {
       <Header />
       <main className="mx-auto w-full max-w-[1500px] px-3 sm:px-5 py-3 sm:py-5">
         <div className="space-y-4">
-          {/* Map + Field Score + Soil Moisture + Irrigation (side column) */}
+          {/* Map + Field Score + Irrigation (side column) */}
           <section className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:items-stretch">
-            <div className="lg:col-span-9 lg:h-[140vh] rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden">
+            <div className="lg:col-span-8 h-[82vh] min-h-[580px] rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden">
               <Suspense fallback={<div className="flex h-full items-center justify-center text-slate-600">Loading map…</div>}>
                 <CropEyeMap
                   onHealthDataChange={handleHealthDataChange}
@@ -103,28 +103,23 @@ function FarmerHomeGrid() {
               </Suspense>
             </div>
 
-            <div className="lg:col-span-3 lg:h-[140vh] min-h-0 flex flex-col gap-4">
-              {/* Top half: Field Score + Soil Moisture */}
-              <div className="min-h-0 flex flex-col gap-4 flex-1">
-                <div className="flex-1 min-h-0 rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden">
-                  <FieldHealthAnalysis fieldAnalysisData={fieldAnalysisData} compact />
-                </div>
-                <div className="flex-1 min-h-0 rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-auto">
-                  <SoilMoistureCard optimalRange={[40, 60]} compact />
-                </div>
+            <div className="lg:col-span-4 h-[82vh] min-h-[580px] flex flex-col gap-3">
+              <div className="h-[220px] flex-none rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden">
+                <FieldHealthAnalysis fieldAnalysisData={fieldAnalysisData} compact />
               </div>
 
-              {/* Bottom half: Irrigation schedule */}
               <div className="flex-1 min-h-0 rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden">
-                <div className="h-full overflow-hidden">
-                  <IrrigationSchedule />
-                </div>
+                <IrrigationSchedule />
               </div>
             </div>
           </section>
 
-          {/* Crop Health + Soil Analysis (side-by-side); Fertilizer below */}
+          {/* Full-width Soil Moisture; then Crop Health + Soil Analysis */}
           <section className="space-y-4">
+            <div className="w-full rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden p-3 sm:p-4">
+              <SoilMoistureCard optimalRange={[40, 60]} fullWidth />
+            </div>
+
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-12 items-stretch">
               <div className="h-full overflow-y-auto scroll-hide lg:col-span-5 rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5">
                 <CropHealthAnalysis />

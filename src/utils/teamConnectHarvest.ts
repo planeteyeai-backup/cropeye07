@@ -1,6 +1,26 @@
-import { normalizePlotKey, plotKeyFromRecord } from "./plotName";
+import { normalizePlotKey, plotKeyFromRecord, getPlotNameCandidates } from "./plotName";
 import { collectFarmsFromRecord } from "./plantation";
-import { resolvePlotBoundaryFromAnyRecord } from "./plotBoundarySync";
+import { resolvePlotBoundaryFromAnyRecord, readLocalPlotBoundary } from "./plotBoundarySync";
+import { calculateAreaMetricsFromGeometry } from "./plotGeometry";
+
+export type OwnerFactoryBoundaryPlot = {
+  plot_id?: number | string;
+  plot_number?: string;
+  fastapi_plot_id?: string;
+  gat_number?: string;
+  boundary?: {
+    type?: string;
+    coordinates?: number[][][];
+  } | null;
+  location?: {
+    type?: string;
+    coordinates?: number[];
+  } | null;
+  area_acres?: number;
+  area_size?: number | string;
+  district?: string;
+  state?: string;
+};
 
 export interface TeamConnectHarvestRow {
   id?: string;
@@ -1366,6 +1386,151 @@ function resolveCenter(
   return null;
 }
 
+/** Match Django /farms/ row by plot key and return saved KML polygon center. */
+function resolveCenterFromDjangoFarmRows(
+  plotKeys: string[],
+  farmRows: any[] | null | undefined,
+): ReturnType<typeof centerFromCoordinates> {
+  if (!farmRows?.length || !plotKeys.length) return null;
+
+  const targets = new Set(
+    plotKeys
+      .filter((key) => key?.trim())
+      .map((key) => normalizePlotKey(key)),
+  );
+  if (!targets.size) return null;
+
+  for (const farmRow of farmRows) {
+    const rowKeys = farmRowPlotKeys(farmRow);
+    if (!rowKeys.some((rk) => targets.has(rk))) continue;
+
+    const ring = polygonRingFromRecord(farmRow);
+    if (ring.length >= 3) {
+      const center = centerFromCoordinates(ring);
+      if (center) return center;
+    }
+  }
+
+  return null;
+}
+
+function ownerFactoryPlotKeys(plot: OwnerFactoryBoundaryPlot): string[] {
+  const keys = new Set<string>();
+  const add = (value: unknown) => {
+    if (value == null || `${value}`.trim() === "") return;
+    keys.add(normalizePlotKey(String(value)));
+  };
+
+  add(plotKeyFromRecord(plot as any));
+  add(plot.plot_id);
+  add(plot.plot_number);
+  add(plot.fastapi_plot_id);
+  add(plot.gat_number);
+
+  const gat = plot.gat_number;
+  const num = plot.plot_number;
+  if (gat != null && num != null) {
+    add(`${gat}_${num}`);
+    add(`${gat}/${num}`);
+  }
+
+  return [...keys];
+}
+
+function findOwnerFactoryPlot(
+  plotKeys: string[],
+  factoryPlots: OwnerFactoryBoundaryPlot[] | null | undefined,
+): OwnerFactoryBoundaryPlot | null {
+  if (!factoryPlots?.length || !plotKeys.length) return null;
+  const targets = new Set(
+    plotKeys
+      .filter((key) => key != null && `${key}`.trim() !== "")
+      .map((key) => normalizePlotKey(String(key))),
+  );
+  if (!targets.size) return null;
+
+  for (const plot of factoryPlots) {
+    if (
+      ownerFactoryPlotKeys(plot).some((key) => targets.has(key))
+    ) {
+      return plot;
+    }
+  }
+  return null;
+}
+
+function resolveCenterFromOwnerFactoryPlots(
+  plotKeys: string[],
+  factoryPlots: OwnerFactoryBoundaryPlot[] | null | undefined,
+): ReturnType<typeof centerFromCoordinates> {
+  const plot = findOwnerFactoryPlot(plotKeys, factoryPlots);
+  if (!plot || (plot.boundary == null && plot.location == null)) return null;
+
+  const ring = polygonRingFromRecord(plot);
+  const fromPoly =
+    ring.length >= 3 ? centerFromCoordinates(ring) : null;
+  const loc = pointCoordsFromRecord(plot);
+  const fromLoc = loc.length ? centerFromCoordinates(loc) : null;
+
+  if (fromPoly?.boundary?.length) {
+    return {
+      ...fromPoly,
+      lat: fromLoc?.lat ?? fromPoly.lat,
+      lng: fromLoc?.lng ?? fromPoly.lng,
+    };
+  }
+  return fromLoc ?? fromPoly;
+}
+
+function acresFromOwnerFactoryPlot(
+  plot: OwnerFactoryBoundaryPlot | null,
+): number | null {
+  if (!plot) return null;
+  const fromField =
+    parsePositiveArea(plot.area_acres) ?? parsePositiveArea(plot.area_size);
+  if (fromField != null) return fromField;
+
+  const boundary = resolvePlotBoundaryFromAnyRecord(plot);
+  if (!boundary) return null;
+  const metrics = calculateAreaMetricsFromGeometry(boundary);
+  return metrics?.acres != null && metrics.acres > 0 ? metrics.acres : null;
+}
+
+/** Prefer Django /farms/ saved KML (what farmer just edited) over factory-boundaries. */
+function resolveCenterPreferringDjango(
+  agro: any,
+  plot: any,
+  farm: any,
+  farmer: any,
+  fo: any,
+  farmRows?: any[] | null,
+  plotKeys?: string[],
+  ownerFactoryPlots?: OwnerFactoryBoundaryPlot[] | null,
+): ReturnType<typeof centerFromCoordinates> {
+  const keys = plotKeys ?? [];
+
+  // 1) Just-edited polygon in session (My Profile / EditPlotBoundaryModal).
+  for (const key of keys) {
+    const local = readLocalPlotBoundary(key);
+    const ring = local?.coordinates?.[0];
+    if (ring && ring.length >= 3) {
+      const center = centerFromCoordinates(ring);
+      if (center?.boundary?.length) return center;
+    }
+  }
+
+  // 2) Django /farms/ — source of truth after KML save.
+  const fromDjango = resolveCenterFromDjangoFarmRows(keys, farmRows);
+  if (fromDjango?.boundary?.length) return fromDjango;
+
+  // 3) Owner factory-boundaries — only when farms has no polygon yet.
+  const fromOwner = resolveCenterFromOwnerFactoryPlots(keys, ownerFactoryPlots);
+  if (fromOwner?.boundary?.length) return fromOwner;
+  if (fromOwner) return fromOwner;
+
+  return resolveCenter(agro, plot, farm, farmer, fo);
+}
+
 function computeDaysSincePlantation(plantationDate: unknown): number {
   if (!plantationDate) return 0;
   const planted = new Date(String(plantationDate));
@@ -1621,6 +1786,12 @@ function farmRowPlotKeys(farmRow: any): string[] {
   add(farmRow?.plot_id);
   add(farmRow?.plot_name);
   add(farmRow?.farm_uid);
+  add(farmRow?.plot_number);
+  add(farmRow?.plot_No);
+  add(farmRow?.gat_number);
+  add(farmRow?.gat_No);
+  add(farmRow?.plot?.plot_number);
+  add(farmRow?.plot?.fastapi_plot_id);
 
   const gat = farmRow?.gat_number ?? farmRow?.gat_No ?? farmRow?.plot?.gat_number;
   const num =
@@ -2036,25 +2207,14 @@ function slugFromDistrictLabelForHarvest(label: string): string {
   return known.has(slug) ? slug : "";
 }
 
-/** Plot acres from Events agroStats or farm/plot records (correct Total Area). */
+/** Plot acres: prefer saved farm KML area, then agroStats (often stale after edit). */
 function resolveHarvestAreaAcres(
   agro: any,
   farm?: any,
   plot?: any,
   farmer?: any,
 ): number {
-  const fromAgro =
-    parsePositiveArea(agro?.area_acres) ??
-    parsePositiveArea(agro?.soil?.area_acres) ??
-    parsePositiveArea(agro?.properties?.area_acres) ??
-    parsePositiveArea(agro?.properties?.area_size) ??
-    parsePositiveArea(agro?.properties?.area) ??
-    parsePositiveArea(agro?.area_size) ??
-    parsePositiveArea(agro?.area) ??
-    parsePositiveArea(agro?.acres);
-  if (fromAgro != null) return fromAgro;
-
-  return (
+  const fromFarm =
     parsePositiveArea(farm?.area_acres) ??
     parsePositiveArea(farm?.area_size_numeric) ??
     parsePositiveArea(farm?.area_size) ??
@@ -2066,9 +2226,47 @@ function resolveHarvestAreaAcres(
     parsePositiveArea(plot?.area) ??
     parsePositiveArea(farmer?.area_acres) ??
     parsePositiveArea(farmer?.area_size) ??
-    parsePositiveArea(farmer?.area) ??
+    parsePositiveArea(farmer?.area);
+  if (fromFarm != null) return fromFarm;
+
+  return (
+    parsePositiveArea(agro?.area_acres) ??
+    parsePositiveArea(agro?.soil?.area_acres) ??
+    parsePositiveArea(agro?.properties?.area_acres) ??
+    parsePositiveArea(agro?.properties?.area_size) ??
+    parsePositiveArea(agro?.properties?.area) ??
+    parsePositiveArea(agro?.area_size) ??
+    parsePositiveArea(agro?.area) ??
+    parsePositiveArea(agro?.acres) ??
     0
   );
+}
+
+/** Acres from a Leaflet [lat,lng] ring (same polygon drawn on the map). */
+function acresFromLeafletBoundary(
+  boundary: [number, number][] | undefined,
+): number | null {
+  if (!boundary || boundary.length < 3) return null;
+  const geoRing = boundary.map(([lat, lng]) => [lng, lat] as [number, number]);
+  const first = geoRing[0];
+  const last = geoRing[geoRing.length - 1];
+  if (first[0] !== last[0] || first[1] !== last[1]) {
+    geoRing.push([first[0], first[1]]);
+  }
+  const metrics = calculateAreaMetricsFromGeometry({
+    type: "Polygon",
+    coordinates: [geoRing],
+  });
+  return metrics?.acres != null && metrics.acres > 0 ? metrics.acres : null;
+}
+
+/** Keep popup Area in sync with the polygon actually drawn. */
+function syncHarvestRowAreaToDrawnBoundary(
+  row: TeamConnectHarvestRow,
+): TeamConnectHarvestRow {
+  const acres = acresFromLeafletBoundary(row.boundaryCoordinates);
+  if (acres == null) return row;
+  return { ...row, "Area (acre)": Number(acres.toFixed(2)) };
 }
 
 function buildRowFromContext(
@@ -2077,15 +2275,31 @@ function buildRowFromContext(
   plotKey: string,
   factoryCenter?: { lat: number; lng: number } | null,
   varietyIndex?: Map<string, string> | null,
+  farmRows?: any[] | null,
+  ownerFactoryPlots?: OwnerFactoryBoundaryPlot[] | null,
 ): TeamConnectHarvestRow | null {
   const { plot, farm, farmer, managerName, managerId, representative } = ctx;
-  const center = resolveCenter(agro, plot, farm, farmer, ctx.fo);
+  const plotKeys = [...ctx.plotKeys, plotKey];
+  const center = resolveCenterPreferringDjango(
+    agro,
+    plot,
+    farm,
+    farmer,
+    ctx.fo,
+    farmRows,
+    plotKeys,
+    ownerFactoryPlots,
+  );
   if (!center) return null;
 
   const plantationDate = readPlantationDate(farm, plot, farmer, agro);
   const days = computeDaysSincePlantation(plantationDate);
 
-  const area = resolveHarvestAreaAcres(agro, farm, plot, farmer);
+  const ownerAcres = acresFromOwnerFactoryPlot(
+    findOwnerFactoryPlot(plotKeys, ownerFactoryPlots),
+  );
+  const farmAgroArea = resolveHarvestAreaAcres(agro, farm, plot, farmer);
+  const area = farmAgroArea > 0 ? farmAgroArea : ownerAcres ?? 0;
 
   const yieldValue = extractSugarYield(agro);
   const brixValue = extractBrix(agro);
@@ -2164,6 +2378,8 @@ function enrichRowFromContext(
   agro?: any,
   factoryCenter?: { lat: number; lng: number } | null,
   varietyIndex?: Map<string, string> | null,
+  farmRows?: any[] | null,
+  ownerFactoryPlots?: OwnerFactoryBoundaryPlot[] | null,
 ): TeamConnectHarvestRow {
   const regionFromContext = readRegion(ctx.plot, ctx.farmer, ctx.fo, agro);
   const contextRegionKeys = collectLocationKeys(
@@ -2189,13 +2405,21 @@ function enrichRowFromContext(
     agro,
     factoryCenter,
   );
-  const centerFromSavedBoundary = resolveCenter(
-    null,
-    ctx.plot,
-    ctx.farm,
-    ctx.farmer,
-    ctx.fo,
+  const centerFromSavedBoundary =
+    resolveCenterPreferringDjango(
+      null,
+      ctx.plot,
+      ctx.farm,
+      ctx.farmer,
+      ctx.fo,
+      farmRows,
+      ctx.plotKeys,
+      ownerFactoryPlots,
+    ) ?? resolveCenter(null, ctx.plot, ctx.farm, ctx.farmer, ctx.fo);
+  const ownerAcres = acresFromOwnerFactoryPlot(
+    findOwnerFactoryPlot(ctx.plotKeys, ownerFactoryPlots),
   );
+  const existingArea = parsePositiveArea(row["Area (acre)"]);
 
   return {
     ...row,
@@ -2205,6 +2429,10 @@ function enrichRowFromContext(
           Longitude: centerFromSavedBoundary.lng,
           boundaryCoordinates: centerFromSavedBoundary.boundary,
         }
+      : {}),
+    // Only fill area from factory endpoint when farms/agro left it empty.
+    ...(existingArea == null && ownerAcres != null
+      ? { "Area (acre)": ownerAcres }
       : {}),
     managerId: row.managerId || ctx.managerId || undefined,
     fieldOfficerId: row.fieldOfficerId || fieldOfficerId(ctx.fo) || undefined,
@@ -2241,8 +2469,20 @@ function buildRowFromAgroOnly(
   hierarchy: TeamConnectHierarchy,
   factoryCenter?: { lat: number; lng: number } | null,
   varietyIndex?: Map<string, string> | null,
+  farmRows?: any[] | null,
+  ownerFactoryPlots?: OwnerFactoryBoundaryPlot[] | null,
 ): TeamConnectHarvestRow | null {
-  const center = resolveCenter(agro, null, null, null, null);
+  const center =
+    resolveCenterPreferringDjango(
+      agro,
+      null,
+      null,
+      null,
+      null,
+      farmRows,
+      [plotKey],
+      ownerFactoryPlots,
+    ) ?? resolveCenter(agro, null, null, null, null);
   if (!center) return null;
 
   const regionName =
@@ -2306,7 +2546,13 @@ function buildRowFromAgroOnly(
 
   const plantationDate = readPlantationDate(null, null, null, agro);
   const days = computeDaysSincePlantation(plantationDate);
-  const area = resolveHarvestAreaAcres(agro, null);
+  const farmAgroArea = resolveHarvestAreaAcres(agro, null);
+  const area =
+    farmAgroArea > 0
+      ? farmAgroArea
+      : acresFromOwnerFactoryPlot(
+          findOwnerFactoryPlot([plotKey], ownerFactoryPlots),
+        ) ?? 0;
   const cleanPlotKey = plotKey.replace(/^"|"$/g, "");
   const regionKeys = collectLocationKeys(agro, fo);
   const primaryRegion =
@@ -2360,6 +2606,8 @@ export type BuildOwnerHarvestRowsOptions = {
   factoryCenter?: { lat: number; lng: number } | null;
   /** /farms/?include_farmer=true rows — used to fill Variety when hierarchy has null crop_variety. */
   farmRows?: any[] | null;
+  /** GET /plots/owner-factory-boundaries/ polygons — preferred updated KML. */
+  ownerFactoryPlots?: OwnerFactoryBoundaryPlot[] | null;
 };
 
 /** Build harvest rows: team-connect metadata + agroStats geometry/metrics. */
@@ -2370,6 +2618,8 @@ export function buildOwnerHarvestRows(
 ): TeamConnectHarvestRow[] {
   const factoryCenter = options?.factoryCenter ?? null;
   const varietyIndex = buildCropVarietyIndexFromFarmRows(options?.farmRows);
+  const farmRows = options?.farmRows ?? null;
+  const ownerFactoryPlots = options?.ownerFactoryPlots ?? null;
   const contextMap = buildPlotContextMap(hierarchy);
   const rows: TeamConnectHarvestRow[] = [];
   const seenPlotKeys = new Set<string>();
@@ -2399,6 +2649,8 @@ export function buildOwnerHarvestRows(
       key,
       factoryCenter,
       varietyIndex,
+      farmRows,
+      ownerFactoryPlots,
     );
     if (!row) continue;
     if (row.id && seenRowIds.has(row.id)) continue;
@@ -2409,6 +2661,8 @@ export function buildOwnerHarvestRows(
       agroPlot,
       factoryCenter,
       varietyIndex,
+      farmRows,
+      ownerFactoryPlots,
     );
     rows.push(enrichedRow);
     if (enrichedRow.id) seenRowIds.add(enrichedRow.id);
@@ -2427,6 +2681,8 @@ export function buildOwnerHarvestRows(
       hierarchy,
       factoryCenter,
       varietyIndex,
+      farmRows,
+      ownerFactoryPlots,
     );
     if (!row) continue;
 
@@ -2438,7 +2694,35 @@ export function buildOwnerHarvestRows(
         plotData,
         factoryCenter,
         varietyIndex,
+        farmRows,
+        ownerFactoryPlots,
       );
+    } else {
+      const saved = resolveCenterPreferringDjango(
+        plotData,
+        null,
+        null,
+        null,
+        null,
+        farmRows,
+        [plotKey],
+        ownerFactoryPlots,
+      );
+      if (saved?.boundary?.length) {
+        row = {
+          ...row,
+          Latitude: saved.lat,
+          Longitude: saved.lng,
+          boundaryCoordinates: saved.boundary,
+        };
+      }
+      const existingArea = parsePositiveArea(row["Area (acre)"]);
+      const ownerAcres = acresFromOwnerFactoryPlot(
+        findOwnerFactoryPlot([plotKey], ownerFactoryPlots),
+      );
+      if (existingArea == null && ownerAcres != null) {
+        row = { ...row, "Area (acre)": ownerAcres };
+      }
     }
 
     if (!row.Variety?.trim() && varietyIndex.size) {
@@ -2458,14 +2742,111 @@ export function buildOwnerHarvestRows(
     seenPlotKeys.add(normalized);
   }
 
-  return backfillHarvestRowIds(rows, hierarchy).map((row) => {
-    if (row.Variety?.trim() || !varietyIndex.size) return row;
-    const fromFarms = lookupVarietyInIndex(
-      varietyIndex,
-      row.id,
-      row["Plot No"],
-    );
-    return fromFarms ? { ...row, Variety: fromFarms } : row;
+  // Do not inject factory-only orphan plots here — that mixed stale
+  // owner-factory-boundaries KML/area into the harvest map.
+
+  return backfillHarvestRowIds(rows, hierarchy)
+    .map((row) => {
+      if (row.Variety?.trim() || !varietyIndex.size) return row;
+      const fromFarms = lookupVarietyInIndex(
+        varietyIndex,
+        row.id,
+        row["Plot No"],
+      );
+      return fromFarms ? { ...row, Variety: fromFarms } : row;
+    })
+    .map((row) => applySavedBoundaryOverrideToHarvestRow(row))
+    .map((row) => syncHarvestRowAreaToDrawnBoundary(row));
+}
+
+/**
+ * Force the latest edited KML onto a harvest map row.
+ * Session (just saved) beats farms/factory/agro — fixes stale outlines after edit.
+ */
+export function applySavedBoundaryOverrideToHarvestRow(
+  row: TeamConnectHarvestRow,
+): TeamConnectHarvestRow {
+  const seedKeys = [row.id, row["Plot No"]].filter(Boolean).map(String);
+  const candidates = new Set<string>();
+  for (const seed of seedKeys) {
+    candidates.add(seed);
+    for (const c of getPlotNameCandidates(seed, null)) {
+      candidates.add(c);
+    }
+  }
+
+  let localBoundary = null as ReturnType<typeof readLocalPlotBoundary>;
+  for (const key of candidates) {
+    localBoundary = readLocalPlotBoundary(key);
+    if (localBoundary?.coordinates?.[0]?.length) break;
+  }
+  if (!localBoundary?.coordinates?.[0]?.length) return row;
+
+  const center = centerFromCoordinates(localBoundary.coordinates[0]);
+  if (!center?.boundary?.length) return row;
+
+  const acres = calculateAreaMetricsFromGeometry(localBoundary)?.acres;
+  return {
+    ...row,
+    Latitude: center.lat,
+    Longitude: center.lng,
+    boundaryCoordinates: center.boundary,
+    ...(acres != null && acres > 0 ? { "Area (acre)": acres } : {}),
+  };
+}
+
+/** Apply session-saved boundaries across all harvest rows (after API merge). */
+export function applySavedBoundariesToHarvestRows(
+  rows: TeamConnectHarvestRow[],
+): TeamConnectHarvestRow[] {
+  return rows
+    .map((row) => applySavedBoundaryOverrideToHarvestRow(row))
+    .map((row) => syncHarvestRowAreaToDrawnBoundary(row));
+}
+
+/**
+ * Patch matching harvest rows with a boundary from the edit-save event (immediate UI).
+ */
+export function patchHarvestRowsWithBoundaryEvent(
+  rows: TeamConnectHarvestRow[],
+  plotKey: string,
+  plotId: string | undefined,
+  boundary: { type?: string; coordinates?: number[][][] } | null,
+): TeamConnectHarvestRow[] {
+  if (!boundary?.coordinates?.[0]?.length) return rows;
+  const center = centerFromCoordinates(boundary.coordinates[0]);
+  if (!center?.boundary?.length) return rows;
+
+  const targets = new Set<string>();
+  for (const key of [plotKey, plotId].filter(Boolean) as string[]) {
+    targets.add(normalizePlotKey(key));
+    for (const c of getPlotNameCandidates(key, null)) {
+      targets.add(normalizePlotKey(c));
+    }
+  }
+  if (!targets.size) return rows;
+
+  const acres = calculateAreaMetricsFromGeometry(boundary as any)?.acres;
+
+  return rows.map((row) => {
+    const plotNo = row["Plot No"] ? normalizePlotKey(String(row["Plot No"])) : "";
+    // Match by Plot No / known aliases only (never fuzzy includes on composite ids).
+    const matched =
+      (plotNo && targets.has(plotNo)) ||
+      [...targets].some((t) => {
+        for (const c of getPlotNameCandidates(String(row["Plot No"] ?? ""), null)) {
+          if (normalizePlotKey(c) === t) return true;
+        }
+        return false;
+      });
+    if (!matched) return row;
+    return syncHarvestRowAreaToDrawnBoundary({
+      ...row,
+      Latitude: center.lat,
+      Longitude: center.lng,
+      boundaryCoordinates: center.boundary,
+      ...(acres != null && acres > 0 ? { "Area (acre)": acres } : {}),
+    });
   });
 }
 

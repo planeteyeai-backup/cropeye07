@@ -209,7 +209,7 @@ const Fertilizer: React.FC = () => {
         <div className="flex items-center bg-white rounded-lg px-4 py-3 mb-4 border-l-4 border-green-500 shadow-sm">
           <div className="text-xl sm:text-2xl font-bold text-green-700 flex items-center">
             <span className="mr-3 text-2xl sm:text-3xl">🌱</span>
-            NPK UPDATE
+            NPK UPDATES
           </div>
         </div>
 

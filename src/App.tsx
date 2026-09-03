@@ -4,51 +4,66 @@ import { Sidebar } from "./components/Sidebar";
 import { DashboardGrid } from "./components/DashboardGrid";
 import { jwtDecode } from "jwt-decode";
 
-import OwnerFarmDash from "./components/OwnerFarmDash"; // Import for Owner
-import OwnerHarvestDash from "./components/OwnerHarvestDash"; // Import for Owner
 import ManagerHomeGrid from "./components/ManagerHomeGrid";
 import OwnerHomeGrid from "./components/OwnerHomeGrid";
-import { Addusers } from "./components/Addusers";
-import { UserList } from "./components/userList";
-import Contactuser from "./components/Contactuser";
-import { Addvendor } from "./components/AddVendor";
-import { VendorList } from "./components/Vendorlist";
-import { Addorder } from "./components/Addorder";
-import { OrderList } from "./components/orderlist";
-import { AddStock } from "./components/AddStock";
-import { StockList } from "./components/stocklist";
-import { BookingList } from "./components/Bookinglist";
-import AddBooking from "./components/AddBooking";
-import { FarmList } from "./components/FarmList";
-import CalendarView from "./components/CalendarView";
-import MyList from "./components/MyList";
-import TeamList from "./components/TeamList";
 import FieldOfficerHomeGrid from "./components/FieldOfficerHomeGrid";
 import FarmerHomeGrid from "./components/FarmerHomeGrid";
-import Calendar from "./components/Calendar";
-import AddFarm from "./components/Add Farm";
-import TaskCalendar from "./components/TaskCalendar";
-import ViewList from "./components/ViewList";
-import { Tasklist } from "./components/Tasklist";
-import { PestDisease } from "./components/pestt/Pest & Disease";
-import Fertilizer from "./components/Fertilizer";
-import Irrigation from "./components/Irrigation/Irrigation";
-import BlogCard from "./components/BlogCard";
-import AgricultureData from "./components/AgricultureData";
-const CropEyeMap = lazy(() => import("./components/Map"));
-import FarmerDashboard from "./components/FarmerDashboard";
 import ProgressBarDashboard from "./components/ProgressBarDashboard";
-import ProgressGridDashboard from "./components/ProgressGridDashboard";
-import { PROGRESS_NAV_EVENT } from "./components/progressbar/progressNavigation";
-import OfficerDashboard from "./components/FarmCropStatus";
-import AgroDashboard from "./components/AgroDash/AgroDashboard";
-import OwnerAgroDashboard from "./components/AgroDash/OwnerAgroDashboard";
-import ManagerFarmDash from "./components/ManagerFarmDash";
-import HarvestDashboard from "./components/HarvestDashboard";
 import Chatbot from "./components/Chatbot";
-import MyProfile from "./components/MyProfile";
+import { PROGRESS_NAV_EVENT } from "./components/progressbar/progressNavigation";
 import { MessageCircle } from "lucide-react";
 import { getUserData } from "./utils/auth";
+
+function lazyNamed<T extends Record<string, React.ComponentType<any>>>(
+  loader: () => Promise<T>,
+  exportName: keyof T,
+) {
+  return lazy(() => loader().then((mod) => ({ default: mod[exportName] })));
+}
+
+const OwnerFarmDash = lazy(() => import("./components/OwnerFarmDash"));
+const OwnerHarvestDash = lazy(() => import("./components/OwnerHarvestDash"));
+const Addusers = lazyNamed(() => import("./components/Addusers"), "Addusers");
+const UserList = lazyNamed(() => import("./components/userList"), "UserList");
+const Contactuser = lazy(() => import("./components/Contactuser"));
+const Addvendor = lazyNamed(() => import("./components/AddVendor"), "Addvendor");
+const VendorList = lazyNamed(() => import("./components/Vendorlist"), "VendorList");
+const Addorder = lazyNamed(() => import("./components/Addorder"), "Addorder");
+const OrderList = lazyNamed(() => import("./components/orderlist"), "OrderList");
+const AddStock = lazyNamed(() => import("./components/AddStock"), "AddStock");
+const StockList = lazyNamed(() => import("./components/stocklist"), "StockList");
+const BookingList = lazyNamed(() => import("./components/Bookinglist"), "BookingList");
+const AddBooking = lazy(() => import("./components/AddBooking"));
+const FarmList = lazyNamed(() => import("./components/FarmList"), "FarmList");
+const CalendarView = lazy(() => import("./components/CalendarView"));
+const MyList = lazy(() => import("./components/MyList"));
+const TeamList = lazy(() => import("./components/TeamList"));
+const Calendar = lazy(() => import("./components/Calendar"));
+const AddFarm = lazy(() => import("./components/Add Farm"));
+const TaskCalendar = lazy(() => import("./components/TaskCalendar"));
+const ViewList = lazy(() => import("./components/ViewList"));
+const Tasklist = lazyNamed(() => import("./components/Tasklist"), "Tasklist");
+const PestDisease = lazyNamed(
+  () => import("./components/pestt/Pest & Disease"),
+  "PestDisease",
+);
+const Fertilizer = lazy(() => import("./components/Fertilizer"));
+const Irrigation = lazy(() => import("./components/Irrigation/Irrigation"));
+const BlogCard = lazy(() => import("./components/BlogCard"));
+const AgricultureData = lazy(() => import("./components/AgricultureData"));
+const CropEyeMap = lazy(() => import("./components/Map"));
+const FarmerDashboard = lazy(() => import("./components/FarmerDashboard"));
+const ProgressGridDashboard = lazy(() => import("./components/ProgressGridDashboard"));
+const OfficerDashboard = lazy(() => import("./components/FarmCropStatus"));
+const AgroDashboard = lazy(() => import("./components/AgroDash/AgroDashboard"));
+const OwnerAgroDashboard = lazy(() => import("./components/AgroDash/OwnerAgroDashboard"));
+const ManagerFarmDash = lazy(() => import("./components/ManagerFarmDash"));
+const HarvestDashboard = lazy(() => import("./components/HarvestDashboard"));
+const MyProfile = lazy(() => import("./components/MyProfile"));
+
+const ViewFallback = (
+  <div className="p-6 text-center text-slate-600">Loading…</div>
+);
 
 enum View {
   Home = "home",
@@ -575,6 +590,8 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
               </div>
             )}
 
+            <Suspense fallback={ViewFallback}>
+
             {cachedViews.includes(View.AddUsers) && (
               <div style={{ display: currentView === View.AddUsers ? 'block' : 'none' }}>
                 <Addusers setUsers={setUsers} users={users} />
@@ -746,7 +763,7 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
 
             {cachedViews.includes(View.Map) && (
               <div style={{ display: currentView === View.Map ? 'block' : 'none' }}>
-                <Suspense fallback={<div className="p-6 text-center text-slate-600">Loading map…</div>}>
+                <Suspense fallback={ViewFallback}>
                   <CropEyeMap onSoilDataChange={handleSoilDataChange} />
                 </Suspense>
               </div>
@@ -816,6 +833,7 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
                 <OwnerHarvestDash />
               </div>
             )}
+            </Suspense>
           </div>
         </main>
       </div>

@@ -29,14 +29,32 @@ function normalizePlotKeyForMatch(value: string): string {
 function plotKeysForRecord(record: any): string[] {
   if (!record) return [];
 
-  const gat = record?.gat_number != null ? String(record.gat_number).trim() : "";
-  const num = record?.plot_number != null ? String(record.plot_number).trim() : "";
+  const nestedPlot =
+    record?.plot && typeof record.plot === "object" ? record.plot : null;
+
+  const gat =
+    record?.gat_number != null
+      ? String(record.gat_number).trim()
+      : nestedPlot?.gat_number != null
+        ? String(nestedPlot.gat_number).trim()
+        : "";
+  const num =
+    record?.plot_number != null
+      ? String(record.plot_number).trim()
+      : nestedPlot?.plot_number != null
+        ? String(nestedPlot.plot_number).trim()
+        : "";
 
   const keys = [
     record?.fastapi_plot_id,
     record?.events_plot_id,
     record?.plot_id,
     record?.plot_name,
+    nestedPlot?.fastapi_plot_id,
+    nestedPlot?.events_plot_id,
+    nestedPlot?.plot_id,
+    nestedPlot?.plot_name,
+    nestedPlot?.id,
     gat && num ? `${gat}_${num}` : null,
     gat && num ? `${gat}/${num}` : null,
   ]
@@ -44,6 +62,18 @@ function plotKeysForRecord(record: any): string[] {
     .map((value) => normalizePlotKeyForMatch(String(value)));
 
   return [...new Set(keys)];
+}
+
+/** Prefer Django /farms/ KML over FO/hierarchy/Events polygons. */
+function resolveDjangoFarmBoundary(farm: any): any | null {
+  if (!farm || typeof farm !== "object") return null;
+  return (
+    farm?.plot?.boundary ??
+    farm?.boundary ??
+    farm?.coordinates?.boundary ??
+    farm?.plot?.coordinates?.boundary ??
+    null
+  );
 }
 
 function recordMatchesPlotId(record: any, plotId?: string | null): boolean {
@@ -322,26 +352,56 @@ export function enrichPlotsWithFarmDetails(plots: any[], farms: any[]): any[] {
         ? farms.find((farm) => recordMatchesPlotId(farm, String(plotKey)))
         : null) ??
       farms.find((farm) => {
-        const gat = farm?.gat_number != null ? String(farm.gat_number) : "";
-        const num = farm?.plot_number != null ? String(farm.plot_number) : "";
+        const farmPlot = farm?.plot && typeof farm.plot === "object" ? farm.plot : null;
+        const gat =
+          farm?.gat_number != null
+            ? String(farm.gat_number)
+            : farmPlot?.gat_number != null
+              ? String(farmPlot.gat_number)
+              : "";
+        const num =
+          farm?.plot_number != null
+            ? String(farm.plot_number)
+            : farmPlot?.plot_number != null
+              ? String(farmPlot.plot_number)
+              : "";
         const plotGat = plot?.gat_number != null ? String(plot.gat_number) : "";
         const plotNum =
           plot?.plot_number != null ? String(plot.plot_number) : "";
         return gat && num && gat === plotGat && num === plotNum;
       }) ??
-      null;
+      // farmer_id filter often returns one farm — use it when plot match fails
+      (farms.length === 1 ? farms[0] : null);
 
     if (!matchedFarm) return plot;
+
+    const djangoBoundary = resolveDjangoFarmBoundary(matchedFarm);
+    const fallbackBoundary =
+      plot?.boundary ?? plot?.coordinates?.boundary ?? null;
+    const boundary = djangoBoundary ?? fallbackBoundary;
 
     return {
       ...matchedFarm,
       ...plot,
-      boundary:
-        matchedFarm?.plot?.boundary ??
-        matchedFarm?.boundary ??
-        matchedFarm?.coordinates?.boundary ??
-        plot?.boundary ??
-        plot?.coordinates?.boundary,
+      // Always prefer Django KML when present (FO/Events polygons go stale).
+      boundary,
+      coordinates: {
+        ...(typeof plot?.coordinates === "object" && plot.coordinates
+          ? plot.coordinates
+          : {}),
+        ...(typeof matchedFarm?.coordinates === "object" &&
+        matchedFarm.coordinates
+          ? matchedFarm.coordinates
+          : {}),
+        ...(boundary ? { boundary } : {}),
+      },
+      plot:
+        matchedFarm?.plot && typeof matchedFarm.plot === "object"
+          ? {
+              ...matchedFarm.plot,
+              ...(boundary ? { boundary } : {}),
+            }
+          : plot?.plot,
       plantation_date:
         plot?.plantation_date ??
         plot?.planting_date ??
@@ -352,6 +412,12 @@ export function enrichPlotsWithFarmDetails(plots: any[], farms: any[]): any[] {
         Array.isArray(plot?.farms) && plot.farms.length > 0
           ? plot.farms
           : [matchedFarm],
+      _boundarySource: djangoBoundary ? "django" : "fallback",
+      _plotUpdatedAt:
+        matchedFarm?.plot?.updated_at ??
+        matchedFarm?.updated_at ??
+        plot?.updated_at ??
+        null,
     };
   });
 }

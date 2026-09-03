@@ -20,6 +20,46 @@ import {
   readLastSavedFarmId,
   readSavedFarmFields,
 } from "../utils/farmSaveSync";
+import { PROFILE_UPDATED_EVENT } from "./NotificationSystem";
+
+function profilePayloadFromUserForm(profileData: any, userForm: UserFormData): any {
+  const base = profileData && typeof profileData === "object" ? profileData : {};
+  const fp = base.farmer_profile && typeof base.farmer_profile === "object"
+    ? base.farmer_profile
+    : {};
+  const pi = fp.personal_info && typeof fp.personal_info === "object" ? fp.personal_info : {};
+  const ai = fp.address_info && typeof fp.address_info === "object" ? fp.address_info : {};
+
+  const personal_info = {
+    ...pi,
+    first_name: userForm.first_name,
+    last_name: userForm.last_name,
+    phone_number: userForm.phone_number,
+    aadhaar_number: userForm.aadhaar_number,
+  };
+  const address_info = {
+    ...ai,
+    address: userForm.address,
+    village: userForm.village,
+    district: userForm.district,
+    state: userForm.state,
+    taluka: userForm.taluka,
+  };
+  const farmer_profile = {
+    ...fp,
+    ...userForm,
+    personal_info,
+    address_info,
+  };
+
+  return {
+    ...base,
+    ...userForm,
+    farmer_profile,
+    personal_info,
+    address_info,
+  };
+}
 
 /** Normalize boundary from API (handles nested shapes and JSON strings). */
 function normalizeBoundary(raw: any): GeoJsonPolygon | null {
@@ -1300,7 +1340,11 @@ const MyProfile: React.FC<Props> = ({ onClose }) => {
         aadhaar_number: userForm.aadhaar_number,
       });
       await refreshApiEndpoints();
-      window.dispatchEvent(new Event("cropeye:profile-updated"));
+      const updatedProfile = profilePayloadFromUserForm(profileData, userForm);
+      setProfileData(updatedProfile);
+      window.dispatchEvent(
+        new CustomEvent(PROFILE_UPDATED_EVENT, { detail: updatedProfile }),
+      );
       setUserMsg({ type: "success", text: "Profile updated successfully!" });
       setEditingUser(false);
       setTimeout(() => setUserMsg(null), 4000);

@@ -207,6 +207,13 @@ const EvapotranspirationCard: React.FC = () => {
       ? { status: "Above average", className: "text-orange-500" }
       : { status: "Below average", className: "text-green-500" };
 
+  const getETScore = (value: number): "Low" | "Medium" | "High" => {
+    if (value <= 3.0) return "Low";
+    if (value <= 5.5) return "Medium";
+    return "High";
+  };
+  const etScore = getETScore(Number(etValue) || 0);
+
   const maxTrendValue =
     Array.isArray(trendData) && trendData.length > 0
       ? Math.max(...trendData.map((v: any) => Number(v) || 0))
@@ -234,6 +241,21 @@ const EvapotranspirationCard: React.FC = () => {
             </>
           )}
         </div>
+
+        {!loading && (
+          <div
+            className={`evap-comparison ${
+              etScore === "Low"
+                ? "text-green-600"
+                : etScore === "Medium"
+                  ? "text-orange-600"
+                  : "text-red-600"
+            }`}
+            style={{ marginTop: 4 }}
+          >
+            ET score: {etScore}
+          </div>
+        )}
 
         {error && <div className="error-message-small">{error}</div>}
 
