@@ -1,4 +1,4 @@
-import { normalizePlotKey, plotKeyFromRecord, getPlotNameCandidates } from "./plotName";
+import { normalizePlotKey, plotKeyFromRecord, getPlotNameCandidates, sanitizePlotName } from "./plotName";
 import { collectFarmsFromRecord } from "./plantation";
 import { resolvePlotBoundaryFromAnyRecord, readLocalPlotBoundary } from "./plotBoundarySync";
 import { calculateAreaMetricsFromGeometry } from "./plotGeometry";
@@ -1802,6 +1802,13 @@ function farmRowPlotKeys(farmRow: any): string[] {
   const add = (value: unknown) => {
     if (value == null || `${value}`.trim() === "") return;
     keys.add(normalizePlotKey(String(value)));
+    // Also index "113/3" / "113_3" style compound ids as gat+plot.
+    const raw = sanitizePlotName(String(value));
+    const parts = raw.split(/[/_]/).filter(Boolean);
+    if (parts.length === 2) {
+      keys.add(normalizePlotKey(`${parts[0]}_${parts[1]}`));
+      keys.add(normalizePlotKey(`${parts[0]}/${parts[1]}`));
+    }
   };
 
   add(plotKeyFromRecord(farmRow));
@@ -1815,6 +1822,7 @@ function farmRowPlotKeys(farmRow: any): string[] {
   add(farmRow?.gat_No);
   add(farmRow?.plot?.plot_number);
   add(farmRow?.plot?.fastapi_plot_id);
+  add(farmRow?.plot?.plot_name);
 
   const gat = farmRow?.gat_number ?? farmRow?.gat_No ?? farmRow?.plot?.gat_number;
   const num =
@@ -2230,7 +2238,48 @@ function slugFromDistrictLabelForHarvest(label: string): string {
   return known.has(slug) ? slug : "";
 }
 
-/** Plot acres: prefer saved farm KML area, then agroStats (often stale after edit). */
+/** Plot acres from a matched Django /farms/ row (polygon first — area_size stays stale after KML edit). */
+function acresFromDjangoFarmRows(
+  plotKeys: string[],
+  farmRows: any[] | null | undefined,
+): number | null {
+  if (!farmRows?.length || !plotKeys.length) return null;
+
+  const targets = new Set(
+    plotKeys
+      .filter((key) => key?.trim())
+      .map((key) => normalizePlotKey(key)),
+  );
+  if (!targets.size) return null;
+
+  for (const farmRow of farmRows) {
+    const rowKeys = farmRowPlotKeys(farmRow);
+    if (!rowKeys.some((rk) => targets.has(rk))) continue;
+
+    // Prefer geometry acres — Django area_size often stays at the pre-edit value.
+    const ring = polygonRingFromRecord(farmRow);
+    if (ring.length >= 3) {
+      const metrics = calculateAreaMetricsFromGeometry({
+        type: "Polygon",
+        coordinates: [ring],
+      });
+      if (metrics?.acres != null && metrics.acres > 0) {
+        return metrics.acres;
+      }
+    }
+
+    const fromField =
+      parsePositiveArea(farmRow?.area_acres) ??
+      parsePositiveArea(farmRow?.area_size_numeric) ??
+      parsePositiveArea(farmRow?.area_size) ??
+      parsePositiveArea(farmRow?.area);
+    if (fromField != null) return fromField;
+  }
+
+  return null;
+}
+
+/** Plot acres: drawn/Django KML first; agroStats last (often stale after edit). */
 function resolveHarvestAreaAcres(
   agro: any,
   farm?: any,
@@ -2262,6 +2311,46 @@ function resolveHarvestAreaAcres(
     parsePositiveArea(agro?.area) ??
     parsePositiveArea(agro?.acres) ??
     0
+  );
+}
+
+/**
+ * Acre priority after KML edit:
+ * 1) acres of the polygon we will draw
+ * 2) Django /farms/ area_size or polygon
+ * 3) hierarchy farm/plot (before farms hydrate)
+ * 4) never agro once /farms/ is loaded
+ */
+function resolveHarvestAreaPreferringDjango(
+  agro: any,
+  farm: any,
+  plot: any,
+  farmer: any,
+  farmRows: any[] | null | undefined,
+  plotKeys: string[],
+  drawnBoundary?: [number, number][],
+  ownerFactoryPlots?: OwnerFactoryBoundaryPlot[] | null,
+): number {
+  const fromDrawn = acresFromLeafletBoundary(drawnBoundary);
+  if (fromDrawn != null) return Number(fromDrawn.toFixed(2));
+
+  const fromDjango = acresFromDjangoFarmRows(plotKeys, farmRows);
+  if (fromDjango != null) return Number(fromDjango.toFixed(2));
+
+  const farmsHydrated = Array.isArray(farmRows) && farmRows.length > 0;
+  if (farmsHydrated) {
+    const hierarchyOnly = resolveHarvestAreaAcres(null, farm, plot, farmer);
+    if (hierarchyOnly > 0) return hierarchyOnly;
+    return 0;
+  }
+
+  const farmAgroArea = resolveHarvestAreaAcres(agro, farm, plot, farmer);
+  if (farmAgroArea > 0) return farmAgroArea;
+
+  return (
+    acresFromOwnerFactoryPlot(
+      findOwnerFactoryPlot(plotKeys, ownerFactoryPlots),
+    ) ?? 0
   );
 }
 
@@ -2318,11 +2407,16 @@ function buildRowFromContext(
   const plantationDate = readPlantationDate(farm, plot, farmer, agro);
   const days = computeDaysSincePlantation(plantationDate);
 
-  const ownerAcres = acresFromOwnerFactoryPlot(
-    findOwnerFactoryPlot(plotKeys, ownerFactoryPlots),
+  const area = resolveHarvestAreaPreferringDjango(
+    agro,
+    farm,
+    plot,
+    farmer,
+    farmRows,
+    plotKeys,
+    center.boundary,
+    ownerFactoryPlots,
   );
-  const farmAgroArea = resolveHarvestAreaAcres(agro, farm, plot, farmer);
-  const area = farmAgroArea > 0 ? farmAgroArea : ownerAcres ?? 0;
 
   const yieldValue = extractSugarYield(agro);
   const brixValue = extractBrix(agro);
@@ -2439,10 +2533,20 @@ function enrichRowFromContext(
       ctx.plotKeys,
       ownerFactoryPlots,
     ) ?? resolveCenter(null, ctx.plot, ctx.farm, ctx.farmer, ctx.fo);
-  const ownerAcres = acresFromOwnerFactoryPlot(
-    findOwnerFactoryPlot(ctx.plotKeys, ownerFactoryPlots),
+  const nextBoundary =
+    centerFromSavedBoundary?.boundary?.length
+      ? centerFromSavedBoundary.boundary
+      : row.boundaryCoordinates;
+  const areaFromDjango = resolveHarvestAreaPreferringDjango(
+    agro,
+    ctx.farm,
+    ctx.plot,
+    ctx.farmer,
+    farmRows,
+    ctx.plotKeys,
+    nextBoundary,
+    ownerFactoryPlots,
   );
-  const existingArea = parsePositiveArea(row["Area (acre)"]);
 
   return {
     ...row,
@@ -2453,10 +2557,7 @@ function enrichRowFromContext(
           boundaryCoordinates: centerFromSavedBoundary.boundary,
         }
       : {}),
-    // Only fill area from factory endpoint when farms/agro left it empty.
-    ...(existingArea == null && ownerAcres != null
-      ? { "Area (acre)": ownerAcres }
-      : {}),
+    ...(areaFromDjango > 0 ? { "Area (acre)": areaFromDjango } : {}),
     managerId: row.managerId || ctx.managerId || undefined,
     fieldOfficerId: row.fieldOfficerId || fieldOfficerId(ctx.fo) || undefined,
     Manager:
@@ -2569,13 +2670,16 @@ function buildRowFromAgroOnly(
 
   const plantationDate = readPlantationDate(null, null, null, agro);
   const days = computeDaysSincePlantation(plantationDate);
-  const farmAgroArea = resolveHarvestAreaAcres(agro, null);
-  const area =
-    farmAgroArea > 0
-      ? farmAgroArea
-      : acresFromOwnerFactoryPlot(
-          findOwnerFactoryPlot([plotKey], ownerFactoryPlots),
-        ) ?? 0;
+  const area = resolveHarvestAreaPreferringDjango(
+    agro,
+    null,
+    null,
+    null,
+    farmRows,
+    [plotKey],
+    center.boundary,
+    ownerFactoryPlots,
+  );
   const cleanPlotKey = plotKey.replace(/^"|"$/g, "");
   const regionKeys = collectLocationKeys(agro, fo);
   const primaryRegion =
@@ -2739,12 +2843,18 @@ export function buildOwnerHarvestRows(
           boundaryCoordinates: saved.boundary,
         };
       }
-      const existingArea = parsePositiveArea(row["Area (acre)"]);
-      const ownerAcres = acresFromOwnerFactoryPlot(
-        findOwnerFactoryPlot([plotKey], ownerFactoryPlots),
+      const areaFromDjango = resolveHarvestAreaPreferringDjango(
+        plotData,
+        null,
+        null,
+        null,
+        farmRows,
+        [plotKey],
+        row.boundaryCoordinates,
+        ownerFactoryPlots,
       );
-      if (existingArea == null && ownerAcres != null) {
-        row = { ...row, "Area (acre)": ownerAcres };
+      if (areaFromDjango > 0) {
+        row = { ...row, "Area (acre)": areaFromDjango };
       }
     }
 
