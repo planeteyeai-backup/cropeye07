@@ -8,6 +8,7 @@ import {
   formatIrrigationDateRange,
   formatWaterRemainError,
   pastRange,
+  todayIsoInTz,
   type WaterRemainDay,
 } from "../utils/waterRemainApi";
 import { plotKeyFromRecord } from "../utils/plotName";
@@ -49,6 +50,44 @@ function etoLossKl(etoLossLiters: number): number {
 
 function formatKl(value: number): string {
   return `${(Number(value) || 0).toFixed(1)} kL`;
+}
+
+/** Calendar day in Asia/Kolkata: today minus N days → YYYY-MM-DD. */
+function istDayOffset(daysBack: number): string {
+  const today = todayIsoInTz();
+  const d = new Date(`${today}T12:00:00`);
+  d.setDate(d.getDate() - daysBack);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function mapWaterRemainToScheduleDays(
+  days: WaterRemainDay[],
+  rainByDate: Map<string, number>,
+  todayStr: string,
+  rainfallMm: number,
+): ScheduleDay[] {
+  return days.map((item) => {
+    const fromMap = rainByDate.get(item.date);
+    const rainfall =
+      fromMap != null && Number.isFinite(fromMap)
+        ? fromMap
+        : item.date === todayStr
+          ? rainfallMm
+          : 0;
+    return {
+      day: item.date,
+      etoSumMm: item.eto_sum_mm,
+      etoLossLiters: item.eto_loss_liters,
+      oneMmLiters: item.one_mm_liters,
+      waterRemainLiters: item.water_remain_liters,
+      waterRemainM3: item.water_remain_m3,
+      waterVolumeLiters: item.water_volume_liters,
+      rainfall,
+    };
+  });
 }
 
 /** Daily rainfall (mm) for last N days at plot lat/lon — Open-Meteo past_days. */
@@ -103,14 +142,18 @@ async function fetchForecastRainfall(
 }
 
 const IrrigationSchedule: React.FC = () => {
-  const { setAppState, selectedPlotName } = useAppContext();
+  const { appState, setAppState, selectedPlotName } = useAppContext();
   const { profile, loading: profileLoading } = useFarmerProfile();
   const [plotName, setPlotName] = useState<string>("");
   const [plotCoords, setPlotCoords] = useState<PlotCoords | null>(null);
+  const [cropName, setCropName] = useState<string>("sugarcane");
   const [etValue, setEtValue] = useState<number>(0.1);
   const [rainfallMm, setRainfallMm] = useState<number>(0);
   /** Past 7 days from water-remain + daily rainfall (Open-Meteo / forecast) */
   const [remainDays, setRemainDays] = useState<ScheduleDay[]>([]);
+  const [rainByDate, setRainByDate] = useState<Map<string, number>>(
+    () => new Map(),
+  );
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -170,6 +213,14 @@ const IrrigationSchedule: React.FC = () => {
       selectedPlot.fastapi_plot_id ||
       `${selectedPlot.gat_number}_${selectedPlot.plot_number}`;
     setPlotName(plotId);
+
+    const cropRaw =
+      selectedPlot?.crop_variety ??
+      selectedPlot?.crop_type?.crop_variety ??
+      selectedPlot?.farms?.[0]?.crop_variety ??
+      profile?.crop_variety ??
+      "sugarcane";
+    setCropName(cropRaw ? String(cropRaw) : "sugarcane");
 
     try {
       let latN: number | null = null;
@@ -272,11 +323,11 @@ const IrrigationSchedule: React.FC = () => {
         // Flutter WaterBalanceApi: last 30 days (cumulative remain depends on start_date).
         const seriesRange = pastRange(30);
         const waterExtras = {
-          cropName: "sugarcane",
+          cropName: cropName || "sugarcane",
           lat: plotCoords?.lat,
           lon: plotCoords?.lon,
         };
-        const [apiResp, moistureResp, rainByDate] = await Promise.all([
+        const [apiResp, moistureResp, rainMap] = await Promise.all([
           fetchWaterRemainForPlot(
             plotName,
             profile?.plots,
@@ -295,43 +346,37 @@ const IrrigationSchedule: React.FC = () => {
             const key = String(row.day).slice(0, 10);
             const rain = Number(row.rainfall_mm_yesterday);
             if (key && Number.isFinite(rain) && rain > 0) {
-              rainByDate.set(key, rain);
+              rainMap.set(key, rain);
             }
           }
         }
+        setRainByDate(new Map(rainMap));
 
-        // Table still shows only past 7 days, sliced from the shared month series.
+        const todayStr = todayIsoInTz();
         const last7 = filterPastDays(apiResp.days, 7);
-
-        const todayStr = new Date().toLocaleDateString("en-CA", {
-          timeZone: "Asia/Kolkata",
-        });
-        const mapped: ScheduleDay[] = last7.map((item: WaterRemainDay) => {
-          const fromMap = rainByDate.get(item.date);
-          const rainfall =
-            fromMap != null && Number.isFinite(fromMap)
-              ? fromMap
-              : item.date === todayStr
-                ? rainfallMm
-                : 0;
-          return {
-            day: item.date,
-            etoSumMm: item.eto_sum_mm,
-            etoLossLiters: item.eto_loss_liters,
-            oneMmLiters: item.one_mm_liters,
-            waterRemainLiters: item.water_remain_liters,
-            waterRemainM3: item.water_remain_m3,
-            waterVolumeLiters: item.water_volume_liters,
-            rainfall,
-          };
-        });
+        const mapped = mapWaterRemainToScheduleDays(
+          last7,
+          rainMap,
+          todayStr,
+          rainfallMm,
+        );
 
         setRemainDays(mapped);
-        setAppState((prev: any) => ({
-          ...prev,
-          // Keep full month series when Soil Moisture already stored it; else last7.
-          waterRemainSeries: apiResp.days.length > last7.length ? apiResp.days : last7,
-        }));
+        setAppState((prev: any) => {
+          const existing = Array.isArray(prev.waterRemainSeries)
+            ? prev.waterRemainSeries
+            : [];
+          const keepLonger =
+            existing.length >= apiResp.days.length &&
+            (!prev.waterRemainPlot ||
+              String(prev.waterRemainPlot).toLowerCase() ===
+                String(apiResp.plotName || plotName).toLowerCase());
+          return {
+            ...prev,
+            waterRemainSeries: keepLonger ? existing : apiResp.days,
+            waterRemainPlot: apiResp.plotName || plotName,
+          };
+        });
         if (last7.length) {
           const latestEt = last7[last7.length - 1].eto_sum_mm;
           if (latestEt > 0) setEtValue(latestEt);
@@ -350,23 +395,49 @@ const IrrigationSchedule: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [plotName, plotCoords, profile?.plots, rainfallMm, setAppState]);
+  }, [
+    plotName,
+    plotCoords,
+    cropName,
+    profile?.plots,
+    rainfallMm,
+    setAppState,
+  ]);
+
+  // When Soil Moisture finishes loading a longer series, refresh the 7-day table from it.
+  useEffect(() => {
+    const shared = Array.isArray(appState.waterRemainSeries)
+      ? (appState.waterRemainSeries as WaterRemainDay[])
+      : [];
+    if (!plotName || shared.length < 7) return;
+    const plotMatch =
+      !appState.waterRemainPlot ||
+      String(appState.waterRemainPlot).toLowerCase() ===
+        String(plotName).toLowerCase();
+    if (!plotMatch) return;
+
+    const todayStr = todayIsoInTz();
+    const last7 = filterPastDays(shared, 7);
+    setRemainDays(
+      mapWaterRemainToScheduleDays(last7, rainByDate, todayStr, rainfallMm),
+    );
+  }, [
+    appState.waterRemainSeries,
+    appState.waterRemainPlot,
+    plotName,
+    rainByDate,
+    rainfallMm,
+  ]);
 
   const generateScheduleData = () => {
     const scheduleData: Array<any> = [];
-    const todayStr = new Date().toLocaleDateString("en-CA", {
-      timeZone: "Asia/Kolkata",
-    });
+    const todayStr = todayIsoInTz();
 
-    // Always show 7 calendar days. Missing API rows → irrigation need = 0.0 kL.
+    // Always show 7 IST calendar days. Missing API rows → irrigation need = 0.0 kL.
     const byDate = new Map(remainDays.map((d) => [d.day, d]));
     const sourceDays: ScheduleDay[] = [];
     for (let idx = 6; idx >= 0; idx -= 1) {
-      const d = new Date();
-      d.setDate(d.getDate() - idx);
-      const key = d.toLocaleDateString("en-CA", {
-        timeZone: "Asia/Kolkata",
-      });
+      const key = istDayOffset(idx);
       const hist = byDate.get(key);
       sourceDays.push(
         hist ?? {
@@ -402,7 +473,7 @@ const IrrigationSchedule: React.FC = () => {
             ? rainfallMm
             : hist.rainfall;
 
-      // Missing day / no deficit → irrigation need shows 0.0 kL (Flutter).
+      // Same rule as soil-moisture card: deficit remain → irrigation need kL.
       const irrigKl = hasRemainSeries
         ? irrigationNeededKl(hist.waterRemainLiters)
         : 0;

@@ -571,7 +571,7 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
 
         {loading && !tubeDays.length ? (
           <p className="text-xs text-gray-400 text-center py-4">
-            Loading Soil Moisture (up to 60s)
+            Loading Soil Moisture 
           </p>
         ) : (
           <>
@@ -668,13 +668,16 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
                     const fullIdx = visibleBase + i;
                     const isSel = fullIdx === selDay;
                     const remainL = day.waterRemainLiters;
-                    const isDeficit = remainL < 0;
-                    const frac = Math.min(
-                      1,
-                      Math.max(0, Math.abs(remainL) / maxRemainL),
-                    );
-                    const barColor = isDeficit ? DEFICIT_COLOR : SURPLUS_COLOR;
+                    const needKl = irrigationNeededKl(remainL);
                     const rKl = remainKl(remainL);
+                    // Same display rule as Past 7-Day Irrigation Need column (> 0.0 kL).
+                    const isDeficit = needKl >= 0.05;
+                    const isSurplus = rKl >= 0.05;
+                    const frac =
+                      isDeficit || isSurplus
+                        ? Math.min(1, Math.max(0, Math.abs(remainL) / maxRemainL))
+                        : 0;
+                    const barColor = isDeficit ? DEFICIT_COLOR : SURPLUS_COLOR;
 
                     return (
                       <button
@@ -711,8 +714,6 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
                               }`}
                               style={{
                                 backgroundColor: barColor,
-                                // Flutter: height = (frac * halfBarArea).clamp(4, half)
-                                // halfBarArea = track/2 via CSS; use % of half = frac*50% of track
                                 height: `max(4px, calc(${frac} * 50%))`,
                               }}
                             />
