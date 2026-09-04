@@ -7,7 +7,7 @@ import {
   filterPastDays,
   formatIrrigationDateRange,
   formatWaterRemainError,
-  pastSameDayLastMonthRange,
+  pastRange,
   type WaterRemainDay,
 } from "../utils/waterRemainApi";
 import { plotKeyFromRecord } from "../utils/plotName";
@@ -36,9 +36,19 @@ function parsePrecipMm(raw: unknown): number {
   return 0;
 }
 
-/** Past 7-Day table: water_remain_m3 shown as kL (1 m³ = 1 kL, same number, keep API sign). */
-function formatRemainM3AsKl(m3: number): string {
-  return `${(Number(m3) || 0).toFixed(1)} kL`;
+/** Flutter: irrigation needed kL only when remain is deficit. */
+function irrigationNeededKl(remainLiters: number): number {
+  if (!(remainLiters < 0)) return 0;
+  return Math.abs(remainLiters) / 1000;
+}
+
+/** Flutter: ETo loss volume in kL. */
+function etoLossKl(etoLossLiters: number): number {
+  return Math.max(0, Number(etoLossLiters) || 0) / 1000;
+}
+
+function formatKl(value: number): string {
+  return `${(Number(value) || 0).toFixed(1)} kL`;
 }
 
 /** Daily rainfall (mm) for last N days at plot lat/lon — Open-Meteo past_days. */
@@ -259,12 +269,21 @@ const IrrigationSchedule: React.FC = () => {
             })
           : Promise.resolve(new Map<string, number>());
 
-        // Same start_date window as Soil Moisture card — water_remain_m3 is
-        // cumulative from API start_date, so a 7-day-only fetch gives different
-        // remain values than the month fetch for the same calendar day.
-        const seriesRange = pastSameDayLastMonthRange();
+        // Flutter WaterBalanceApi: last 30 days (cumulative remain depends on start_date).
+        const seriesRange = pastRange(30);
+        const waterExtras = {
+          cropName: "sugarcane",
+          lat: plotCoords?.lat,
+          lon: plotCoords?.lon,
+        };
         const [apiResp, moistureResp, rainByDate] = await Promise.all([
-          fetchWaterRemainForPlot(plotName, profile?.plots, 7, seriesRange),
+          fetchWaterRemainForPlot(
+            plotName,
+            profile?.plots,
+            30,
+            seriesRange,
+            waterExtras,
+          ),
           fetchSoilMoistureForPlot(plotName, profile?.plots).catch(() => null),
           rainPromise,
         ]);
@@ -319,7 +338,8 @@ const IrrigationSchedule: React.FC = () => {
         }
       } catch (e: any) {
         if (cancelled) return;
-        setError(formatWaterRemainError(e, plotName));
+        const msg = formatWaterRemainError(e, plotName);
+        if (msg) setError(msg);
         setRemainDays([]);
       } finally {
         if (!cancelled) setLoading(false);
@@ -338,39 +358,55 @@ const IrrigationSchedule: React.FC = () => {
       timeZone: "Asia/Kolkata",
     });
 
-    const sourceDays: ScheduleDay[] =
-      remainDays.length > 0
-        ? remainDays
-        : error
-          ? []
-          : Array.from({ length: 7 }, (_, idx) => {
-            const d = new Date();
-            d.setDate(d.getDate() - (6 - idx));
-            const key = d.toLocaleDateString("en-CA", {
-              timeZone: "Asia/Kolkata",
-            });
-            return {
-              day: key,
-              etoSumMm: key === todayStr ? etValue : 0,
-              etoLossLiters: 0,
-              oneMmLiters: undefined,
-              waterRemainLiters: 0,
-              waterRemainM3: 0,
-              waterVolumeLiters: 0,
-              rainfall: key === todayStr ? rainfallMm : 0,
-            };
-          });
+    // Always show 7 calendar days. Missing API rows → irrigation need = 0.0 kL.
+    const byDate = new Map(remainDays.map((d) => [d.day, d]));
+    const sourceDays: ScheduleDay[] = [];
+    for (let idx = 6; idx >= 0; idx -= 1) {
+      const d = new Date();
+      d.setDate(d.getDate() - idx);
+      const key = d.toLocaleDateString("en-CA", {
+        timeZone: "Asia/Kolkata",
+      });
+      const hist = byDate.get(key);
+      sourceDays.push(
+        hist ?? {
+          day: key,
+          etoSumMm: key === todayStr ? etValue : 0,
+          etoLossLiters: 0,
+          oneMmLiters: undefined,
+          waterRemainLiters: 0,
+          waterRemainM3: 0,
+          waterVolumeLiters: 0,
+          rainfall: key === todayStr ? rainfallMm : 0,
+        },
+      );
+    }
 
     for (const hist of sourceDays) {
       const date = new Date(hist.day + "T12:00:00");
       const isToday = hist.day === todayStr;
-      const etMm = hist.etoSumMm > 0 ? hist.etoSumMm : isToday ? etValue : 0;
+      const hasRemainSeries = byDate.has(hist.day);
+      const etMm = hasRemainSeries
+        ? hist.etoSumMm > 0
+          ? hist.etoSumMm
+          : isToday
+            ? etValue
+            : 0
+        : isToday
+          ? etValue
+          : 0;
       const rainMm =
         hist.rainfall > 0
           ? hist.rainfall
           : isToday
             ? rainfallMm
             : hist.rainfall;
+
+      // Missing day / no deficit → irrigation need shows 0.0 kL (Flutter).
+      const irrigKl = hasRemainSeries
+        ? irrigationNeededKl(hist.waterRemainLiters)
+        : 0;
+      const lossKl = hasRemainSeries ? etoLossKl(hist.etoLossLiters) : 0;
 
       scheduleData.push({
         date: date.toLocaleDateString("en-GB", {
@@ -381,10 +417,13 @@ const IrrigationSchedule: React.FC = () => {
         isToday,
         etDisplayed: Number(etMm.toFixed(1)),
         etRange: getETRange(etMm),
-        etoLossLiters: hist.etoLossLiters,
-        // Irrigation Need = API water_remain_m3 → display as kL
-        waterRemainM3: hist.waterRemainM3,
+        etoLossLiters: hasRemainSeries ? hist.etoLossLiters : 0,
+        etoLossKl: lossKl,
+        irrigationNeedKl: irrigKl,
+        waterRemainLiters: hasRemainSeries ? hist.waterRemainLiters : 0,
+        waterRemainM3: hasRemainSeries ? hist.waterRemainM3 : 0,
         rainfall: rainMm,
+        dataMissing: !hasRemainSeries,
       });
     }
 
@@ -412,10 +451,10 @@ const IrrigationSchedule: React.FC = () => {
     (sum, day) => sum + (Number(day.rainfall) || 0),
     0,
   );
-  const latestIrrigationNeedM3 =
-    scheduleData.length > 0
-      ? Number(scheduleData[scheduleData.length - 1].waterRemainM3) || 0
-      : 0;
+  const totalIrrigationNeedKl = scheduleData.reduce(
+    (sum, day) => sum + (Number(day.irrigationNeedKl) || 0),
+    0,
+  );
 
   useEffect(() => {
     const data = generateScheduleData();
@@ -480,16 +519,16 @@ const IrrigationSchedule: React.FC = () => {
                 )}
               </div>
 
-              <div className="flex flex-col items-start justify-center min-w-0">
+              <div className="flex flex-col items-start justify-center min-w-0 gap-0.5">
                 {loading ? (
                   <div className="loading-spinner-small" />
                 ) : (
                   <>
-                    <span className="font-semibold text-gray-800 whitespace-nowrap">
+                    <span className="text-[11px] font-semibold text-gray-800 whitespace-nowrap">
                       {Number(day.etDisplayed || 0).toFixed(1)} mm
                     </span>
                     <span
-                      className={`inline-block rounded px-0.5 text-[7px] font-semibold whitespace-nowrap ${getETRangeColor(day.etRange)}`}
+                      className={`inline-block rounded px-1 py-0.5 text-[11px] font-medium leading-none ${getETRangeColor(day.etRange)}`}
                     >
                       {day.etRange}
                     </span>
@@ -502,8 +541,14 @@ const IrrigationSchedule: React.FC = () => {
                 {Number(day.rainfall || 0).toFixed(1)} mm
               </div>
 
-              <div className="font-semibold text-emerald-800 whitespace-nowrap">
-                {formatRemainM3AsKl(day.waterRemainM3 ?? 0)}
+              <div
+                className={`font-semibold whitespace-nowrap ${
+                  (day.irrigationNeedKl ?? 0) > 0
+                    ? "text-red-700"
+                    : "text-emerald-800"
+                }`}
+              >
+                {formatKl(day.irrigationNeedKl ?? 0)}
               </div>
             </div>
             ))
@@ -514,10 +559,12 @@ const IrrigationSchedule: React.FC = () => {
         {scheduleData.length > 0 && (
         <div className="irrigation-schedule-grid irrigation-schedule-grid--total shrink-0 rounded border border-green-200 bg-green-50 px-2 py-0.5 text-[9px] font-semibold">
           <span className="text-gray-800">7-Day Total</span>
-          <span className="text-gray-700 whitespace-nowrap">{totalEtoMm.toFixed(1)} mm</span>
+          <span className="text-gray-700 whitespace-nowrap">
+            {totalEtoMm.toFixed(1)} mm
+          </span>
           <span className="text-sky-700 whitespace-nowrap">{totalRainMm.toFixed(1)} mm</span>
           <span className="text-emerald-800 whitespace-nowrap">
-            {formatRemainM3AsKl(latestIrrigationNeedM3)}
+            {formatKl(totalIrrigationNeedKl)}
           </span>
         </div>
         )}

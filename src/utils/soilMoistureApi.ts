@@ -1,9 +1,14 @@
 /**
- * SEF soil-moisture API for Irrigation cards.
- * Current response uses `time_series` + `final_soil_moisture_capped`.
- * Older responses used `soil_moisture_stack` — both are supported.
+ * Soil moisture — same logic as CropO Flutter SoilMoistureApi:
+ *   1) GET /irrigation-and-soil-moisture/{plot_name}  (path, preferred)
+ *   2) GET /soil-moisture/{plot_name}                 (legacy fallback)
+ * Prefer soil_moisture_uncapped when present.
  */
 import { getPlotNameCandidates, type PlotRef } from "./plotName";
+import { getCache, setCache } from "./cache";
+
+const SOIL_MOISTURE_TIMEOUT_MS = 30_000;
+const SOIL_MOISTURE_CACHE_MS = 15 * 60 * 1000;
 
 export type SoilMoistureDay = {
   day: string;
@@ -17,6 +22,8 @@ export type SoilMoistureDay = {
 
 export type SoilMoistureParsed = {
   plotName: string;
+  latitude?: number;
+  longitude?: number;
   currentMoisture: number;
   stack: SoilMoistureDay[];
   raw: any;
@@ -36,9 +43,8 @@ function toFinite(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** Prefer the selected/fastapi id as-is; try both slash and underscore forms.
- *  SEF is inconsistent: some plots only exist as `8/1A`, others only as `142_256`. */
-function orderSoilMoistureCandidates(candidates: string[]):   string[] {
+/** Prefer the selected/fastapi id as-is; try both slash and underscore forms. */
+function orderSoilMoistureCandidates(candidates: string[]): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   const push = (v: string) => {
@@ -61,10 +67,11 @@ function orderSoilMoistureCandidates(candidates: string[]):   string[] {
 function normalizeStackItem(item: any): SoilMoistureDay | null {
   if (!item || typeof item !== "object") return null;
   const day = String(item.day ?? item.date ?? "").slice(0, 10);
+  // Flutter: uncapped → soil_moisture → capped
   const moisture =
+    toFinite(item.soil_moisture_uncapped) ??
     toFinite(item.soil_moisture) ??
     toFinite(item.soil_moisture_capped) ??
-    toFinite(item.soil_moisture_uncapped) ??
     toFinite(item.smanchor) ??
     toFinite(item.value) ??
     toFinite(item.moisture);
@@ -107,9 +114,10 @@ export function parseSoilMoistureResponse(data: any): SoilMoistureParsed | null 
     .filter((row: SoilMoistureDay | null): row is SoilMoistureDay => row != null)
     .sort((a: SoilMoistureDay, b: SoilMoistureDay) => a.day.localeCompare(b.day));
 
+  // Flutter prefers uncapped final when present.
   const current =
-    toFinite(data.final_soil_moisture_capped) ??
     toFinite(data.final_soil_moisture_uncapped) ??
+    toFinite(data.final_soil_moisture_capped) ??
     toFinite(data.smanchor_used) ??
     (stack.length ? stack[stack.length - 1].soil_moisture : null);
 
@@ -127,53 +135,126 @@ export function parseSoilMoistureResponse(data: any): SoilMoistureParsed | null 
 
   return {
     plotName: String(data.plot_name ?? ""),
+    latitude: toFinite(data.latitude) ?? undefined,
+    longitude: toFinite(data.longitude) ?? undefined,
     currentMoisture: current ?? filledStack[filledStack.length - 1].soil_moisture,
     stack: filledStack,
     raw: data,
   };
 }
 
-async function postSoilMoistureOnce(plotName: string): Promise<any> {
-  const base = sefBaseUrl();
-  // Prefer body POST first — path forms 404/502 often for the same plot.
-  const attempts: Array<{ url: string; body?: string }> = [
-    {
-      url: `${base}/soil-moisture`,
-      body: JSON.stringify({ plot_name: plotName }),
-    },
-    {
-      url: `${base}/soil-moisture/${encodeURIComponent(plotName)}`,
-      body: JSON.stringify({ plot_name: plotName }),
-    },
-  ];
-
-  let lastErr: Error | null = null;
-  for (const attempt of attempts) {
-    try {
-      const resp = await fetch(attempt.url, {
-        method: "POST",
-        mode: "cors",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
-        body: attempt.body,
-      });
-      if (!resp.ok) {
-        const text = await resp.text().catch(() => "");
-        lastErr = new Error(`HTTP ${resp.status}: ${text || resp.statusText}`);
-        // Plot not found → try next URL / plot-name candidate quickly.
-        continue;
-      }
-      return await resp.json();
-    } catch (err) {
-      lastErr = err instanceof Error ? err : new Error(String(err));
+async function fetchJsonGet(url: string): Promise<any> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SOIL_MOISTURE_TIMEOUT_MS);
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      mode: "cors",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      const err = new Error(`HTTP ${resp.status}: ${text || resp.statusText}`);
+      (err as Error & { status?: number }).status = resp.status;
+      throw err;
     }
+    return await resp.json();
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(
+        `Soil moisture timed out after ${SOIL_MOISTURE_TIMEOUT_MS / 1000}s`,
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
-  throw lastErr || new Error("Soil moisture POST failed");
 }
 
-/** POST SEF `/soil-moisture` and return normalized stack + current %. */
+/** Flutter preferred + legacy GET paths for one plot name. */
+async function getSoilMoistureOnce(plotName: string): Promise<any> {
+  const cacheKey = `soil_moisture:${plotName.trim()}`;
+  const cached = getCache(cacheKey, SOIL_MOISTURE_CACHE_MS);
+  if (cached) return cached;
+
+  const base = sefBaseUrl();
+  const encoded = encodeURIComponent(plotName);
+  const preferred = `${base}/irrigation-and-soil-moisture/${encoded}`;
+  const legacy = `${base}/soil-moisture/${encoded}`;
+
+  let preferredRaw: any = null;
+  try {
+    preferredRaw = await fetchJsonGet(preferred);
+  } catch (err: any) {
+    const status = err?.status;
+    // Network / 404 / 405 → try legacy (same as Flutter).
+    if (status != null && status !== 404 && status !== 405) {
+      // Still try legacy once for robustness, then throw if both fail.
+    }
+  }
+
+  let legacyRaw: any = null;
+  try {
+    legacyRaw = await fetchJsonGet(legacy);
+  } catch {
+    /* optional enrich / fallback */
+  }
+
+  if (preferredRaw) {
+    const preferredParsed = parseSoilMoistureResponse(preferredRaw);
+    const needsCoords =
+      !preferredParsed?.latitude && !preferredParsed?.longitude;
+    if (needsCoords && legacyRaw) {
+      const legacyParsed = parseSoilMoistureResponse(legacyRaw);
+      const merged = {
+        ...preferredRaw,
+        latitude: preferredRaw.latitude ?? legacyRaw.latitude,
+        longitude: preferredRaw.longitude ?? legacyRaw.longitude,
+        plot_name:
+          preferredRaw.plot_name || legacyRaw.plot_name || plotName,
+        time_series:
+          preferredRaw.time_series ??
+          preferredRaw.soil_moisture_stack ??
+          legacyRaw.time_series ??
+          legacyRaw.soil_moisture_stack,
+      };
+      setCache(cacheKey, merged);
+      return merged;
+    }
+    setCache(cacheKey, preferredRaw);
+    return preferredRaw;
+  }
+
+  if (legacyRaw) {
+    setCache(cacheKey, legacyRaw);
+    return legacyRaw;
+  }
+
+  // Last resort: older CropEye POST body form (some deployments only).
+  try {
+    const resp = await fetch(`${base}/soil-moisture`, {
+      method: "POST",
+      mode: "cors",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ plot_name: plotName }),
+    });
+    if (resp.ok) {
+      const raw = await resp.json();
+      setCache(cacheKey, raw);
+      return raw;
+    }
+  } catch {
+    /* ignore */
+  }
+
+  throw new Error(`Soil moisture GET failed for "${plotName}"`);
+}
+
+/** Fetch soil moisture stack — Flutter SoilMoistureApi.fetch equivalent. */
 export async function fetchSoilMoistureForPlot(
   plotId: string,
   plots?: PlotRef[] | null,
@@ -187,7 +268,7 @@ export async function fetchSoilMoistureForPlot(
 
   for (const candidate of candidates) {
     try {
-      const raw = await postSoilMoistureOnce(candidate);
+      const raw = await getSoilMoistureOnce(candidate);
       const parsed = parseSoilMoistureResponse(raw);
       if (!parsed) {
         lastErr = new Error("Soil moisture response had no usable values");
@@ -200,4 +281,33 @@ export async function fetchSoilMoistureForPlot(
   }
 
   throw lastErr || new Error("Soil moisture API failed");
+}
+
+/** Sugarcane / crop moisture reference bands (Flutter SoilMoistureGraphWidget). */
+export function moistureBandForCrop(crop: string): {
+  minOptimal: number;
+  maxOptimal: number;
+  wiltingPoint: number;
+  saturationPoint: number;
+} {
+  const c = String(crop ?? "").toLowerCase();
+  if (c.includes("sugarcane")) {
+    return { minOptimal: 45, maxOptimal: 70, wiltingPoint: 25, saturationPoint: 85 };
+  }
+  if (c.includes("tomato")) {
+    return { minOptimal: 40, maxOptimal: 65, wiltingPoint: 22, saturationPoint: 82 };
+  }
+  if (c.includes("maize") || c.includes("corn")) {
+    return { minOptimal: 45, maxOptimal: 70, wiltingPoint: 25, saturationPoint: 85 };
+  }
+  if (c.includes("wheat") || c.includes("cotton")) {
+    return { minOptimal: 35, maxOptimal: 60, wiltingPoint: 18, saturationPoint: 78 };
+  }
+  if (c.includes("rice") || c.includes("paddy")) {
+    return { minOptimal: 55, maxOptimal: 80, wiltingPoint: 35, saturationPoint: 92 };
+  }
+  if (c.includes("grape")) {
+    return { minOptimal: 35, maxOptimal: 58, wiltingPoint: 20, saturationPoint: 80 };
+  }
+  return { minOptimal: 40, maxOptimal: 65, wiltingPoint: 22, saturationPoint: 82 };
 }

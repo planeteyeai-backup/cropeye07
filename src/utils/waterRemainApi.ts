@@ -1,12 +1,21 @@
 /**
- * GET /water-remain-per-day — daily ETo loss + water remain (L / m³).
- * Docs: https://sef-cropeye.up.railway.app/docs#/default/water_remain_get_water_remain_per_day_get
+ * GET /water-remain-per-day — same logic as CropO Flutter WaterBalanceApi:
+ *   query: plot_name, start_date, end_date, crop_name?, lat?, lon?
+ * Docs: https://sef-cropeye.up.railway.app/docs
  */
 import { getPlotNameCandidates, type PlotRef } from "./plotName";
 import { getCache, setCache } from "./cache";
 
-const WATER_REMAIN_TIMEOUT_MS = 45_000;
+/** Flutter uses 60s; SEF month ranges are slow. */
+const WATER_REMAIN_TIMEOUT_MS = 60_000;
 const WATER_REMAIN_CACHE_MS = 15 * 60 * 1000;
+
+export type WaterHourStep = {
+  etoMm: number;
+  hourLossLiters: number;
+  waterVolumeBeforeLiters: number;
+  waterVolumeAfterLiters: number;
+};
 
 export type WaterRemainDay = {
   date: string; // YYYY-MM-DD
@@ -16,12 +25,25 @@ export type WaterRemainDay = {
   water_remain_liters: number;
   water_remain_m3: number;
   one_mm_liters?: number;
+  ndmi?: number | null;
+  hourly_steps?: WaterHourStep[];
 };
 
 export type WaterRemainParsed = {
   plotName: string;
+  cropName?: string;
+  areaM2?: number;
+  totalWaterRemainLiters?: number;
+  totalEtoLossLiters?: number;
+  latestNdmi?: number | null;
   days: WaterRemainDay[];
   raw: any;
+};
+
+export type WaterRemainFetchExtras = {
+  cropName?: string;
+  lat?: number;
+  lon?: number;
 };
 
 const SEF_WATER_REMAIN_BASE = "https://sef-cropeye.up.railway.app";
@@ -93,8 +115,28 @@ function waterRemainCacheKey(
   plotName: string,
   start_date: string,
   end_date: string,
+  extras?: WaterRemainFetchExtras,
 ): string {
-  return `waterRemain_${plotName}_${start_date}_${end_date}`;
+  const crop = extras?.cropName?.trim().toLowerCase() || "";
+  const lat =
+    extras?.lat != null && Number.isFinite(extras.lat)
+      ? extras.lat.toFixed(5)
+      : "";
+  const lon =
+    extras?.lon != null && Number.isFinite(extras.lon)
+      ? extras.lon.toFixed(5)
+      : "";
+  return `waterRemain_${plotName}_${start_date}_${end_date}_${crop}_${lat}_${lon}`;
+}
+
+function normalizeHourStep(item: any): WaterHourStep | null {
+  if (!item || typeof item !== "object") return null;
+  return {
+    etoMm: toFinite(item.eto_mm) ?? 0,
+    hourLossLiters: toFinite(item.hour_loss_liters) ?? 0,
+    waterVolumeBeforeLiters: toFinite(item.water_volume_before_liters) ?? 0,
+    waterVolumeAfterLiters: toFinite(item.water_volume_after_liters) ?? 0,
+  };
 }
 
 function normalizeDay(item: any): WaterRemainDay | null {
@@ -114,6 +156,11 @@ function normalizeDay(item: any): WaterRemainDay | null {
     toFinite(item.water_remain_m3) ??
     (remainL != null ? remainL / 1000 : 0);
 
+  const hourlyRaw = Array.isArray(item.hourly_steps) ? item.hourly_steps : [];
+  const hourly_steps = hourlyRaw
+    .map(normalizeHourStep)
+    .filter((s: WaterHourStep | null): s is WaterHourStep => s != null);
+
   return {
     date,
     eto_sum_mm: toFinite(item.eto_sum_mm) ?? toFinite(item.eto) ?? 0,
@@ -126,6 +173,8 @@ function normalizeDay(item: any): WaterRemainDay | null {
     water_remain_liters: remainL ?? 0,
     water_remain_m3: remainM3 ?? 0,
     one_mm_liters: toFinite(item.one_mm_liters) ?? undefined,
+    ndmi: toFinite(item.ndmi),
+    hourly_steps: hourly_steps.length ? hourly_steps : undefined,
   };
 }
 
@@ -145,8 +194,21 @@ export function parseWaterRemainResponse(data: any): WaterRemainParsed | null {
 
   if (!days.length) return null;
 
+  let latestNdmi: number | null = null;
+  for (let i = days.length - 1; i >= 0; i -= 1) {
+    if (days[i].ndmi != null && Number.isFinite(days[i].ndmi as number)) {
+      latestNdmi = days[i].ndmi as number;
+      break;
+    }
+  }
+
   return {
     plotName: String(data.plot_name ?? ""),
+    cropName: data.crop_name != null ? String(data.crop_name) : undefined,
+    areaM2: toFinite(data.area_m2) ?? undefined,
+    totalWaterRemainLiters: toFinite(data.total_water_remain_liters) ?? undefined,
+    totalEtoLossLiters: toFinite(data.total_eto_loss_liters) ?? undefined,
+    latestNdmi,
     days,
     raw: data,
   };
@@ -163,9 +225,9 @@ export function todayIsoInTz(timeZone = IST): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone }).format(new Date());
 }
 
-/** Last N calendar days ending today (inclusive) in IST. */
+/** Last N calendar days ending today (inclusive) in IST. Flutter default = 30. */
 export function pastRange(
-  daysBack = 7,
+  daysBack = 30,
   timeZone = IST,
 ): { start_date: string; end_date: string } {
   const end_date = todayIsoInTz(timeZone);
@@ -240,12 +302,25 @@ export function irrigationNeedLiters(
   return loss * (netMm / etoMm);
 }
 
+/** Flutter water-balance status from remain kL vs series max. */
+export function waterBalanceStatus(
+  remainKl: number,
+  maxKl: number,
+): { label: "Low" | "Moderate" | "High" | "Excessive"; color: string } {
+  if (remainKl < 0) return { label: "Low", color: "#D32F2F" };
+  const frac = maxKl <= 0 ? 0 : Math.min(1, Math.max(0, remainKl / maxKl));
+  if (frac < 0.3) return { label: "Moderate", color: "#FFA000" };
+  if (frac < 0.7) return { label: "High", color: "#2E7D32" };
+  return { label: "Excessive", color: "#1565C0" };
+}
+
 async function getWaterRemainOnce(
   plotName: string,
   start_date: string,
   end_date: string,
+  extras?: WaterRemainFetchExtras,
 ): Promise<any> {
-  const cacheKey = waterRemainCacheKey(plotName, start_date, end_date);
+  const cacheKey = waterRemainCacheKey(plotName, start_date, end_date, extras);
   const cached = getCache(cacheKey, WATER_REMAIN_CACHE_MS);
   if (cached) return cached;
 
@@ -255,6 +330,16 @@ async function getWaterRemainOnce(
     start_date,
     end_date,
   });
+  // Flutter WaterBalanceApi also sends crop + field centroid.
+  const crop = extras?.cropName?.trim();
+  if (crop) qs.set("crop_name", crop);
+  if (extras?.lat != null && Number.isFinite(extras.lat)) {
+    qs.set("lat", extras.lat.toFixed(6));
+  }
+  if (extras?.lon != null && Number.isFinite(extras.lon)) {
+    qs.set("lon", extras.lon.toFixed(6));
+  }
+
   const url = `${base}/water-remain-per-day?${qs.toString()}`;
 
   const controller = new AbortController();
@@ -283,12 +368,16 @@ async function getWaterRemainOnce(
   }
 }
 
-/** GET `/water-remain-per-day` for past days (default last 7). */
+/**
+ * GET `/water-remain-per-day` — Flutter WaterBalanceApi.fetch equivalent.
+ * Default window = 30 days when no customRange (matches Flutter).
+ */
 export async function fetchWaterRemainForPlot(
   plotId: string,
   plots?: PlotRef[] | null,
-  daysBack = 7,
+  daysBack = 30,
   customRange?: { start_date: string; end_date: string },
+  extras?: WaterRemainFetchExtras,
 ): Promise<WaterRemainParsed> {
   if (!plotId?.trim()) throw new Error("Missing plot name");
 
@@ -300,7 +389,12 @@ export async function fetchWaterRemainForPlot(
 
   for (const candidate of candidates) {
     try {
-      const raw = await getWaterRemainOnce(candidate, start_date, end_date);
+      const raw = await getWaterRemainOnce(
+        candidate,
+        start_date,
+        end_date,
+        extras,
+      );
       const parsed = parseWaterRemainResponse(raw);
       if (!parsed) {
         lastErr = new Error("Water remain response had no time_series");
@@ -315,7 +409,7 @@ export async function fetchWaterRemainForPlot(
   throw lastErr || new Error("Water remain API failed");
 }
 
-/** User-facing message when SEF has no plot boundary saved. */
+/** User-facing message when SEF has no plot boundary saved. Timeouts stay silent. */
 export function formatWaterRemainError(err: unknown, plotId: string): string {
   const msg = err instanceof Error ? err.message : String(err);
   if (
@@ -324,8 +418,9 @@ export function formatWaterRemainError(err: unknown, plotId: string): string {
   ) {
     return `Plot "${plotId}" is not registered in the irrigation service. Save the plot boundary (KML) again or ask your field officer to sync it.`;
   }
+  // Don't surface slow SEF timeouts — card already shows empty/0 state.
   if (/timed out/i.test(msg)) {
-    return `Irrigation data timed out for "${plotId}". Please refresh — cached data may load faster on retry.`;
+    return "";
   }
   return `Water remain failed: ${msg}`;
 }

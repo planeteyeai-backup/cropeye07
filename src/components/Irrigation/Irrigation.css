@@ -335,6 +335,49 @@
   text-align: left;
 }
 
+/* Flutter ListView: exactly 7 day cards visible; scroll for the rest */
+.moisture-diverging-scroll--flutter {
+  justify-content: flex-start;
+  gap: 0.35rem;
+  padding: 0 4px;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.moisture-diverging-day--flutter {
+  /* 7 columns fit in the viewport; remaining days scroll */
+  flex: 0 0 calc((100% - 6 * 0.35rem) / 7);
+  width: calc((100% - 6 * 0.35rem) / 7);
+  min-width: calc((100% - 6 * 0.35rem) / 7);
+  max-width: none;
+  margin: 0;
+  scroll-snap-align: start;
+  border-radius: 10px;
+  border-width: 1.5px;
+  border-style: solid;
+  box-sizing: border-box;
+}
+
+.moisture-diverging-day--flutter .moisture-diverging-bar {
+  width: 36px;
+  margin-left: -18px;
+  border-radius: 5px;
+}
+
+.moisture-diverging-day--flutter .moisture-diverging-label {
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+
+/* Day tab: one card can use a bit more space */
+.moisture-diverging-scroll--flutter[data-range="day"] .moisture-diverging-day--flutter {
+  flex: 0 0 min(100%, 88px);
+  width: min(100%, 88px);
+  min-width: min(100%, 88px);
+}
+
 /* Month chart: only ~7 days visible; scroll horizontally for the rest */
 .moisture-diverging-scroll--month {
   justify-content: flex-start;
@@ -356,9 +399,10 @@
   font-size: 10px;
 }
 
-.moisture-diverging-scroll--month .moisture-diverging-bar {
-  width: 28px;
-  margin-left: -14px;
+.moisture-diverging-scroll--month .moisture-diverging-bar,
+.moisture-diverging-scroll--month .moisture-candle {
+  width: 14px;
+  margin-left: -7px;
 }
 
 .moisture-diverging-scroll {
@@ -427,6 +471,8 @@
   flex: 1 1 auto;
   width: 100%;
   min-height: 0;
+  /* Keep deficit/ETo bars inside the track — never over date labels */
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -450,8 +496,21 @@
   margin-left: -18px;
   border-radius: 5px;
   z-index: 1;
-  min-height: 4px;
+  min-height: 0;
   transition: height 0.25s ease, top 0.25s ease, bottom 0.25s ease;
+}
+
+/* Flutter-style single candle: remain above zero + ETo loss below as one body */
+.moisture-candle {
+  position: absolute;
+  left: 50%;
+  width: 16px;
+  margin-left: -8px;
+  border-radius: 2px;
+  z-index: 1;
+  min-height: 0;
+  pointer-events: none;
+  transition: height 0.25s ease, top 0.25s ease;
 }
 
 .moisture-diverging-bar.is-surplus {
@@ -473,8 +532,14 @@
   font-size: 11px;
   line-height: 1.2;
   text-align: center;
-  margin-top: 2px;
+  margin-top: 4px;
+  padding-top: 2px;
   white-space: nowrap;
+  flex-shrink: 0;
+  min-height: 1.35rem;
+  position: relative;
+  z-index: 2;
+  background: transparent;
 }
 
 .moisture-diverging-legend {
@@ -494,6 +559,37 @@
   border-radius: 3px;
   margin-right: 4px;
   vertical-align: -1px;
+}
+
+/* Flutter selected-day footer under the chart */
+.water-balance-day-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 2px 4px 0;
+  width: 100%;
+}
+
+.water-balance-day-footer-date {
+  font-size: 13px;
+  font-weight: 800;
+  color: #1a237e;
+  white-space: nowrap;
+}
+
+.water-balance-day-footer-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.water-balance-day-footer-eto {
+  color: #64748b;
+  white-space: nowrap;
 }
 
 /* Water Balance card — mobile-style KPI + chart */
@@ -587,6 +683,48 @@
   margin: 0;
   width: 100%;
   text-align: center;
+}
+
+.water-balance-range-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.35rem 0 0.25rem;
+  justify-content: center;
+}
+
+.water-balance-tab {
+  border: none;
+  border-radius: 999px;
+  padding: 0.25rem 0.9rem;
+  font-size: 12px;
+  font-weight: 700;
+  color: #64748b;
+  background: #f1f5f9;
+  cursor: pointer;
+}
+
+.water-balance-tab.is-active {
+  color: #fff;
+  background: #1565c0;
+}
+
+.moisture-diverging-bar--eto {
+  width: 28px;
+  margin-left: -14px;
+  border-radius: 3px;
+}
+
+.moisture-diverging-zero {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 9px;
+  font-weight: 700;
+  color: #cbd5e1;
+  z-index: 1;
+  pointer-events: none;
 }
 
 .irrigation-card.irrigation-card--compact .water-balance-kpi-value {
