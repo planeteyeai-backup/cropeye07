@@ -5,7 +5,6 @@ import api, {
   getMyFieldOfficers,
   getManagerFieldOfficersAgroStats,
   getAllFarmsWithFarmerDetails,
-  fetchAllOwnerFactoryBoundaryPlots,
   getIndustries,
   fetchDistrictTotalPlotArea,
   normalizeDistrictForEventsApi,
@@ -153,7 +152,118 @@ interface FilterDropdownProps {
   value: string;
   options: FilterOption[];
   onChange: (value: string) => void;
+  isLoading?: boolean;
 }
+
+/** Custom dropdown so the open list overlays filters below (native <select> made Region look nested under Manager). */
+const FilterDropdown: React.FC<FilterDropdownProps> = ({
+  label,
+  value,
+  options,
+  onChange,
+  isLoading,
+}) => {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (isLoading) setOpen(false);
+  }, [isLoading]);
+
+  const selected =
+    options.find((option) => option.value === value) ?? options[0];
+  const displayLabel = isLoading
+    ? "Loading…"
+    : selected?.label || value || "All";
+
+  return (
+    <div className="mb-6" ref={rootRef}>
+      <div className="flex items-center gap-2 mb-2">
+        <label className="block text-sm font-medium text-gray-700">
+          {label}
+        </label>
+        {isLoading && (
+          <Loader2 className="w-3 h-3 animate-spin text-blue-500" />
+        )}
+      </div>
+      <div className="relative box-border">
+        <button
+          type="button"
+          disabled={isLoading}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          onClick={() => {
+            if (!isLoading) setOpen((prev) => !prev);
+          }}
+          className={`w-full bg-white border rounded-lg px-3 py-2 pr-10 text-left focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors ${
+            isLoading
+              ? "border-gray-200 text-gray-400 cursor-wait bg-gray-50"
+              : "border-gray-300 text-gray-900"
+          }`}
+        >
+          <span className="block truncate">{displayLabel}</span>
+        </button>
+        {isLoading ? (
+          <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-blue-400 animate-spin pointer-events-none" />
+        ) : (
+          <ChevronDown
+            className={`absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 pointer-events-none transition-transform ${
+              open ? "rotate-180" : ""
+            }`}
+          />
+        )}
+        {open && !isLoading && (
+          <ul
+            role="listbox"
+            className="absolute left-0 right-0 top-full z-50 mt-1 max-h-56 overflow-auto rounded-lg border border-gray-200 bg-white py-1 shadow-lg"
+          >
+            {options.map((option) => {
+              const isActive = option.value === value;
+              return (
+                <li key={`${label}-${option.value}`}>
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={isActive}
+                    className={`w-full px-3 py-2 text-left text-sm hover:bg-blue-50 ${
+                      isActive
+                        ? "bg-blue-100 font-medium text-blue-800"
+                        : "text-gray-800"
+                    }`}
+                    onClick={() => {
+                      onChange(option.value);
+                      setOpen(false);
+                    }}
+                  >
+                    {option.label}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+};
 
 interface BrixTooltipProps {
   active?: boolean;
@@ -719,9 +829,9 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
         {
           factoryCenter,
           farmRows,
-          ownerFactoryPlots: isManagerMode
-            ? []
-            : ownerFactoryPlotsRef.current,
+          // Never use owner-factory-boundaries for outlines — that API stays
+          // stale after farmer KML save on /farms/my-profile/.
+          ownerFactoryPlots: [],
         },
       );
       const fromRows = collectHarvestFilterOptions(allData);
@@ -857,20 +967,44 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
             agroStats,
           };
 
-          // First paint: FO hierarchy + agroStats (map/KPIs). Farms only enrich variety.
+          // Wait for /farms/ before painting — agroStats polygons stay stale after KML edit.
+          let farmRows: any[] = [];
+          try {
+            farmRows = await getAllFarmsWithFarmerDetails({ force: true });
+          } catch (err) {
+            if (import.meta.env.DEV) {
+              console.warn(
+                "[Harvest] /farms/?include_farmer=true failed:",
+                err,
+              );
+            }
+          }
+
+          if (!alive) return;
+
+          if (managerHarvestCtxRef.current) {
+            managerHarvestCtxRef.current = {
+              ...managerHarvestCtxRef.current,
+              farmRows: farmRows || [],
+            };
+          }
+
           const firstRows = applyHarvestRows(
             hierarchy,
             agroStats,
-            [],
+            farmRows || [],
             me,
             [],
           );
           setDropdownsLoading(false);
+          setVarietyLoading(false);
           setLoading(false);
           if (firstRows.length === 0) {
             setFetchError(
               "No harvest plots found for your field officers. Check FO assignments or try again later.",
             );
+          } else {
+            setFetchError(null);
           }
 
           let lastAgroFetchAt = Date.now();
@@ -896,26 +1030,26 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
               setManagerAgroStats(fresh);
               lastAgroFetchAt = Date.now();
               if (!alive) return;
-              let farmRows = ctx.farmRows;
+              let nextFarms = ctx.farmRows;
               try {
                 const latestFarms = await getAllFarmsWithFarmerDetails({
                   force: true,
                 });
-                if (latestFarms?.length) farmRows = latestFarms;
+                if (latestFarms?.length) nextFarms = latestFarms;
               } catch {
                 /* keep previous farmRows */
               }
               if (managerHarvestCtxRef.current) {
                 managerHarvestCtxRef.current = {
                   ...managerHarvestCtxRef.current,
-                  farmRows,
+                  farmRows: nextFarms,
                   agroStats: fresh,
                 };
               }
               applyHarvestRows(
                 ctx.hierarchy,
                 fresh,
-                farmRows,
+                nextFarms,
                 ctx.me,
                 [],
                 { resetFilters: false },
@@ -928,38 +1062,6 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
               agroRefreshingRef.current = false;
             }
           };
-
-          // Background: farms pagination (was the main multi-loading delay).
-          void getAllFarmsWithFarmerDetails({ force: true })
-            .then((farmRows) => {
-              if (!alive) return;
-              if (farmRows?.length && managerHarvestCtxRef.current) {
-                managerHarvestCtxRef.current = {
-                  ...managerHarvestCtxRef.current,
-                  farmRows,
-                };
-              }
-              const enrichedRows = applyHarvestRows(
-                hierarchy,
-                agroStats,
-                farmRows || [],
-                me,
-                [],
-                { resetFilters: false },
-              );
-              if (enrichedRows.length > 0) setFetchError(null);
-            })
-            .catch((err) => {
-              if (import.meta.env.DEV) {
-                console.warn(
-                  "[Harvest] /farms/?include_farmer=true failed:",
-                  err,
-                );
-              }
-            })
-            .finally(() => {
-              if (alive) setVarietyLoading(false);
-            });
 
           // Auto-refresh agroStats every 5 minutes while Harvest stays open.
           const refreshMs = 5 * 60 * 1000;
@@ -1034,19 +1136,8 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
 
         setHierarchyMeta(hierarchy);
 
-        // Start farms/industries/factory KML while agroStats runs.
+        // Start farms/industries while agroStats runs.
         const farmsPromise = getAllFarmsWithFarmerDetails({ force: true });
-        const factoryPlotsPromise = fetchAllOwnerFactoryBoundaryPlots().catch(
-          (err) => {
-            if (import.meta.env.DEV) {
-              console.warn(
-                "[Harvest] /plots/owner-factory-boundaries/ failed:",
-                err,
-              );
-            }
-            return [] as OwnerFactoryBoundaryPlot[];
-          },
-        );
         const industriesPromise = getIndustries()
           .then((industriesRes) => {
             const data = industriesRes?.data;
@@ -1084,24 +1175,13 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
           factoryPlots: [],
         };
 
-        // First paint: map/KPIs. Keep dropdowns loading until farms fill variety.
-        const firstRows = applyHarvestRows(hierarchy, agroStats, [], me, [], {
-          resetFilters: true,
-        });
-        setLoading(false);
-        if (firstRows.length === 0) {
-          setFetchError(
-            "No harvest plots found. Check team-connect has farmers with plots, or try again later.",
-          );
-        }
-
+        // Wait for /farms/ before painting map polygons — agroStats/factory
+        // outlines are often stale after KML edit.
         try {
-          const [farmsSettled, industriesSettled, factoryPlotsSettled] =
-            await Promise.allSettled([
-              farmsPromise,
-              industriesPromise,
-              factoryPlotsPromise,
-            ]);
+          const [farmsSettled, industriesSettled] = await Promise.allSettled([
+            farmsPromise,
+            industriesPromise,
+          ]);
 
           if (!alive) return;
 
@@ -1119,11 +1199,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
               ? industriesSettled.value
               : [];
 
-          const factoryPlots =
-            factoryPlotsSettled.status === "fulfilled"
-              ? factoryPlotsSettled.value
-              : [];
-          ownerFactoryPlotsRef.current = factoryPlots || [];
+          ownerFactoryPlotsRef.current = [];
 
           const enrichedRows = applyHarvestRows(
             hierarchy,
@@ -1131,19 +1207,26 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
             farmRows || [],
             me,
             industries || [],
-            { resetFilters: false },
+            { resetFilters: true },
           );
           if (ownerHarvestCtxRef.current) {
             ownerHarvestCtxRef.current = {
               ...ownerHarvestCtxRef.current,
               farmRows: farmRows || [],
               industries: industries || [],
-              factoryPlots: factoryPlots || [],
+              factoryPlots: [],
             };
           }
-          if (enrichedRows.length > 0) setFetchError(null);
+          if (enrichedRows.length === 0) {
+            setFetchError(
+              "No harvest plots found. Check team-connect has farmers with plots, or try again later.",
+            );
+          } else {
+            setFetchError(null);
+          }
         } finally {
           if (alive) {
+            setLoading(false);
             setDropdownsLoading(false);
             setVarietyLoading(false);
           }
@@ -1154,18 +1237,13 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
           const applyRows = applyHarvestRowsRef.current;
           if (!alive || !ctx || !applyRows) return;
           try {
-            const [farmRows, factoryPlots] = await Promise.all([
-              getAllFarmsWithFarmerDetails({ force: true }),
-              fetchAllOwnerFactoryBoundaryPlots().catch(
-                () => [] as OwnerFactoryBoundaryPlot[],
-              ),
-            ]);
+            const farmRows = await getAllFarmsWithFarmerDetails({ force: true });
             if (!alive) return;
-            ownerFactoryPlotsRef.current = factoryPlots || [];
+            ownerFactoryPlotsRef.current = [];
             ownerHarvestCtxRef.current = {
               ...ctx,
               farmRows: farmRows || [],
-              factoryPlots: factoryPlots || [],
+              factoryPlots: [],
             };
             applyRows(
               ctx.hierarchy,
@@ -1258,13 +1336,6 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
     void (async () => {
       try {
         const farmRows = await getAllFarmsWithFarmerDetails({ force: true });
-        let factoryPlots: OwnerFactoryBoundaryPlot[] = [];
-        if (!isManagerMode) {
-          factoryPlots = await fetchAllOwnerFactoryBoundaryPlots().catch(
-            () => [] as OwnerFactoryBoundaryPlot[],
-          );
-          ownerFactoryPlotsRef.current = factoryPlots || [];
-        }
         if (isManagerMode && managerHarvestCtxRef.current) {
           managerHarvestCtxRef.current = {
             ...managerHarvestCtxRef.current,
@@ -1272,10 +1343,11 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
           };
         }
         if (!isManagerMode && ownerHarvestCtxRef.current) {
+          ownerFactoryPlotsRef.current = [];
           ownerHarvestCtxRef.current = {
             ...ownerHarvestCtxRef.current,
             farmRows: farmRows || [],
-            factoryPlots: factoryPlots || [],
+            factoryPlots: [],
           };
         }
         applyRows(
@@ -1758,52 +1830,6 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
     return null;
   }
 
-  const FilterDropdown: React.FC<FilterDropdownProps & { isLoading?: boolean }> = ({
-    label,
-    value,
-    options,
-    onChange,
-    isLoading,
-  }) => (
-    <div className="mb-6">
-      <div className="flex items-center gap-2 mb-2">
-        <label className="block text-sm font-medium text-gray-700">
-          {label}
-        </label>
-        {isLoading && (
-          <Loader2 className="w-3 h-3 animate-spin text-blue-500" />
-        )}
-      </div>
-      <div className="relative box-border">
-        <select
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          disabled={isLoading}
-          className={`w-full bg-white border rounded-lg px-3 py-2 pr-10 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent appearance-none transition-colors ${
-            isLoading
-              ? "border-gray-200 text-gray-400 cursor-wait bg-gray-50"
-              : "border-gray-300 text-gray-900"
-          }`}
-        >
-          {isLoading ? (
-            <option>Loading…</option>
-          ) : (
-            options.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))
-          )}
-        </select>
-        {isLoading ? (
-          <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-blue-400 animate-spin pointer-events-none" />
-        ) : (
-          <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 pointer-events-none" />
-        )}
-      </div>
-    </div>
-  );
-
   const isInitialLoad = loading && rawData.length === 0;
 
   const SkeletonBlock: React.FC<{ className?: string }> = ({ className }) => (
@@ -1933,7 +1959,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           <div className="lg:col-span-3 space-y-2">
-            <div className="bg-white rounded-xl p-3 border border-gray-100 shadow-sm">
+            <div className="bg-white rounded-xl p-3 border border-gray-100 shadow-sm overflow-visible">
               {/* Filter panel header */}
               <div className="flex items-center gap-2 mb-4 pb-3 border-b border-gray-100">
                 <span className="text-sm font-semibold text-gray-700">Filters</span>

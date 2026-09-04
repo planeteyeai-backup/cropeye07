@@ -1496,7 +1496,22 @@ function acresFromOwnerFactoryPlot(
   return metrics?.acres != null && metrics.acres > 0 ? metrics.acres : null;
 }
 
-/** Prefer Django /farms/ saved KML (what farmer just edited) over factory-boundaries. */
+/** Marker only — never use hierarchy/Events polygons (those stay stale after KML save). */
+function resolveCenterPointOnly(
+  plot: any,
+  farm: any,
+  farmer: any,
+  fo: any,
+): ReturnType<typeof centerFromCoordinates> {
+  for (const source of [plot, farm, farmer, fo]) {
+    const point = pointCoordsFromRecord(source);
+    const center = centerFromCoordinates(point);
+    if (center) return center;
+  }
+  return null;
+}
+
+/** Prefer Django /farms/ saved KML (what farmer just edited) over factory/agro. */
 function resolveCenterPreferringDjango(
   agro: any,
   plot: any,
@@ -1508,6 +1523,7 @@ function resolveCenterPreferringDjango(
   ownerFactoryPlots?: OwnerFactoryBoundaryPlot[] | null,
 ): ReturnType<typeof centerFromCoordinates> {
   const keys = plotKeys ?? [];
+  const farmsHydrated = Array.isArray(farmRows) && farmRows.length > 0;
 
   // 1) Just-edited polygon in session (My Profile / EditPlotBoundaryModal).
   for (const key of keys) {
@@ -1519,11 +1535,18 @@ function resolveCenterPreferringDjango(
     }
   }
 
-  // 2) Django /farms/ — source of truth after KML save.
+  // 2) Django /farms/ — source of truth after KML save (my-profile PATCH).
   const fromDjango = resolveCenterFromDjangoFarmRows(keys, farmRows);
   if (fromDjango?.boundary?.length) return fromDjango;
 
-  // 3) Owner factory-boundaries — only when farms has no polygon yet.
+  // After farms are loaded, never draw stale hierarchy / factory / agro polygons.
+  // Those APIs do not update when the farmer edits KML via /farms/my-profile/.
+  // Marker-only until a matching /farms/ polygon exists for this plot key.
+  if (farmsHydrated) {
+    return resolveCenterPointOnly(plot, farm, farmer, fo);
+  }
+
+  // 3) Before farms hydrate: optional factory-boundaries, then agro (first paint only).
   const fromOwner = resolveCenterFromOwnerFactoryPlots(keys, ownerFactoryPlots);
   if (fromOwner?.boundary?.length) return fromOwner;
   if (fromOwner) return fromOwner;
@@ -1988,6 +2011,7 @@ export function enrichHierarchyWithFarmRows(
     if (plots.length > 0) {
       const nextPlots = plots.map((plot: any) => {
         const keys = plotKeysForContext(plot, plot?.farms?.[0] ?? null);
+        // Never fall back to farmsForFarmer[0] — that paints another plot's KML.
         let match =
           keys.map((key) => byPlotKey.get(key)).find(Boolean) ??
           farmsForFarmer.find((row) => {
@@ -1999,8 +2023,7 @@ export function enrichHierarchyWithFarmRows(
               String(row?.plot_number ?? "") === String(num)
             );
           }) ??
-          farmsForFarmer[0] ??
-          null;
+          (farmsForFarmer.length === 1 ? farmsForFarmer[0] : null);
 
         if (!match) return plot;
 
