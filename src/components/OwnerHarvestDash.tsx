@@ -980,7 +980,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
             document.removeEventListener("visibilitychange", onVisible);
           });
           return;
-        }
+        } 
 
         // ── Owner path: me + team once; agroStats reuses hierarchy; farms parallel for variety ──
         let agroStats: Record<string, unknown> = {};
