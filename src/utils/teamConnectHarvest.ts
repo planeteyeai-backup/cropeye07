@@ -1387,28 +1387,43 @@ function resolveCenter(
 }
 
 /** Match Django /farms/ row by plot key and return saved KML polygon center. */
+function findDjangoFarmRow(
+  plotKeys: string[],
+  farmRows: any[] | null | undefined,
+): any | null {
+  if (!farmRows?.length || !plotKeys.length) return null;
+
+  const targets = new Set<string>();
+  for (const key of plotKeys) {
+    if (!key?.trim()) continue;
+    const normalized = normalizePlotKey(key);
+    if (!normalized) continue;
+    targets.add(normalized);
+    for (const c of getPlotNameCandidates(key, null)) {
+      targets.add(normalizePlotKey(c));
+    }
+  }
+  if (!targets.size) return null;
+
+  for (const farmRow of farmRows) {
+    if (farmRowPlotKeys(farmRow).some((rk) => targets.has(rk))) {
+      return farmRow;
+    }
+  }
+  return null;
+}
+
 function resolveCenterFromDjangoFarmRows(
   plotKeys: string[],
   farmRows: any[] | null | undefined,
 ): ReturnType<typeof centerFromCoordinates> {
-  if (!farmRows?.length || !plotKeys.length) return null;
+  const farmRow = findDjangoFarmRow(plotKeys, farmRows);
+  if (!farmRow) return null;
 
-  const targets = new Set(
-    plotKeys
-      .filter((key) => key?.trim())
-      .map((key) => normalizePlotKey(key)),
-  );
-  if (!targets.size) return null;
-
-  for (const farmRow of farmRows) {
-    const rowKeys = farmRowPlotKeys(farmRow);
-    if (!rowKeys.some((rk) => targets.has(rk))) continue;
-
-    const ring = polygonRingFromRecord(farmRow);
-    if (ring.length >= 3) {
-      const center = centerFromCoordinates(ring);
-      if (center) return center;
-    }
+  const ring = polygonRingFromRecord(farmRow);
+  if (ring.length >= 3) {
+    const center = centerFromCoordinates(ring);
+    if (center) return center;
   }
 
   return null;
@@ -1442,17 +1457,22 @@ function findOwnerFactoryPlot(
   factoryPlots: OwnerFactoryBoundaryPlot[] | null | undefined,
 ): OwnerFactoryBoundaryPlot | null {
   if (!factoryPlots?.length || !plotKeys.length) return null;
-  const targets = new Set(
-    plotKeys
-      .filter((key) => key != null && `${key}`.trim() !== "")
-      .map((key) => normalizePlotKey(String(key))),
-  );
+  const targets = new Set<string>();
+  for (const key of plotKeys) {
+    if (!key?.trim()) continue;
+    // Composite harvest ids like "113_3-42" — use plot part before farm id.
+    const plotPart = String(key).includes("-")
+      ? String(key).split("-")[0]
+      : String(key);
+    for (const candidate of [key, plotPart, ...getPlotNameCandidates(plotPart, null)]) {
+      const n = normalizePlotKey(candidate);
+      if (n) targets.add(n);
+    }
+  }
   if (!targets.size) return null;
 
   for (const plot of factoryPlots) {
-    if (
-      ownerFactoryPlotKeys(plot).some((key) => targets.has(key))
-    ) {
+    if (ownerFactoryPlotKeys(plot).some((key) => targets.has(key))) {
       return plot;
     }
   }
@@ -1511,7 +1531,7 @@ function resolveCenterPointOnly(
   return null;
 }
 
-/** Prefer Django /farms/ saved KML (what farmer just edited) over factory/agro. */
+/** Prefer session edit, then owner-factory-boundaries (updated KML), then /farms/. */
 function resolveCenterPreferringDjango(
   agro: any,
   plot: any,
@@ -1523,7 +1543,6 @@ function resolveCenterPreferringDjango(
   ownerFactoryPlots?: OwnerFactoryBoundaryPlot[] | null,
 ): ReturnType<typeof centerFromCoordinates> {
   const keys = plotKeys ?? [];
-  const farmsHydrated = Array.isArray(farmRows) && farmRows.length > 0;
 
   // 1) Just-edited polygon in session (My Profile / EditPlotBoundaryModal).
   for (const key of keys) {
@@ -1535,23 +1554,20 @@ function resolveCenterPreferringDjango(
     }
   }
 
-  // 2) Django /farms/ — source of truth after KML save (my-profile PATCH).
+  // 2) GET /plots/owner-factory-boundaries/ — updated factory KML for owner map.
+  const fromOwner = resolveCenterFromOwnerFactoryPlots(keys, ownerFactoryPlots);
+  if (fromOwner?.boundary?.length) return fromOwner;
+
+  // 3) Django /farms/ — fallback when factory-boundaries has no ring.
   const fromDjango = resolveCenterFromDjangoFarmRows(keys, farmRows);
   if (fromDjango?.boundary?.length) return fromDjango;
 
-  // After farms are loaded, never draw stale hierarchy / factory / agro polygons.
-  // Those APIs do not update when the farmer edits KML via /farms/my-profile/.
-  // Marker-only until a matching /farms/ polygon exists for this plot key.
-  if (farmsHydrated) {
-    return resolveCenterPointOnly(plot, farm, farmer, fo);
-  }
-
-  // 3) Before farms hydrate: optional factory-boundaries, then agro (first paint only).
-  const fromOwner = resolveCenterFromOwnerFactoryPlots(keys, ownerFactoryPlots);
-  if (fromOwner?.boundary?.length) return fromOwner;
-  if (fromOwner) return fromOwner;
-
-  return resolveCenter(agro, plot, farm, farmer, fo);
+  // Marker only — do not fall back to stale agro/hierarchy polygons.
+  const point =
+    resolveCenterPointOnly(plot, farm, farmer, fo) ??
+    resolveCenterPointOnly(agro, null, null, null) ??
+    (fromOwner && !fromOwner.boundary?.length ? fromOwner : null);
+  return point;
 }
 
 function computeDaysSincePlantation(plantationDate: unknown): number {
@@ -2243,40 +2259,27 @@ function acresFromDjangoFarmRows(
   plotKeys: string[],
   farmRows: any[] | null | undefined,
 ): number | null {
-  if (!farmRows?.length || !plotKeys.length) return null;
+  const farmRow = findDjangoFarmRow(plotKeys, farmRows);
+  if (!farmRow) return null;
 
-  const targets = new Set(
-    plotKeys
-      .filter((key) => key?.trim())
-      .map((key) => normalizePlotKey(key)),
-  );
-  if (!targets.size) return null;
-
-  for (const farmRow of farmRows) {
-    const rowKeys = farmRowPlotKeys(farmRow);
-    if (!rowKeys.some((rk) => targets.has(rk))) continue;
-
-    // Prefer geometry acres — Django area_size often stays at the pre-edit value.
-    const ring = polygonRingFromRecord(farmRow);
-    if (ring.length >= 3) {
-      const metrics = calculateAreaMetricsFromGeometry({
-        type: "Polygon",
-        coordinates: [ring],
-      });
-      if (metrics?.acres != null && metrics.acres > 0) {
-        return metrics.acres;
-      }
+  // Prefer geometry acres — Django area_size often stays at the pre-edit value.
+  const ring = polygonRingFromRecord(farmRow);
+  if (ring.length >= 3) {
+    const metrics = calculateAreaMetricsFromGeometry({
+      type: "Polygon",
+      coordinates: [ring],
+    });
+    if (metrics?.acres != null && metrics.acres > 0) {
+      return metrics.acres;
     }
-
-    const fromField =
-      parsePositiveArea(farmRow?.area_acres) ??
-      parsePositiveArea(farmRow?.area_size_numeric) ??
-      parsePositiveArea(farmRow?.area_size) ??
-      parsePositiveArea(farmRow?.area);
-    if (fromField != null) return fromField;
   }
 
-  return null;
+  return (
+    parsePositiveArea(farmRow?.area_acres) ??
+    parsePositiveArea(farmRow?.area_size_numeric) ??
+    parsePositiveArea(farmRow?.area_size) ??
+    parsePositiveArea(farmRow?.area)
+  );
 }
 
 /** Plot acres: drawn/Django KML first; agroStats last (often stale after edit). */
@@ -2733,7 +2736,7 @@ export type BuildOwnerHarvestRowsOptions = {
   factoryCenter?: { lat: number; lng: number } | null;
   /** /farms/?include_farmer=true rows — used to fill Variety when hierarchy has null crop_variety. */
   farmRows?: any[] | null;
-  /** GET /plots/owner-factory-boundaries/ polygons — preferred updated KML. */
+  /** GET /plots/owner-factory-boundaries/ — preferred updated KML for owner map. */
   ownerFactoryPlots?: OwnerFactoryBoundaryPlot[] | null;
 };
 
@@ -2875,9 +2878,7 @@ export function buildOwnerHarvestRows(
     seenPlotKeys.add(normalized);
   }
 
-  // Do not inject factory-only orphan plots here — that mixed stale
-  // owner-factory-boundaries KML/area into the harvest map.
-
+  // Prefer owner-factory-boundaries KML when present; /farms/ fills gaps only.
   return backfillHarvestRowIds(rows, hierarchy)
     .map((row) => {
       if (row.Variety?.trim() || !varietyIndex.size) return row;
@@ -2888,8 +2889,85 @@ export function buildOwnerHarvestRows(
       );
       return fromFarms ? { ...row, Variety: fromFarms } : row;
     })
+    .map((row) => applyDjangoFarmBoundaryToHarvestRow(row, farmRows))
+    .map((row) =>
+      applyOwnerFactoryBoundaryToHarvestRow(row, ownerFactoryPlots),
+    )
     .map((row) => applySavedBoundaryOverrideToHarvestRow(row))
     .map((row) => syncHarvestRowAreaToDrawnBoundary(row));
+}
+
+/**
+ * Apply Django /farms/ KML when the row still has no polygon.
+ */
+function applyDjangoFarmBoundaryToHarvestRow(
+  row: TeamConnectHarvestRow,
+  farmRows: any[] | null | undefined,
+): TeamConnectHarvestRow {
+  if (!farmRows?.length) return row;
+  if ((row.boundaryCoordinates?.length ?? 0) >= 3) return row;
+
+  const keys = [row.id, row["Plot No"]].filter(Boolean).map(String);
+  const farmRow = findDjangoFarmRow(keys, farmRows);
+  if (!farmRow) return row;
+
+  const ring = polygonRingFromRecord(farmRow);
+  if (ring.length < 3) return row;
+
+  const center = centerFromCoordinates(ring);
+  if (!center?.boundary?.length) return row;
+
+  const acres =
+    calculateAreaMetricsFromGeometry({
+      type: "Polygon",
+      coordinates: [ring],
+    })?.acres ?? null;
+
+  return {
+    ...row,
+    Latitude: center.lat,
+    Longitude: center.lng,
+    boundaryCoordinates: center.boundary,
+    ...(acres != null && acres > 0
+      ? { "Area (acre)": Number(acres.toFixed(2)) }
+      : {}),
+  };
+}
+
+/**
+ * Prefer updated owner-factory-boundaries KML over /farms/ when both exist.
+ */
+function applyOwnerFactoryBoundaryToHarvestRow(
+  row: TeamConnectHarvestRow,
+  factoryPlots: OwnerFactoryBoundaryPlot[] | null | undefined,
+): TeamConnectHarvestRow {
+  if (!factoryPlots?.length) return row;
+
+  const keys = [row["Plot No"], row.id].filter(Boolean).map(String);
+  const plot = findOwnerFactoryPlot(keys, factoryPlots);
+  if (!plot) return row;
+
+  const ring = polygonRingFromRecord(plot);
+  if (ring.length < 3) return row;
+
+  const center = centerFromCoordinates(ring);
+  if (!center?.boundary?.length) return row;
+
+  const acres =
+    calculateAreaMetricsFromGeometry({
+      type: "Polygon",
+      coordinates: [ring],
+    })?.acres ?? null;
+
+  return {
+    ...row,
+    Latitude: center.lat,
+    Longitude: center.lng,
+    boundaryCoordinates: center.boundary,
+    ...(acres != null && acres > 0
+      ? { "Area (acre)": Number(acres.toFixed(2)) }
+      : {}),
+  };
 }
 
 /**

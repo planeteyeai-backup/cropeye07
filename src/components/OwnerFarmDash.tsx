@@ -1453,13 +1453,17 @@ const OwnerFarmDash: React.FC = () => {
         })();
       }
 
-      // When harvest status arrives, update growthStage without blocking render.
+      // Prefer agroStats Sugarcane_Status; do not overwrite Growing with harvest "Ready to harvest".
       harvestPromise.then(({ harvestStatus: hs }) => {
         if (!hs) return;
-        setMetrics((prev) => ({
-          ...prev,
-          growthStage: hs || prev.growthStage,
-        }));
+        setMetrics((prev) => {
+          const agro = prev.growthStage?.trim();
+          if (agro) return prev;
+          return {
+            ...prev,
+            growthStage: hs,
+          };
+        });
       });
 
       // Step 6: Fetch additional data in parallel with shorter timeouts

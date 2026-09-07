@@ -335,11 +335,43 @@
   text-align: left;
 }
 
-/* Flutter ListView: exactly 7 day cards visible; scroll for the rest */
+.moisture-hourly-chart {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 180px;
+  gap: 4px;
+}
+
+.moisture-hourly-chart--compact {
+  min-height: 140px;
+}
+
+.moisture-hourly-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.85rem;
+  font-size: 11px;
+  color: #475569;
+  padding: 0 2px;
+}
+
+.moisture-hourly-stats b {
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.moisture-hourly-chart-plot {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+}
+
+/* Flutter ListView: week fills row; month scrolls ~7 at a time */
 .moisture-diverging-scroll--flutter {
   justify-content: flex-start;
   gap: 0.35rem;
-  padding: 0 4px;
+  padding: 0 2px;
   scroll-snap-type: x proximity;
   scrollbar-width: thin;
   overflow-x: auto;
@@ -347,7 +379,6 @@
 }
 
 .moisture-diverging-day--flutter {
-  /* 7 columns fit in the viewport; remaining days scroll */
   flex: 0 0 calc((100% - 6 * 0.35rem) / 7);
   width: calc((100% - 6 * 0.35rem) / 7);
   min-width: calc((100% - 6 * 0.35rem) / 7);
@@ -358,24 +389,156 @@
   border-width: 1.5px;
   border-style: solid;
   box-sizing: border-box;
+  /* Column layout: dot → value → bars → date (no overlap) */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 2px 3px 4px;
 }
 
 .moisture-diverging-day--flutter .moisture-diverging-bar {
-  width: 36px;
-  margin-left: -18px;
+  left: 50%;
+  width: 28px;
+  max-width: 55%;
+  margin-left: 0;
+  transform: translateX(-50%);
   border-radius: 5px;
 }
 
 .moisture-diverging-day--flutter .moisture-diverging-label {
   font-size: 11px;
-  margin-bottom: 4px;
+  margin-top: 4px;
+  margin-bottom: 0;
+  min-height: 1.25rem;
+  flex-shrink: 0;
 }
 
-/* Day tab: one card can use a bit more space */
-.moisture-diverging-scroll--flutter[data-range="day"] .moisture-diverging-day--flutter {
-  flex: 0 0 min(100%, 88px);
-  width: min(100%, 88px);
-  min-width: min(100%, 88px);
+/* Week surplus-only: bars grow from bottom and fill the track */
+.moisture-diverging-scroll--fill-bottom .moisture-diverging-track--fill {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  overflow: hidden;
+}
+
+.moisture-diverging-scroll--fill-bottom .moisture-diverging-bar.is-absolute {
+  position: relative;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  top: auto;
+  transform: none;
+  width: 28px;
+  max-width: 55%;
+  margin-left: 0;
+  border-radius: 5px 5px 4px 4px;
+  flex-shrink: 0;
+}
+
+/* Week: bars fill row like hourly — no max-width / space-around gaps (Month unchanged) */
+.moisture-diverging-scroll--flutter[data-range="week"],
+.moisture-diverging-scroll--flutter[data-range="week"].moisture-diverging-scroll--full,
+.moisture-diverging-scroll--flutter[data-range="week"].moisture-diverging-scroll--medium,
+.moisture-diverging-scroll--flutter[data-range="week"].moisture-diverging-scroll--compact {
+  gap: 3px;
+  justify-content: stretch !important;
+  overflow-x: hidden;
+  padding: 0;
+  width: 100%;
+}
+
+.moisture-diverging-scroll--flutter[data-range="week"] .moisture-diverging-day,
+.moisture-diverging-scroll--flutter[data-range="week"] .moisture-diverging-day--flutter,
+.irrigation-card.irrigation-card--full
+  .moisture-diverging-scroll--flutter[data-range="week"]
+  .moisture-diverging-day,
+.irrigation-card.irrigation-card--medium
+  .moisture-diverging-scroll--flutter[data-range="week"]
+  .moisture-diverging-day,
+.irrigation-card.irrigation-card--compact
+  .moisture-diverging-scroll--flutter[data-range="week"]
+  .moisture-diverging-day {
+  flex: 1 1 0 !important;
+  width: auto !important;
+  min-width: 0 !important;
+  max-width: none !important;
+  margin: 0;
+  padding: 2px 0 4px;
+}
+
+.moisture-diverging-scroll--flutter[data-range="week"] .moisture-diverging-track {
+  width: 100%;
+}
+
+.moisture-diverging-scroll--flutter[data-range="week"] .moisture-diverging-baseline {
+  left: 0;
+  right: 0;
+}
+
+.moisture-diverging-scroll--flutter[data-range="week"] .moisture-diverging-bar,
+.moisture-diverging-scroll--flutter[data-range="week"]
+  .moisture-diverging-bar.is-absolute,
+.moisture-diverging-scroll--flutter[data-range="week"]
+  .moisture-diverging-day--flutter
+  .moisture-diverging-bar,
+.moisture-diverging-scroll--flutter[data-range="week"].moisture-diverging-scroll--fill-bottom
+  .moisture-diverging-bar.is-absolute {
+  left: 0 !important;
+  right: 0;
+  width: 100% !important;
+  max-width: none !important;
+  margin-left: 0 !important;
+  transform: none !important;
+  border-radius: 4px;
+}
+
+.moisture-diverging-scroll--flutter[data-range="week"] .moisture-diverging-label {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* Month: keep slim bars, 7 visible + scroll */
+.moisture-diverging-scroll--flutter[data-range="month"] .moisture-diverging-bar {
+  width: 24px;
+  max-width: 55%;
+}
+
+/* Day: hourly bars fill the full width (Flutter H0…Hn) */
+.moisture-diverging-scroll--flutter[data-range="day"],
+.moisture-diverging-scroll--hourly {
+  gap: 2px;
+  justify-content: stretch;
+  overflow-x: auto;
+  padding: 0;
+}
+
+.moisture-diverging-scroll--flutter[data-range="day"] .moisture-diverging-day--hour,
+.moisture-diverging-day--hour {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 10px;
+  max-width: none;
+  margin: 0;
+  border: none;
+  background: transparent;
+  padding: 0 1px;
+  cursor: default;
+}
+
+.moisture-diverging-day--hour .moisture-diverging-bar {
+  width: 100%;
+  max-width: none;
+  left: 0;
+  margin-left: 0;
+  transform: none;
+  border-radius: 3px;
+}
+
+.moisture-diverging-day--hour .moisture-diverging-label {
+  font-size: 9px;
+  margin-bottom: 2px;
+  min-height: 1rem;
 }
 
 /* Month chart: only ~7 days visible; scroll horizontally for the rest */

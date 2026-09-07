@@ -48,10 +48,6 @@ function etoLossKl(etoLossLiters: number): number {
   return Math.max(0, Number(etoLossLiters) || 0) / 1000;
 }
 
-function formatKl(value: number): string {
-  return `${(Number(value) || 0).toFixed(1)} kL`;
-}
-
 /** Calendar day in Asia/Kolkata: today minus N days → YYYY-MM-DD. */
 function istDayOffset(daysBack: number): string {
   const today = todayIsoInTz();
@@ -543,7 +539,7 @@ const IrrigationSchedule: React.FC = () => {
       {/* Slim title bar */}
       <div className="bg-green-600 text-white px-2 py-1 flex flex-col items-center justify-center shrink-0 gap-0.5">
         <h2 className="text-xs font-semibold text-center leading-tight">
-          Past 7-Day Irrigation /acre
+          Past 7-Day Irrigation /Acre
         </h2>
         {dateRangeLabel && (
           <p className="text-[9px] text-green-100 leading-tight">{dateRangeLabel}</p>
@@ -554,9 +550,9 @@ const IrrigationSchedule: React.FC = () => {
         {/* Header row */}
         <div className="irrigation-schedule-grid irrigation-schedule-grid--head shrink-0 rounded bg-green-100 px-2 py-0.5 text-[9px] font-semibold text-gray-700">
           <span>Date</span>
-          <span>ETO Loss</span>
-          <span>Rain</span>
-          <span>Irrigation Need</span>
+          <span>ETO Loss (mm)</span>
+          <span>Rain (mm)</span>
+          <span>Irrigation needed (kL)</span>
         </div>
 
         {/* 7 data rows — flex-1 so they share space equally, no scroll */}
@@ -596,7 +592,7 @@ const IrrigationSchedule: React.FC = () => {
                 ) : (
                   <>
                     <span className="text-[11px] font-semibold text-gray-800 whitespace-nowrap">
-                      {Number(day.etDisplayed || 0).toFixed(1)} mm
+                      {Number(day.etDisplayed || 0).toFixed(1)}
                     </span>
                     <span
                       className={`inline-block rounded px-1 py-0.5 text-[11px] font-medium leading-none ${getETRangeColor(day.etRange)}`}
@@ -609,7 +605,7 @@ const IrrigationSchedule: React.FC = () => {
 
               <div className="flex items-center gap-0.5 font-semibold text-sky-700 whitespace-nowrap">
                 <CloudRain className="h-2.5 w-2.5 shrink-0 text-sky-600" />
-                {Number(day.rainfall || 0).toFixed(1)} mm
+                {Number(day.rainfall || 0).toFixed(1)}
               </div>
 
               <div
@@ -619,7 +615,7 @@ const IrrigationSchedule: React.FC = () => {
                     : "text-emerald-800"
                 }`}
               >
-                {formatKl(day.irrigationNeedKl ?? 0)}
+                {(Number(day.irrigationNeedKl) || 0).toFixed(1)}
               </div>
             </div>
             ))
@@ -631,11 +627,11 @@ const IrrigationSchedule: React.FC = () => {
         <div className="irrigation-schedule-grid irrigation-schedule-grid--total shrink-0 rounded border border-green-200 bg-green-50 px-2 py-0.5 text-[9px] font-semibold">
           <span className="text-gray-800">7-Day Total</span>
           <span className="text-gray-700 whitespace-nowrap">
-            {totalEtoMm.toFixed(1)} mm
+            {totalEtoMm.toFixed(1)}
           </span>
-          <span className="text-sky-700 whitespace-nowrap">{totalRainMm.toFixed(1)} mm</span>
+          <span className="text-sky-700 whitespace-nowrap">{totalRainMm.toFixed(1)}</span>
           <span className="text-emerald-800 whitespace-nowrap">
-            {formatKl(totalIrrigationNeedKl)}
+            {totalIrrigationNeedKl.toFixed(1)}
           </span>
         </div>
         )}

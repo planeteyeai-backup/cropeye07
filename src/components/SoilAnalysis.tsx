@@ -120,7 +120,6 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [npkUnavailable, setNpkUnavailable] = useState(false);
   const [reportTab, setReportTab] = useState<"recommendation" | "analysis" | "chemical">("recommendation");
-  const [showDetailCards, setShowDetailCards] = useState(true);
   const [mittiRec, setMittiRec] = useState<MittisenseRecommendation | null>(null);
   const [mittiSoil, setMittiSoil] = useState<MittisenseSoilAnalysis | null>(null);
   const [mittiLoading, setMittiLoading] = useState(false);
@@ -893,17 +892,7 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
     },
   );
 
-  // Soil Analysis tab: reuse Recommendation apply lines (first product per nutrient)
-  const applyHeadlineBySymbol = (
-    symbol: "N" | "P" | "K",
-  ): string | undefined => {
-    const card = recommendationMetrics.find((m) => m.symbol === symbol);
-    return card?.applyHeadline;
-  };
-
-  // In-chemical: N / P / K names + inchemical_* values only.
-  // Product names (Urea/MOP/SSP/FYM) and Apply lines stay on Recommendation only.
-  // Fill remaining slots with soil metrics to keep a full 9-card grid.
+  // In-chemical: N / P / K values only — no Required/Apply badge (previous behavior)
   const chemicalMetrics: NutrientData[] = (["N", "P", "K"] as const).map(
     (symbol) => {
       const value =
@@ -949,17 +938,6 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
       optimalRange: "",
       percentage: 0,
     };
-  });
-
-  // Soil Analysis N/P/K: keep soil values, put apply headline under matching cards (like Recommendation)
-  const analysisMetrics: NutrientData[] = metrics.map((metric) => {
-    if (metric.symbol === "N" || metric.symbol === "P" || metric.symbol === "K") {
-      return {
-        ...metric,
-        applyHeadline: applyHeadlineBySymbol(metric.symbol),
-      };
-    }
-    return metric;
   });
 
   // NPK first; pad with soil metrics up to 9 cards
@@ -1064,7 +1042,7 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
         <div className={`flex flex-wrap items-center justify-between gap-3 border-b border-emerald-900/5 bg-white/70 backdrop-blur ${compact ? "px-3 py-2.5" : "px-4 py-4 sm:px-6 sm:py-5"}`}>
           <div className="flex flex-wrap items-center gap-2 sm:gap-3 min-w-0">
             <h2 className={`${compact ? "text-xl" : "text-lg sm:text-2xl"} font-bold tracking-tight text-emerald-950`}>
-              Soil Analysis Report
+              Soil Nutrients Analytics
             </h2>
             {plotDisplayName && (
               <span className="shrink-0 rounded-full bg-emerald-700 px-2.5 py-1 text-[11px] font-semibold text-white">
@@ -1076,34 +1054,8 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
             </span>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              role="switch"
-              aria-checked={showDetailCards}
-              aria-label="Show detail cards"
-              onClick={() => setShowDetailCards((v) => !v)}
-              className="inline-flex h-9 items-center gap-2 rounded-full border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-1"
-            >
-              <span
-                className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
-                  showDetailCards ? "bg-emerald-600" : "bg-slate-300"
-                }`}
-              >
-                <span
-                  className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
-                    showDetailCards ? "left-4" : "left-0.5"
-                  }`}
-                />
-              </span>
-              <span className="leading-none">Detail cards</span>
-            </button>
-            <button
-              type="button"
-              title="Download report"
-              className={`shrink-0 inline-flex items-center justify-center rounded-full bg-emerald-700 text-white shadow-sm transition hover:bg-emerald-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 ${compact ? "p-1.5" : "p-2"}`}
-            >
-              <Download className="w-4 h-4" aria-hidden />
-            </button>
+              {/* <Download className="w-4 h-4" aria-hidden /> */}
+            {/* </button> */}
           </div>
         </div>
 
@@ -1189,7 +1141,6 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
                 <p className="text-center text-xs text-amber-700">{mittiError}</p>
               )}
 
-              {showDetailCards && (
               <div className={`grid grid-cols-1 ${compact ? "gap-3" : "gap-4"} sm:grid-cols-2 lg:grid-cols-3`}>
                 {detailCardMetrics.map((metric, index) => {
                   const isNpkOrCec =
@@ -1270,7 +1221,6 @@ const SoilAnalysis: React.FC<SoilAnalysisProps> = ({
                   );
                 })}
               </div>
-              )}
             </div>
           )}
         </div>

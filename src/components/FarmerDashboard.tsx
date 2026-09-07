@@ -212,6 +212,27 @@ function toNumberOrNull(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/** Prefer agroStats crop status (Growing) over sugarcane-harvest "Ready to harvest". */
+function resolveCropStatus(
+  agroPlot: any,
+  harvestStatus: string | null | undefined,
+): string | null {
+  const agroRaw =
+    agroPlot?.Sugarcane_Status ??
+    agroPlot?.sugarcane_status ??
+    agroPlot?.crop_status ??
+    agroPlot?.features?.[0]?.properties?.Sugarcane_Status ??
+    agroPlot?.features?.[0]?.properties?.harvest_status;
+  const agro =
+    typeof agroRaw === "string" && agroRaw.trim() ? agroRaw.trim() : null;
+  const harvest =
+    typeof harvestStatus === "string" && harvestStatus.trim()
+      ? harvestStatus.trim()
+      : null;
+  if (agro) return agro;
+  return harvest;
+}
+
 function lookupAgroPlotData(
   agroStats: Record<string, any> | null | undefined,
   plotKey: string,
@@ -710,7 +731,7 @@ const FarmerDashboard: React.FC = () => {
         biomass: calculatedBiomass,
         totalBiomass: totalBiomassForMetric,
         daysToHarvest: toNumberOrNull(currentPlotData?.days_to_harvest),
-        growthStage: harvestStatus || currentPlotData?.Sugarcane_Status || null,
+        growthStage: resolveCropStatus(currentPlotData, harvestStatus),
         soilPH:
           toNumberOrNull(currentPlotData?.soil?.phh2o) ??
           toNumberOrNull(currentPlotData?.soil?.ph_h2o),

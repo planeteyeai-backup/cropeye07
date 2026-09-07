@@ -763,7 +763,10 @@ const OfficerDashboard: React.FC = () => {
           sugarYieldMean: sugarYieldMeanValue,
           daysToHarvest: currentPlotData?.days_to_harvest ?? null,
           growthStage:
-            harvestStatus || currentPlotData?.Sugarcane_Status || null,
+            currentPlotData?.Sugarcane_Status ||
+            currentPlotData?.sugarcane_status ||
+            harvestStatus ||
+            null,
           soilPH: toNumberOrNull(currentPlotData?.soil?.phh2o),
           organicCarbonDensity:
             currentPlotData?.soil?.organic_carbon_stock != null

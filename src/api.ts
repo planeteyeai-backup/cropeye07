@@ -45,6 +45,8 @@ let myFieldOfficersCache: { res: any; ts: number } | null = null;
 
 /** Full /farms/?include_farmer=true pagination — one pass shared by Harvest + prefetch. */
 let farmsAllInFlight: Promise<any[]> | null = null;
+/** Bumps on each force refresh so a stale in-flight paginate cannot overwrite fresh cache. */
+let farmsAllFetchGeneration = 0;
 
 export const MANAGER_FIELD_OFFICERS_CACHE_KEY = "managerFieldOfficers_v1";
 export const FARMS_ALL_CACHE_KEY = "farmsWithFarmerDetails_all_v2";
@@ -569,6 +571,8 @@ export const getAllFarmsWithFarmerDetails = async (
 ): Promise<any[]> => {
   if (options?.force) {
     removeCache(FARMS_ALL_CACHE_KEY);
+    farmsAllFetchGeneration += 1;
+    farmsAllInFlight = null;
   } else {
     const cached = getCache(FARMS_ALL_CACHE_KEY, FARMS_ALL_TTL_MS);
     if (Array.isArray(cached) && cached.length > 0) {
@@ -577,19 +581,28 @@ export const getAllFarmsWithFarmerDetails = async (
     if (farmsAllInFlight) return farmsAllInFlight;
   }
 
+  const generation = farmsAllFetchGeneration;
+
   // Larger page_size → fewer round-trips (main manager Harvest delay).
-  farmsAllInFlight = getFarmsWithFarmerDetailsPaginated(30, 100)
+  const request = getFarmsWithFarmerDetailsPaginated(30, 100)
     .then((all) => {
+      // Ignore late responses from a superseded force-refresh.
+      if (generation !== farmsAllFetchGeneration) {
+        return all;
+      }
       if (Array.isArray(all) && all.length > 0) {
         setCache(FARMS_ALL_CACHE_KEY, all);
       }
       return all;
     })
     .finally(() => {
-      farmsAllInFlight = null;
+      if (generation === farmsAllFetchGeneration) {
+        farmsAllInFlight = null;
+      }
     });
 
-  return farmsAllInFlight;
+  farmsAllInFlight = request;
+  return request;
 };
 
 // Get recent farmers (field officer only — returns 403 for owner/manager)
@@ -632,15 +645,25 @@ export const fetchAllOwnerFactoryBoundaryPlots = async (): Promise<
 > => {
   try {
     const listRes = await getOwnerFactoryBoundaries();
-    const factories: OwnerFactoryRef[] = Array.isArray(
-      listRes?.data?.factories,
-    )
-      ? listRes.data.factories
+    const data = listRes?.data;
+
+    // One-shot response: plots already included (preferred).
+    if (Array.isArray(data?.plots) && data.plots.length > 0) {
+      return data.plots as OwnerFactoryBoundaryPlot[];
+    }
+    if (Array.isArray(data?.results) && data.results.length > 0) {
+      return data.results as OwnerFactoryBoundaryPlot[];
+    }
+    if (Array.isArray(data)) {
+      return data as OwnerFactoryBoundaryPlot[];
+    }
+
+    const factories: OwnerFactoryRef[] = Array.isArray(data?.factories)
+      ? data.factories
       : [];
 
     if (factories.length === 0) {
-      const nested = listRes?.data?.plots;
-      return Array.isArray(nested) ? nested : [];
+      return [];
     }
 
     const pages = await Promise.all(
@@ -662,6 +685,12 @@ export const fetchAllOwnerFactoryBoundaryPlots = async (): Promise<
     return pages.flat();
   } catch (err: any) {
     if (err?.response?.status === 403 || err?.response?.status === 404) {
+      if (import.meta.env.DEV) {
+        console.warn(
+          "[API] /plots/owner-factory-boundaries/ unavailable:",
+          err?.response?.status,
+        );
+      }
       return [];
     }
     throw err;

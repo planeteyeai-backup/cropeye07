@@ -1348,8 +1348,12 @@ const ManagerFarmDash: React.FC = () => {
           expectedYield: expectedYieldValue,
           sugarYieldMean: expectedYieldValue,
           daysToHarvest: currentPlotData?.days_to_harvest ?? null,
+          // Prefer agroStats Sugarcane_Status (Growing) over sugarcane-harvest Ready to harvest
           growthStage:
-            harvestStatus || currentPlotData?.Sugarcane_Status || null,
+            currentPlotData?.Sugarcane_Status ||
+            currentPlotData?.sugarcane_status ||
+            harvestStatus ||
+            null,
           soilPH:
             toNumberOrNull(currentPlotData?.soil?.phh2o) ??
             toNumberOrNull(currentPlotData?.soil?.ph_h2o),
