@@ -736,9 +736,9 @@
 }
 
 .water-balance-day-footer-date {
-  font-size: 13px;
-  font-weight: 800;
-  color: #1a237e;
+  font-size: 15px;
+  font-weight: 700;
+  color: #334155;
   white-space: nowrap;
 }
 
@@ -746,12 +746,16 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: 15px;
+  font-weight: 700;
   min-width: 0;
 }
 
 .water-balance-day-footer-eto {
+  font-size: 14px;
+  font-weight: 600;
   color: #64748b;
+  margin-left: 4px;
   white-space: nowrap;
 }
 

@@ -203,10 +203,7 @@ const Irrigation: React.FC<IrrigationProps> = ({
 
       <div className="card-row">
         <EvapotranspirationCard />
-        <SoilMoistureCard
-          optimalRange={[50, 60]}
-          moistGroundPercent={moistGroundPercent}
-        />
+        <SoilMoistureCard moistGroundPercent={moistGroundPercent} />
         <WaterUptakeCard />
       </div>
 

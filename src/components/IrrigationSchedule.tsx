@@ -214,7 +214,8 @@ const IrrigationSchedule: React.FC = () => {
       selectedPlot?.crop_variety ??
       selectedPlot?.crop_type?.crop_variety ??
       selectedPlot?.farms?.[0]?.crop_variety ??
-      profile?.crop_variety ??
+      selectedPlot?.farms?.[0]?.crop_type?.crop_variety ??
+      profile?.agricultural_summary?.crop_types?.[0] ??
       "sugarcane";
     setCropName(cropRaw ? String(cropRaw) : "sugarcane");
 
