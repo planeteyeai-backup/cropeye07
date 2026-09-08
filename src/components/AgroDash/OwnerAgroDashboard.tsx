@@ -771,8 +771,9 @@ const OwnerAgroDashboard: React.FC = () => {
                       )}
                     </div>
 
-                    {/* Map */}
+                    {/* Map — stable mount; avoid remount races ("already initialized") */}
                     <MapContainer
+                      key="owner-agro-map"
                       center={mapCenter}
                       zoom={15}
                       className="absolute inset-0 z-0"

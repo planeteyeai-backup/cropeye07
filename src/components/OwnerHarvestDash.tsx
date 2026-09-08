@@ -43,7 +43,7 @@ import {
   type TeamConnectHierarchy,
   type OwnerFactoryBoundaryPlot,
 } from "../utils/teamConnectHarvest";
-import React, { useState, useRef, useEffect, useMemo } from "react";
+import React, { useState, useRef, useEffect, useMemo, Component, type ReactNode } from "react";
 //import axios from "axios";
 import {
   MapPin,
@@ -83,6 +83,42 @@ import {
 import "leaflet/dist/leaflet.css";
 import { useMap } from "react-leaflet";
 
+/** Keep Leaflet init races from blanking the whole Harvest dashboard. */
+class MapSectionErrorBoundary extends Component<
+  { children: ReactNode; resetKey: string },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.warn(
+      "[OwnerHarvestDash] map section error:",
+      error,
+      info.componentStack,
+    );
+  }
+
+  componentDidUpdate(prevProps: { resetKey: string }) {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.hasError) {
+      this.setState({ hasError: false });
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex h-full min-h-[300px] items-center justify-center bg-slate-100 text-sm text-slate-600">
+          Map failed to update. Reload or change a filter to retry.
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // Chart Types
 const CHART_TYPES = {
@@ -2127,8 +2163,13 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                   </div>
                   <div ref={mapWrapperRef} className="w-full h-full">
                     {mapCenter ? (
+                      <MapSectionErrorBoundary
+                        resetKey={`harvest-${boundaryRefreshToken}`}
+                      >
                       <MapContainer
-                        key={`harvest-map-${boundaryRefreshToken}-${plotPoints.length}`}
+                        // Stable key: remounting on plotPoints.length caused
+                        // "Map container is already initialized" on owner dash.
+                        key={`harvest-map-${boundaryRefreshToken}`}
                         center={mapCenter}
                         zoom={7.5}
                         minZoom={1}
@@ -2201,6 +2242,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                           </React.Fragment>
                         ))}
                       </MapContainer>
+                      </MapSectionErrorBoundary>
                     ) : (
                       <div className="w-full h-full flex items-center justify-center bg-gray-100">
                         <div className="text-gray-500">

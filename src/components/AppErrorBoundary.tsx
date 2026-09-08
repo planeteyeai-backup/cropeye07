@@ -15,7 +15,8 @@ function isTransientDomRace(error: Error | null | undefined): boolean {
   return (
     message.includes("removeChild") ||
     message.includes("insertBefore") ||
-    message.includes("NotFoundError")
+    message.includes("NotFoundError") ||
+    message.includes("Map container is already initialized")
   );
 }
 

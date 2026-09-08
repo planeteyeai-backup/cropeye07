@@ -585,12 +585,13 @@ function applyLeafletCoords(
     React.SetStateAction<[number, number][]>
   >,
   setMapCenter: React.Dispatch<React.SetStateAction<[number, number]>>,
-  setMapKey: React.Dispatch<React.SetStateAction<number>>,
+  _setMapKey?: React.Dispatch<React.SetStateAction<number>>,
 ): boolean {
   if (coords.length === 0) return false;
   setPlotCoordinates(coords);
   setMapCenter(calculateCenterFromCoords(coords));
-  setMapKey((prev) => prev + 1);
+  // Do not remount MapContainer here — causes "Map container is already initialized".
+  // Center/polygon updates via MapAutoCenter + children instead.
   return true;
 }
 
@@ -3070,7 +3071,7 @@ const OwnerFarmDash: React.FC = () => {
               />
 
               <MapContainer
-                key={mapKey}
+                key={`owner-farm-map-${selectedPlotId || "none"}-${mapKey}`}
                 center={mapCenter}
                 zoom={16}
                 minZoom={10}
