@@ -343,6 +343,174 @@
   gap: 4px;
 }
 
+.moisture-trend-chart {
+  gap: 2px;
+}
+
+.moisture-trend-chart-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #166534;
+  letter-spacing: 0.01em;
+  padding: 0 2px 2px;
+}
+
+.moisture-stock-chart {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 4px 4px 2px;
+}
+
+.moisture-irrigation-trend-chart {
+  background: #000000;
+  border: 1px solid #1a1a1a;
+  border-radius: 12px;
+  padding: 12px 12px 8px;
+  gap: 6px;
+}
+
+.moisture-irrigation-trend-chart--farm {
+  background: #f0fdf4;
+  border: 1px solid #86efac;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+.moisture-irrigation-trend-chart--pro {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.moisture-irrigation-trend-chart--pro.is-need {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.75),
+    0 1px 2px rgba(37, 99, 235, 0.08);
+}
+
+.moisture-irrigation-ohlc {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  font-size: 11px;
+  color: #64748b;
+  white-space: nowrap;
+  line-height: 1.25;
+}
+
+.moisture-irrigation-ohlc b {
+  font-weight: 800;
+}
+
+.moisture-irrigation-trend-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 2px 2px 0;
+  font-size: 11px;
+  font-weight: 650;
+  color: #475569;
+}
+
+.moisture-irrigation-trend-legend i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-right: 4px;
+  vertical-align: -1px;
+}
+
+.moisture-irrigation-trend-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px 4px;
+}
+
+.moisture-irrigation-trend-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #ffffff;
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+}
+
+.moisture-irrigation-trend-chart--farm .moisture-irrigation-trend-title {
+  color: #14532d;
+}
+
+.moisture-irrigation-trend-sub {
+  margin-top: 3px;
+  font-size: 11px;
+  color: #a3a3a3;
+  line-height: 1.35;
+}
+
+.moisture-irrigation-trend-chart--farm .moisture-irrigation-trend-sub {
+  color: #4d7c0f;
+}
+
+.moisture-trend-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0 2px 4px;
+}
+
+.moisture-trend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #64748b;
+  border-radius: 999px;
+  padding: 0.28rem 0.65rem;
+  font-size: 0.72rem;
+  font-weight: 650;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.moisture-trend-chip-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.moisture-trend-chip-x {
+  margin-left: 0.1rem;
+  font-size: 0.95rem;
+  line-height: 1;
+  opacity: 0.85;
+}
+
+.moisture-trend-chip--required.is-active {
+  background: #0f172a;
+  border-color: #0f172a;
+  color: #ffffff;
+}
+
+.moisture-trend-chip--given.is-active {
+  background: #14532d;
+  border-color: #14532d;
+  color: #ffffff;
+}
+
+.moisture-trend-chip:not(.is-active):hover {
+  border-color: #94a3b8;
+  color: #334155;
+}
+
+.moisture-irrigation-trend-chart .moisture-hourly-chart-plot {
+  background: transparent;
+}
+
 .moisture-hourly-chart--compact {
   min-height: 140px;
 }
@@ -436,16 +604,17 @@
   flex-shrink: 0;
 }
 
-/* Week: bars fill row like hourly — no max-width / space-around gaps (Month unchanged) */
+/* Week: compact 7-day row — less empty height, tighter columns */
 .moisture-diverging-scroll--flutter[data-range="week"],
 .moisture-diverging-scroll--flutter[data-range="week"].moisture-diverging-scroll--full,
 .moisture-diverging-scroll--flutter[data-range="week"].moisture-diverging-scroll--medium,
 .moisture-diverging-scroll--flutter[data-range="week"].moisture-diverging-scroll--compact {
-  gap: 3px;
+  gap: 6px;
   justify-content: stretch !important;
   overflow-x: hidden;
-  padding: 0;
+  padding: 2px 0 0;
   width: 100%;
+  min-height: 0;
 }
 
 .moisture-diverging-scroll--flutter[data-range="week"] .moisture-diverging-day,
@@ -464,16 +633,26 @@
   min-width: 0 !important;
   max-width: none !important;
   margin: 0;
-  padding: 2px 0 4px;
+  padding: 0 2px 2px;
+  gap: 2px;
+}
+
+.moisture-diverging-scroll--flutter[data-range="week"] .moisture-diverging-dot,
+.moisture-diverging-scroll--flutter[data-range="week"] .moisture-diverging-dot-spacer {
+  width: 6px;
+  height: 6px;
+  margin-bottom: 0;
 }
 
 .moisture-diverging-scroll--flutter[data-range="week"] .moisture-diverging-track {
   width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .moisture-diverging-scroll--flutter[data-range="week"] .moisture-diverging-baseline {
-  left: 0;
-  right: 0;
+  left: 12%;
+  right: 12%;
 }
 
 .moisture-diverging-scroll--flutter[data-range="week"] .moisture-diverging-bar,
@@ -484,24 +663,67 @@
   .moisture-diverging-bar,
 .moisture-diverging-scroll--flutter[data-range="week"].moisture-diverging-scroll--fill-bottom
   .moisture-diverging-bar.is-absolute {
-  left: 0 !important;
-  right: 0;
-  width: 100% !important;
-  max-width: none !important;
+  left: 50% !important;
+  right: auto;
+  width: 42% !important;
+  max-width: 22px !important;
+  min-width: 10px;
   margin-left: 0 !important;
-  transform: none !important;
+  transform: translateX(-50%) !important;
   border-radius: 4px;
 }
 
-.moisture-diverging-scroll--flutter[data-range="week"] .moisture-diverging-label {
-  font-size: 11px;
-  font-weight: 600;
+.moisture-diverging-scroll--flutter[data-range="week"].moisture-diverging-scroll--fill-bottom
+  .moisture-diverging-bar.is-absolute {
+  left: auto !important;
+  transform: none !important;
+  width: 42% !important;
+  max-width: 22px !important;
 }
 
-/* Month: keep slim bars, 7 visible + scroll */
-.moisture-diverging-scroll--flutter[data-range="month"] .moisture-diverging-bar {
+.moisture-diverging-scroll--flutter[data-range="week"] .moisture-diverging-label {
+  font-size: 10px;
+  font-weight: 650;
+  margin-top: 2px;
+  min-height: 1rem;
+  line-height: 1.1;
+}
+
+.moisture-diverging-remain {
+  display: block;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.1;
+  margin-top: 1px;
+  white-space: nowrap;
+}
+
+.water-balance-chart-hint--compact {
+  margin: 0 0 2px;
+  line-height: 1.2;
+}
+
+/* Month/Yearly: keep slim bars, scroll for long ranges */
+.moisture-diverging-scroll--flutter[data-range="month"] .moisture-diverging-bar,
+.moisture-diverging-scroll--flutter[data-range="yearly"] .moisture-diverging-bar {
   width: 24px;
   max-width: 55%;
+}
+
+.moisture-diverging-scroll--flutter[data-range="yearly"] {
+  gap: 2px;
+}
+
+.moisture-diverging-scroll--flutter[data-range="yearly"] .moisture-diverging-day,
+.moisture-diverging-scroll--flutter[data-range="yearly"] .moisture-diverging-day--flutter {
+  min-width: 28px;
+  max-width: 36px;
+  flex: 0 0 auto;
+}
+
+.moisture-diverging-scroll--flutter[data-range="yearly"] .moisture-diverging-label {
+  font-size: 9px;
+  line-height: 1.1;
 }
 
 /* Day: hourly bars fill the full width (Flutter H0…Hn) */
@@ -710,7 +932,8 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 0.75rem;
-  font-size: 11px;
+  margin-top: 4px;
+  font-size: 10px;
   font-weight: 600;
   color: #475569;
 }
@@ -1331,12 +1554,335 @@
   }
 }
 
-/* 7-Day Irrigation Schedule – compact grid cards (no horizontal scroll) */
+/* 7-Day Irrigation Schedule – all 7 rows visible, no scroll */
+.irrigation-schedule-card {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: #fff;
+  border-radius: 0.5rem;
+}
+
+.irrigation-schedule-card-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.1rem;
+  flex-shrink: 0;
+  padding: 0.3rem 0.65rem;
+  background: #16a34a;
+  color: #fff;
+}
+
+.irrigation-schedule-card-header h2 {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 650;
+  line-height: 1.15;
+  text-align: center;
+}
+
+.irrigation-schedule-card-header p {
+  margin: 0;
+  font-size: 0.6rem;
+  line-height: 1.15;
+  color: #dcfce7;
+}
+
+.irrigation-schedule-card-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 0.2rem;
+  padding: 0.3rem 0.4rem 0.35rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
 .irrigation-schedule-grid {
   display: grid;
-  grid-template-columns: minmax(52px, 1.6fr) minmax(0, 1.1fr) minmax(0, 0.85fr) minmax(0, 1.1fr);
-  gap: 0.3rem;
+  grid-template-columns:
+    minmax(58px, 0.95fr)
+    minmax(52px, 0.85fr)
+    minmax(48px, 0.75fr)
+    minmax(64px, 1fr)
+    minmax(92px, 1.55fr)
+    minmax(48px, 0.8fr);
+  gap: 0.2rem 0.22rem;
   align-items: center;
+  min-width: 460px;
+}
+
+.irrigation-schedule-hours-head {
+  color: #0f766e !important;
+  font-weight: 750 !important;
+}
+
+.irrigation-schedule-hours {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-width: 48px;
+  padding: 0.12rem 0.28rem;
+  border-radius: 0.25rem;
+  background: #ecfdf5;
+  color: #0f766e;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.irrigation-schedule-day-card--today .irrigation-schedule-hours {
+  background: #ecfdf5;
+  color: #065f46;
+}
+
+.irrigation-schedule-day-card--past .irrigation-schedule-hours {
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.irrigation-schedule-grid--head {
+  flex-shrink: 0;
+  padding: 0.22rem 0.4rem;
+  border-radius: 0.3rem;
+  background: #dcfce7;
+  font-size: 0.58rem;
+  font-weight: 650;
+  color: #334155;
+  line-height: 1.2;
+}
+
+.irrigation-schedule-status {
+  line-height: 1.25;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.irrigation-schedule-status-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  min-width: 0;
+}
+
+.irrigation-status-title {
+  font-weight: 700;
+  font-size: 0.6rem;
+  line-height: 1.15;
+}
+
+.irrigation-status-title--given {
+  color: #047857;
+}
+
+.irrigation-status-title--not-given {
+  color: #b45309;
+}
+
+.irrigation-status-detail {
+  font-weight: 650;
+  font-size: 0.58rem;
+  color: #1e3a8a;
+  line-height: 1.15;
+}
+
+.irrigation-status-detail--secondary {
+  color: #475569;
+  font-weight: 550;
+}
+
+.irrigation-status-detail--given {
+  color: #047857;
+  font-weight: 650;
+}
+
+.irrigation-status-detail--hours {
+  color: #0f766e;
+  font-weight: 700;
+}
+
+.irrigation-status-indicator {
+  display: none;
+}
+
+.irrigation-schedule-day-card {
+  flex: 1 1 0;
+  min-height: 2.15rem;
+  padding: 0.28rem 0.4rem;
+  border-radius: 0.35rem;
+  font-size: 0.6rem;
+  overflow: hidden;
+  position: relative;
+  z-index: 0;
+  transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.irrigation-schedule-day-card--today {
+  z-index: 1;
+  flex: 1.15 1 0;
+  min-height: 2.55rem;
+  /* Medium blue — stronger than pale, still readable with dark text */
+  background: linear-gradient(90deg, #bfdbfe 0%, #93c5fd 45%, #60a5fa 100%);
+  border: 1.5px solid #3b82f6;
+  box-shadow:
+    0 0 0 1px rgba(59, 130, 246, 0.3),
+    0 2px 8px rgba(37, 99, 235, 0.16);
+  color: #0f172a;
+}
+
+.irrigation-schedule-day-card--today .irrigation-status-title--given {
+  color: #064e3b;
+}
+
+.irrigation-schedule-day-card--today .irrigation-status-title--not-given {
+  color: #0f172a;
+}
+
+.irrigation-schedule-day-card--today .irrigation-status-detail {
+  color: #1e3a8a;
+}
+
+.irrigation-schedule-day-card--today .irrigation-status-detail--secondary {
+  color: #1e293b;
+}
+
+.irrigation-schedule-day-card--today .text-sky-700 {
+  color: #0c4a6e !important;
+}
+
+.irrigation-schedule-day-card--past {
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  color: #94a3b8;
+  opacity: 0.58;
+  filter: grayscale(0.35);
+}
+
+.irrigation-schedule-day-card--past .irrigation-status-title--given {
+  color: #6b7280;
+}
+
+.irrigation-schedule-day-card--past .irrigation-status-title--not-given {
+  color: #a8a29e;
+}
+
+.irrigation-schedule-day-card--past .irrigation-status-detail {
+  color: #94a3b8;
+}
+
+.irrigation-schedule-day-card--past .irrigation-status-detail--secondary {
+  color: #a1a1aa;
+}
+
+.irrigation-schedule-day-card--past .text-sky-700 {
+  color: #94a3b8 !important;
+}
+
+.irrigation-schedule-day-card--past .irrigation-schedule-need--active {
+  color: #9ca3af;
+}
+
+.irrigation-schedule-day-card--past .irrigation-schedule-need--zero {
+  color: #a1a1aa;
+}
+
+.irrigation-schedule-day-card--past:hover {
+  opacity: 0.72;
+  background: #eef2f7;
+  border-color: #cbd5e1;
+  filter: grayscale(0.15);
+}
+
+.irrigation-schedule-date-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0.14rem;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.irrigation-schedule-date-row {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.irrigation-schedule-date-text {
+  font-weight: 700;
+  white-space: nowrap;
+  line-height: 1.15;
+}
+
+.irrigation-schedule-date--past {
+  color: #94a3b8;
+  font-size: 0.62rem;
+}
+
+.irrigation-schedule-date--today {
+  color: #0f172a;
+  background: rgba(255, 255, 255, 0.88);
+  border-radius: 0.3rem;
+  padding: 0.08rem 0.35rem;
+  box-shadow: 0 0 0 1px rgba(30, 64, 175, 0.35);
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+.irrigation-schedule-today-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 0.06rem 0.38rem;
+  font-size: 0.52rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  color: #1e3a8a;
+  background: #fde68a;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+  max-width: 100%;
+}
+
+.irrigation-schedule-day-card--today .irrigation-schedule-need--active {
+  color: #b91c1c;
+}
+
+.irrigation-schedule-day-card--today .irrigation-schedule-need--zero {
+  color: #064e3b;
+}
+
+.irrigation-schedule-need {
+  font-size: 0.66rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.irrigation-schedule-need--active {
+  color: #b91c1c;
+}
+
+.irrigation-schedule-need--zero {
+  color: #047857;
+}
+
+.irrigation-schedule-day-card--today .irrigation-schedule-need--active {
+  color: #991b1b;
+}
+
+.irrigation-schedule-day-card--today .irrigation-schedule-need--zero {
+  color: #065f46;
 }
 
 .irrigation-schedule-grid--head > span,
@@ -1345,27 +1891,83 @@
   min-width: 0;
 }
 
-.irrigation-schedule-day-card {
-  border: 1px solid rgba(226, 232, 240, 0.9);
-  flex-shrink: 0;
-}
-
 .irrigation-schedule-days {
-  -webkit-overflow-scrolling: touch;
-  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 0.22rem;
+  overflow: hidden;
 }
 
 .irrigation-schedule-grid--total {
-  margin-top: 0.25rem;
   flex-shrink: 0;
-  background-color: #f0fdf4;
-  box-shadow: 0 -4px 8px rgba(255, 255, 255, 0.85);
+  margin-top: 0;
+  padding: 0.28rem 0.4rem;
+  font-size: 0.6rem;
+  font-weight: 650;
+  border-radius: 0.3rem;
+  align-items: center;
+  position: relative;
+  z-index: 2;
+}
+
+.irrigation-schedule-grid--total-blue {
+  background: linear-gradient(90deg, #eff6ff 0%, #dbeafe 55%, #bfdbfe 100%);
+  border: 1px solid #93c5fd;
+  color: #1e3a8a;
+}
+
+.irrigation-schedule-total-msg {
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: normal;
+  word-break: break-word;
+  font-size: 0.58rem;
 }
 
 .irrigation-schedule-table,
 .irrigation-schedule-table th,
 .irrigation-schedule-table td {
   line-height: 1.4;
+}
+
+@media (max-width: 640px) {
+  .irrigation-schedule-card {
+    min-height: 0;
+  }
+
+  .irrigation-schedule-grid {
+    grid-template-columns:
+      minmax(52px, 0.9fr)
+      minmax(46px, 0.8fr)
+      minmax(42px, 0.7fr)
+      minmax(56px, 0.95fr)
+      minmax(80px, 1.4fr)
+      minmax(44px, 0.75fr);
+    gap: 0.15rem 0.16rem;
+    min-width: 420px;
+  }
+
+  .irrigation-schedule-hours {
+    font-size: 0.56rem;
+    padding: 0.1rem 0.2rem;
+  }
+
+  .irrigation-schedule-day-card {
+    padding: 0.22rem 0.3rem;
+    min-height: 2rem;
+  }
+
+  .irrigation-schedule-day-card--today {
+    min-height: 2.35rem;
+  }
+
+  .irrigation-status-title,
+  .irrigation-status-detail,
+  .irrigation-schedule-need {
+    font-size: 0.54rem;
+  }
 }
 
 .irrigation-calc-panel code {
