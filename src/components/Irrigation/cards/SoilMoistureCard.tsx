@@ -4,7 +4,7 @@
  * - WaterBalanceApi: GET water-remain-per-day?plot_name&crop_name&lat&lon&dates
  * - Irrigation needed kL = remain < 0 ? abs(remainL)/1000 : 0
  * - ETo loss card = eto_loss_liters / 1000 (kL)
- * - Chart: Day = dual-line hourly irrigation trend (selected day only); Week/Yearly = diverging bars
+ * - Chart: Day = hourly irrigation trend; Week/Month = diverging bars
  */
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Droplets, Sun } from "lucide-react";
@@ -69,7 +69,7 @@ type TubeDay = {
   hourlySteps: WaterHourStep[];
 };
 
-type WaterRange = "day" | "week" | "yearly";
+type WaterRange = "day" | "week" | "month";
 
 /** Flutter ListView diverging-bar colors */
 const SURPLUS_COLOR = "#1565C0";
@@ -78,6 +78,9 @@ const SELECT_DOT = "#29B6F6";
 
 /** Open-Meteo forecast `past_days` max is typically 92. */
 const OPEN_METEO_PAST_DAYS_MAX = 92;
+
+/** Calendar month window for Month tab (~same day last month → today). */
+const MONTH_CHART_DAYS = 31;
 
 type HourlyTrendPoint = {
   hour: number;
@@ -260,7 +263,10 @@ function sliceForRange(days: TubeDay[], range: WaterRange): TubeDay[] {
   if (!days.length) return [];
   if (range === "day") return days.slice(-1);
   if (range === "week") return days.length > 7 ? days.slice(-7) : days;
-  return days;
+  // month
+  return days.length > MONTH_CHART_DAYS
+    ? days.slice(-MONTH_CHART_DAYS)
+    : days;
 }
 
 const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
@@ -699,8 +705,8 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
     if (waterRange === "week") {
       return compact ? 140 : medium ? 150 : 160;
     }
-    if (waterRange === "yearly") {
-      return compact ? 160 : medium ? 180 : 190;
+    if (waterRange === "month") {
+      return compact ? 150 : medium ? 165 : 175;
     }
     // Day line chart needs room for point labels
     return compact ? 220 : medium ? 250 : 270;
@@ -938,7 +944,7 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
               ETo today: {etoTodayMm.toFixed(1)} mm/day
               {dateRangeLabel ? ` · ${dateRangeLabel}` : ""}
               {chartLoading && !yearlyLoaded && (
-                <span className="text-gray-400"> · loading year…</span>
+                <span className="text-gray-400"> · loading month…</span>
               )}
             </p>
 
@@ -947,7 +953,7 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
                 [
                   ["day", "Day"],
                   ["week", "Week"],
-                  ["yearly", "Yearly"],
+                  ["month", "Month"],
                 ] as const
               ).map(([key, label]) => (
                 <button
@@ -1156,7 +1162,7 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
                 ) : (
                 <div
                   ref={chartScrollRef}
-                  className={`moisture-diverging-scroll moisture-diverging-scroll--flutter ${weekFillFromBottom ? "moisture-diverging-scroll--fill-bottom" : ""} ${medium ? "moisture-diverging-scroll--medium" : ""} ${fullWidth ? "moisture-diverging-scroll--full" : ""} ${compact ? "moisture-diverging-scroll--compact" : ""}`}
+                  className={`moisture-diverging-scroll moisture-diverging-scroll--flutter ${weekFillFromBottom ? "moisture-diverging-scroll--fill-bottom" : ""} ${waterRange === "month" ? "moisture-diverging-scroll--month" : ""} ${medium ? "moisture-diverging-scroll--medium" : ""} ${fullWidth ? "moisture-diverging-scroll--full" : ""} ${compact ? "moisture-diverging-scroll--compact" : ""}`}
                   style={{ height: chartH }}
                   data-range={waterRange}
                   role="list"
