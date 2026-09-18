@@ -909,7 +909,7 @@ const IrrigationSchedule: React.FC = () => {
             Irrigation Given
           </div>
           <div className="irrigation-status-detail irrigation-status-detail--given">
-            Water given: {givenKl > 0 ? `${givenKl.toFixed(1)} KL` : "—"}
+            Water given: {givenKl > 0 ? givenKl.toFixed(1) : "—"}
           </div>
         </div>
       );
@@ -924,7 +924,7 @@ const IrrigationSchedule: React.FC = () => {
           Irrigation required
         </div>
         {hasNeed ? (
-          <div className="irrigation-status-detail">{needKl.toFixed(1)} KL</div>
+          <div className="irrigation-status-detail">{needKl.toFixed(1)}</div>
         ) : (
           <div className="irrigation-status-detail irrigation-status-detail--secondary">
             No water required
@@ -995,7 +995,7 @@ const IrrigationSchedule: React.FC = () => {
                   ) : (
                     <>
                       <span className="text-[10px] font-semibold whitespace-nowrap">
-                        {Number(day.etDisplayed || 0).toFixed(1)} mm
+                        {Number(day.etDisplayed || 0).toFixed(1)}
                       </span>
                       <span
                         className={`inline-block rounded px-1 text-[9px] font-medium leading-none ${getETRangeColor(day.etRange)}`}
@@ -1008,7 +1008,7 @@ const IrrigationSchedule: React.FC = () => {
 
                 <div className="flex items-center gap-0.5 font-semibold text-sky-700 whitespace-nowrap text-[10px]">
                   <CloudRain className="h-2.5 w-2.5 shrink-0 text-sky-600" />
-                  {Number(day.rainfall || 0).toFixed(1)} mm
+                  {Number(day.rainfall || 0).toFixed(1)}
                 </div>
 
                 <div
@@ -1018,7 +1018,7 @@ const IrrigationSchedule: React.FC = () => {
                       : "irrigation-schedule-need--zero"
                   }`}
                 >
-                  {(Number(day.irrigationNeedKl) || 0).toFixed(1)} KL
+                  {(Number(day.irrigationNeedKl) || 0).toFixed(1)}
                 </div>
 
                 <div className="irrigation-schedule-status min-w-0">
@@ -1030,7 +1030,7 @@ const IrrigationSchedule: React.FC = () => {
                   title={
                     day.isToday
                       ? day.pumpMinutes != null && day.pumpMinutes > 0
-                        ? `Need ${Number(day.irrigationNeedKl || 0).toFixed(1)} KL → ${(Number(day.pumpMinutes) / 60).toFixed(3)} h · (Need×1000) ÷ (HP×7000×area)`
+                        ? `Need ${Number(day.irrigationNeedKl || 0).toFixed(1)} → ${(Number(day.pumpMinutes) / 60).toFixed(3)} h · (Need×1000) ÷ (HP×7000×area)`
                         : "No irrigation needed"
                       : "Hours shown for today only"
                   }
