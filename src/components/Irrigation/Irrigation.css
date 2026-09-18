@@ -1599,22 +1599,24 @@
   min-height: 0;
   gap: 0.2rem;
   padding: 0.3rem 0.4rem 0.35rem;
-  overflow-x: auto;
+  overflow-x: hidden;
   overflow-y: hidden;
 }
 
 .irrigation-schedule-grid {
   display: grid;
+  width: 100%;
+  box-sizing: border-box;
   grid-template-columns:
-    minmax(58px, 0.95fr)
-    minmax(52px, 0.85fr)
-    minmax(48px, 0.75fr)
-    minmax(64px, 1fr)
-    minmax(92px, 1.55fr)
-    minmax(48px, 0.8fr);
-  gap: 0.2rem 0.22rem;
+    minmax(0, 0.95fr)
+    minmax(0, 0.8fr)
+    minmax(0, 0.65fr)
+    minmax(0, 0.8fr)
+    minmax(0, 1.35fr)
+    minmax(0, 0.75fr);
+  gap: 0.15rem 0.18rem;
   align-items: center;
-  min-width: 460px;
+  min-width: 0;
 }
 
 .irrigation-schedule-hours-head {
@@ -1626,15 +1628,18 @@
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  min-width: 48px;
-  padding: 0.12rem 0.28rem;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.12rem 0.2rem;
   border-radius: 0.25rem;
   background: #ecfdf5;
   color: #0f766e;
-  font-size: 0.62rem;
+  font-size: 0.58rem;
   font-weight: 700;
   line-height: 1.15;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .irrigation-schedule-day-card--today .irrigation-schedule-hours {
@@ -1939,19 +1944,19 @@
 
   .irrigation-schedule-grid {
     grid-template-columns:
-      minmax(52px, 0.9fr)
-      minmax(46px, 0.8fr)
-      minmax(42px, 0.7fr)
-      minmax(56px, 0.95fr)
-      minmax(80px, 1.4fr)
-      minmax(44px, 0.75fr);
-    gap: 0.15rem 0.16rem;
-    min-width: 420px;
+      minmax(0, 0.9fr)
+      minmax(0, 0.75fr)
+      minmax(0, 0.6fr)
+      minmax(0, 0.75fr)
+      minmax(0, 1.25fr)
+      minmax(0, 0.7fr);
+    gap: 0.12rem 0.12rem;
+    min-width: 0;
   }
 
   .irrigation-schedule-hours {
-    font-size: 0.56rem;
-    padding: 0.1rem 0.2rem;
+    font-size: 0.52rem;
+    padding: 0.08rem 0.14rem;
   }
 
   .irrigation-schedule-day-card {

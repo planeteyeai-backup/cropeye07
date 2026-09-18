@@ -1,7 +1,8 @@
 /**
- * GET /water-remain-per-day — same logic as CropO Flutter WaterBalanceApi:
- *   query: plot_name, start_date, end_date, crop_name?, lat?, lon?
+ * GET /water-remain-per-day — SEF OpenAPI:
+ *   query: plot_name, crop_name?, start_date?, end_date?, sand_pct?, silt_pct?, clay_pct?
  * Docs: https://sef-cropeye.up.railway.app/docs
+ * Note: lat/lon are NOT accepted by this endpoint (ignored if sent).
  */
 import { getPlotNameCandidates, type PlotRef } from "./plotName";
 import { getCache, setCache } from "./cache";
@@ -43,8 +44,14 @@ export type WaterRemainParsed = {
 
 export type WaterRemainFetchExtras = {
   cropName?: string;
-  lat?: number;
-  lon?: number;
+  sandPct?: number;
+  siltPct?: number;
+  clayPct?: number;
+  /**
+   * When true, allow start→end shorter than ~35 days (real recent plantation).
+   * Without this, accidental pastRange(30) windows are expanded to 365 days.
+   */
+  allowShortRange?: boolean;
 };
 
 const SEF_WATER_REMAIN_BASE = "https://sef-cropeye.up.railway.app";
@@ -65,6 +72,31 @@ function toFinite(v: unknown): number | null {
   if (v == null || v === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Water remain in KL — one rule for footer "X KL remain" AND Need (KL) column.
+ *   prefer water_remain_liters / 1000
+ *   else water_remain_m3 as KL (1 m³ = 1 KL — never ÷ 1000 on m³)
+ */
+export function remainKlFromWaterFields(
+  waterRemainLiters?: number | null,
+  waterRemainM3?: number | null,
+): number {
+  const liters = toFinite(waterRemainLiters);
+  if (liters != null) return liters / 1000;
+  const m3 = toFinite(waterRemainM3);
+  if (m3 != null) return m3;
+  return 0;
+}
+
+/** Need (KL) from same remain: deficit only → abs(remainKl), else 0. */
+export function needKlFromWaterFields(
+  waterRemainLiters?: number | null,
+  waterRemainM3?: number | null,
+): number {
+  const kl = remainKlFromWaterFields(waterRemainLiters, waterRemainM3);
+  return kl < 0 ? Math.abs(kl) : 0;
 }
 
 /** Keep only past/today rows, sorted, last N days. */
@@ -122,16 +154,20 @@ function waterRemainCacheKey(
   end_date: string,
   extras?: WaterRemainFetchExtras,
 ): string {
-  const crop = extras?.cropName?.trim().toLowerCase() || "";
-  const lat =
-    extras?.lat != null && Number.isFinite(extras.lat)
-      ? extras.lat.toFixed(5)
+  const crop = (extras?.cropName?.trim() || "sugarcane").toLowerCase();
+  const sand =
+    extras?.sandPct != null && Number.isFinite(extras.sandPct)
+      ? String(extras.sandPct)
       : "";
-  const lon =
-    extras?.lon != null && Number.isFinite(extras.lon)
-      ? extras.lon.toFixed(5)
+  const silt =
+    extras?.siltPct != null && Number.isFinite(extras.siltPct)
+      ? String(extras.siltPct)
       : "";
-  return `waterRemain_${plotName}_${start_date}_${end_date}_${crop}_${lat}_${lon}`;
+  const clay =
+    extras?.clayPct != null && Number.isFinite(extras.clayPct)
+      ? String(extras.clayPct)
+      : "";
+  return `waterRemain_${plotName}_${start_date}_${end_date}_${crop}_${sand}_${silt}_${clay}`;
 }
 
 function normalizeHourStep(item: any, index = 0): WaterHourStep | null {
@@ -165,13 +201,11 @@ function normalizeDay(item: any): WaterRemainDay | null {
     toFinite(item.water_remain_liters) ??
     toFinite(item.waterRemainLiters);
   const remainM3FromApi = toFinite(item.water_remain_m3);
-  const remainM3 =
-    remainL != null
-      ? remainL / 1000
-      : remainM3FromApi != null
-        ? remainM3FromApi
-        : 0;
-  const remainLitersFinal = remainL ?? (remainM3FromApi != null ? remainM3FromApi * 1000 : 0);
+  // Keep liters + m3 aligned with remainKlFromWaterFields (1 m³ = 1 KL).
+  const remainKl = remainKlFromWaterFields(remainL, remainM3FromApi);
+  const remainLitersFinal =
+    remainL ?? (remainM3FromApi != null ? remainM3FromApi * 1000 : 0);
+  const remainM3 = remainL != null ? remainL / 1000 : remainKl;
 
   const hourlyRaw = Array.isArray(item.hourly_steps) ? item.hourly_steps : [];
   const hourly_steps = hourlyRaw
@@ -233,25 +267,23 @@ export function parseWaterRemainResponse(data: any): WaterRemainParsed | null {
 
 const IST = "Asia/Kolkata";
 
-function isoDate(d: Date): string {
-  return d.toISOString().slice(0, 10);
-}
-
 /** Today as YYYY-MM-DD in plot timezone (default IST). */
 export function todayIsoInTz(timeZone = IST): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone }).format(new Date());
 }
 
-/** Last N calendar days ending today (inclusive) in IST. Flutter default = 30. */
+/** Last N calendar days ending today (inclusive) in IST. */
 export function pastRange(
-  daysBack = 30,
+  daysBack = 365,
   timeZone = IST,
 ): { start_date: string; end_date: string } {
   const end_date = todayIsoInTz(timeZone);
-  const end = new Date(`${end_date}T12:00:00`);
+  const [y, mo, day] = end_date.split("-").map(Number);
+  const end = new Date(y, mo - 1, day);
   const start = new Date(end);
   start.setDate(start.getDate() - (daysBack - 1));
-  return { start_date: isoDate(start), end_date };
+  const start_date = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, "0")}-${String(start.getDate()).padStart(2, "0")}`;
+  return { start_date, end_date };
 }
 
 /** Inclusive range clamped so start ≤ end ≤ today (IST). */
@@ -347,6 +379,18 @@ export function waterBalanceStatus(
   return { label: "Excessive", color: "#1565C0" };
 }
 
+const waterRemainInFlight = new Map<string, Promise<any>>();
+
+/** Remember which plot_name form SEF accepted (slash vs underscore). */
+const preferredPlotForm = new Map<string, string>();
+
+function plotFormKey(plotId: string): string {
+  return String(plotId ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, "/");
+}
+
 async function getWaterRemainOnce(
   plotName: string,
   start_date: string,
@@ -357,67 +401,108 @@ async function getWaterRemainOnce(
   const cached = getCache(cacheKey, WATER_REMAIN_CACHE_MS);
   if (cached) return cached;
 
+  const existing = waterRemainInFlight.get(cacheKey);
+  if (existing) return existing;
+
   const base = waterRemainBaseUrl();
   const qs = new URLSearchParams({
     plot_name: plotName,
     start_date,
     end_date,
   });
-  // Flutter WaterBalanceApi also sends crop + field centroid.
-  const crop = extras?.cropName?.trim();
-  if (crop) qs.set("crop_name", crop);
-  if (extras?.lat != null && Number.isFinite(extras.lat)) {
-    qs.set("lat", extras.lat.toFixed(6));
+  // Official SEF GET params (OpenAPI): crop_name is required for correct remain.
+  // Never omit it — short calls without crop default to sugarcane server-side and skew KL.
+  qs.set("crop_name", extras?.cropName?.trim() || "sugarcane");
+  if (extras?.sandPct != null && Number.isFinite(extras.sandPct)) {
+    qs.set("sand_pct", String(extras.sandPct));
   }
-  if (extras?.lon != null && Number.isFinite(extras.lon)) {
-    qs.set("lon", extras.lon.toFixed(6));
+  if (extras?.siltPct != null && Number.isFinite(extras.siltPct)) {
+    qs.set("silt_pct", String(extras.siltPct));
+  }
+  if (extras?.clayPct != null && Number.isFinite(extras.clayPct)) {
+    qs.set("clay_pct", String(extras.clayPct));
   }
 
   const url = `${base}/water-remain-per-day?${qs.toString()}`;
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), WATER_REMAIN_TIMEOUT_MS);
-  try {
-    const resp = await fetch(url, {
-      method: "GET",
-      mode: "cors",
-      headers: { Accept: "application/json" },
-      signal: controller.signal,
-    });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      throw new Error(`HTTP ${resp.status}: ${text || resp.statusText}`);
-    }
-    const data = await resp.json();
-    setCache(cacheKey, data);
-    return data;
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`Water remain timed out after ${WATER_REMAIN_TIMEOUT_MS / 1000}s`);
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
+  if (import.meta.env.DEV) {
+    console.debug("[water-remain]", url);
   }
+
+  const pending = (async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), WATER_REMAIN_TIMEOUT_MS);
+    try {
+      const resp = await fetch(url, {
+        method: "GET",
+        mode: "cors",
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      });
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        throw new Error(`HTTP ${resp.status}: ${text || resp.statusText}`);
+      }
+      const data = await resp.json();
+      setCache(cacheKey, data);
+      return data;
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        throw new Error(
+          `Water remain timed out after ${WATER_REMAIN_TIMEOUT_MS / 1000}s`,
+        );
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+      waterRemainInFlight.delete(cacheKey);
+    }
+  })();
+
+  waterRemainInFlight.set(cacheKey, pending);
+  return pending;
 }
 
 /**
- * GET `/water-remain-per-day` — Flutter WaterBalanceApi.fetch equivalent.
- * Default window = 30 days when no customRange (matches Flutter).
+ * Resolve water-remain date window.
+ * Default / preferred: ~1 calendar month (Month tab). Do not auto-expand to 365d.
+ */
+function resolveFetchRange(
+  daysBack: number,
+  customRange: { start_date: string; end_date: string } | undefined,
+  _extras?: WaterRemainFetchExtras,
+): { start_date: string; end_date: string } {
+  if (customRange?.start_date && customRange?.end_date) {
+    return customRange;
+  }
+  if (daysBack > 0 && daysBack <= 35) {
+    return pastSameDayLastMonthRange();
+  }
+  return pastRange(Math.max(daysBack, 30));
+}
+
+/**
+ * GET `/water-remain-per-day` — SEF OpenAPI.
+ * Preferred window = last ~1 calendar month (start ≈ same day last month → today)
+ * + crop_name. Matches Month tab ("19 August to 18 Sept").
  */
 export async function fetchWaterRemainForPlot(
   plotId: string,
   plots?: PlotRef[] | null,
-  daysBack = 30,
+  daysBack = 31,
   customRange?: { start_date: string; end_date: string },
   extras?: WaterRemainFetchExtras,
 ): Promise<WaterRemainParsed> {
   if (!plotId?.trim()) throw new Error("Missing plot name");
 
-  const { start_date, end_date } = customRange ?? pastRange(daysBack);
-  const candidates = orderWaterRemainCandidates(
+  const { start_date, end_date } = resolveFetchRange(daysBack, customRange, extras);
+  const ordered = orderWaterRemainCandidates(
     getPlotNameCandidates(plotId, plots),
   );
+  const preferred = preferredPlotForm.get(plotFormKey(plotId));
+  const candidates =
+    preferred && ordered.includes(preferred)
+      ? [preferred, ...ordered.filter((c) => c !== preferred)]
+      : ordered;
   let lastErr: Error | null = null;
 
   for (const candidate of candidates) {
@@ -433,6 +518,7 @@ export async function fetchWaterRemainForPlot(
         lastErr = new Error("Water remain response had no time_series");
         continue;
       }
+      preferredPlotForm.set(plotFormKey(plotId), candidate);
       return { ...parsed, plotName: parsed.plotName || candidate };
     } catch (err) {
       lastErr = err instanceof Error ? err : new Error(String(err));

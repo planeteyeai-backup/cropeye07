@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState, useMemo, useRef } from "react";
-import { MapContainer, TileLayer, Polygon, useMap, Circle, Pane } from "react-leaflet";
+import { MapContainer, TileLayer, Polygon, useMap, Circle, Pane, ImageOverlay } from "react-leaflet";
 import { LatLngTuple, LatLngBounds } from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "./Map.css";
@@ -27,6 +27,7 @@ import {
 } from "../utils/adminLayerApi";
 import { getSinglePlotAgroStats, refreshApiEndpoints } from "../api";
 import { useI18nLite } from "../i18nLite.ts";
+import { toSafeUserError } from "../utils/safeUserError";
 import {
   isAnalysisGeometryStale,
   type GeoJsonPolygon,
@@ -70,6 +71,57 @@ function areaAcresFromApiRecord(record: unknown): number | null {
   );
 }
 
+/** Profile/farm area_size is stored in hectares in Django — convert to acres. */
+function areaAcresFromProfilePlot(record: unknown): number | null {
+  const row = record as Record<string, unknown> | null | undefined;
+  if (!row) return null;
+
+  const fromAcres = areaAcresFromApiRecord(row);
+  if (fromAcres != null) return fromAcres;
+
+  const farms = row.farms as unknown[] | undefined;
+  const farm = Array.isArray(farms) ? farms[0] : (row.farm as unknown);
+  const farmRow = farm as Record<string, unknown> | null | undefined;
+  if (farmRow) {
+    const farmAcres = areaAcresFromApiRecord(farmRow);
+    if (farmAcres != null) return farmAcres;
+  }
+
+  const hectares =
+    parsePositiveArea(row.area_size_numeric) ??
+    parsePositiveArea(row.area_size) ??
+    parsePositiveArea(farmRow?.area_size_numeric) ??
+    parsePositiveArea(farmRow?.area_size);
+
+  if (hectares == null) return null;
+  // Django area_size is hectares → acres
+  return hectares * 2.47105;
+}
+
+function areaAcresFromFarmerProfile(
+  profile: { plots?: unknown[] } | null | undefined,
+  plotName: string,
+): number | null {
+  if (!profile?.plots?.length || !plotName?.trim()) return null;
+  const target = normalizePlotKey(plotName);
+  for (const plot of profile.plots) {
+    const row = plot as Record<string, unknown>;
+    const key = normalizePlotKey(
+      String(
+        row.fastapi_plot_id ??
+          `${row.gat_number ?? ""}_${row.plot_number ?? ""}`,
+      ),
+    );
+    if (key !== target && normalizePlotKey(String(row.fastapi_plot_id ?? "")) !== target) {
+      continue;
+    }
+    const acres = areaAcresFromProfilePlot(plot);
+    if (acres != null) return acres;
+  }
+  // Fallback: first plot when names don't match
+  return areaAcresFromProfilePlot(profile.plots[0]);
+}
+
 function areaAcresFromFeature(feature: unknown): number | null {
   const row = feature as any;
   if (!row) return null;
@@ -106,12 +158,13 @@ function areaAcresFromAgroStatsCache(plotName: string): number | null {
   return null;
 }
 
-/** API `area_acres` only: analysis feature → cached agroStats → analyzeSinglePlot. */
+/** Prefer API area_acres; fall back to farmer profile area when analyze API fails. */
 function resolveDisplayAreaAcres(args: {
   plotBoundary: any;
   plotData: any;
   selectedPlotName: string;
   apiAreaAcres: number | null;
+  profile?: { plots?: unknown[] } | null;
 }): number | null {
   const feature = args.plotBoundary ?? args.plotData?.features?.[0];
 
@@ -124,6 +177,12 @@ function resolveDisplayAreaAcres(args: {
   if (args.apiAreaAcres != null && args.apiAreaAcres > 0) {
     return args.apiAreaAcres;
   }
+
+  const fromProfile = areaAcresFromFarmerProfile(
+    args.profile,
+    args.selectedPlotName,
+  );
+  if (fromProfile != null) return fromProfile;
 
   return null;
 }
@@ -376,6 +435,8 @@ interface MapProps {
   onHealthDataChange?: (data: any) => void;
   onSoilDataChange?: (data: any) => void;
   onFieldAnalysisChange?: (data: any) => void;
+  /** True while Field Score (/analyze) is loading — parent can show card spinner. */
+  onFieldAnalysisLoadingChange?: (loading: boolean) => void;
   onMoistGroundChange?: (percent: number) => void;
   onPestDataChange?: (data: any) => void;
   onSplitScreen?: () => void;
@@ -502,6 +563,67 @@ const CustomTileLayer: React.FC<{
   );
 };
 
+/** Stored PNG from SAR Index API (`tile_url` → S3 .png), stretched over plot bounds. */
+const AnalysisPngOverlay: React.FC<{
+  url: string;
+  bounds: LatLngBounds;
+  opacity?: number;
+  overlayKey?: string;
+  pane?: string;
+  onLoaded?: () => void;
+}> = ({ url, bounds, opacity = 0.85, overlayKey, pane, onLoaded }) => {
+  if (!url || !bounds?.isValid()) return null;
+  return (
+    <ImageOverlay
+      key={overlayKey}
+      url={url}
+      bounds={bounds}
+      opacity={opacity}
+      pane={pane}
+      zIndex={450}
+      eventHandlers={{
+        load: () => onLoaded?.(),
+        error: () => {
+          console.error("[Map] Analysis PNG overlay load error:", url);
+          onLoaded?.();
+        },
+      }}
+    />
+  );
+};
+
+function isXyzTileTemplate(url: string): boolean {
+  return url.includes("{z}") && url.includes("{x}") && url.includes("{y}");
+}
+
+function isStoredAnalysisPngUrl(url: string): boolean {
+  if (!url || isXyzTileTemplate(url)) return false;
+  if (/\.png(\?|#|$)/i.test(url)) return true;
+  // SAR may return CDN URLs without .png in rare cases — treat bare https as image overlay.
+  return /^https?:\/\//i.test(url);
+}
+
+function boundsFromPolygonFeature(feature: any): LatLngBounds | null {
+  const ring = feature?.geometry?.coordinates?.[0];
+  if (!Array.isArray(ring) || ring.length < 3) return null;
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  let minLng = Infinity;
+  let maxLng = -Infinity;
+  for (const pt of ring) {
+    if (!Array.isArray(pt) || pt.length < 2) continue;
+    const lng = Number(pt[0]);
+    const lat = Number(pt[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    minLat = Math.min(minLat, lat);
+    maxLat = Math.max(maxLat, lat);
+    minLng = Math.min(minLng, lng);
+    maxLng = Math.max(maxLng, lng);
+  }
+  if (!Number.isFinite(minLat) || minLat === Infinity) return null;
+  return new LatLngBounds([minLat, minLng], [maxLat, maxLng]);
+}
+
 /**
  * Base satellite layer with per-tile counting so the first framing can wait for
  * real imagery. Never keyed/remounted (that would blank the map); readiness is
@@ -600,12 +722,14 @@ function exactSelectedEndDate(endDate: string | null | undefined): string[] {
 
 const CropEyeMap: React.FC<MapProps> = ({
   onFieldAnalysisChange,
+  onFieldAnalysisLoadingChange,
   onPestDataChange,
   onSplitScreen,
 }) => {
   const { profile, loading: profileLoading, refreshMyProfile } = useFarmerProfile();
   const { t } = useI18nLite();
-  const { getCached, setCached, setAppState } = useAppContext();
+  const { getCached, setCached, setAppState, setSelectedPlotName: setAppSelectedPlotName } =
+    useAppContext();
   const plotNameForApi = (plotKey: string) =>
     resolveApiPlotName(plotKey, profile?.plots);
   const mapWrapperRef = useRef<HTMLDivElement>(null);
@@ -624,6 +748,9 @@ const CropEyeMap: React.FC<MapProps> = ({
   const [loading, setLoading] = useState(false);
   const [dateNavigationLoading, setDateNavigationLoading] = useState(false); // Loading state for date navigation
   const [fetchRotationIndex, setFetchRotationIndex] = useState(0);
+  /** Field Score must finish before analysis map layers are fetched / shown. */
+  const [fieldScoreReady, setFieldScoreReady] = useState(false);
+  const [fieldScoreLoading, setFieldScoreLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mapCenter] = useState<LatLngTuple>([17.842832246588202, 74.91558702408217]);
   const [selectedPlotName, setSelectedPlotName] = useState("");
@@ -687,7 +814,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     mapRebinSnapKeyRef.current = "";
     layerTilesCacheRef.current.clear();
     setCurrentEndDate("");
-    fetchAnalysisTimeline(plotNameForApi(plot))
+    fetchAnalysisTimeline(plotNameForApi(plot), profile?.plots)
       .then((data) => {
         if (cancelled) return;
         setTimelinePayload(data);
@@ -697,13 +824,21 @@ const CropEyeMap: React.FC<MapProps> = ({
             plotNameForApi(plot),
             data.timeline,
           );
+        } else {
+          // No stored-tiles dates for this plot — still load layers with today;
+          // floss analyze_* returns the actual image end_date on the tile.
+          const today = new Date().toISOString().split("T")[0];
+          setCurrentEndDate(today);
         }
       })
       .catch((err) => {
         if (!cancelled) {
-          const msg =
-            err instanceof Error ? err.message : "Failed to load analysis timeline";
-          setTimelineError(msg);
+          setTimelineError(
+            toSafeUserError(
+              err instanceof Error ? err.message : err,
+              "Unable to load timeline. Please try again.",
+            ),
+          );
           setTimelinePayload(null);
         }
       })
@@ -713,7 +848,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [selectedPlotName]);
+  }, [selectedPlotName, profile?.plots]);
 
   const mapRebinDates = useMemo(
     () => sortedRebinDatesForLayer(timelinePayload?.timeline, activeLayer),
@@ -806,18 +941,16 @@ const CropEyeMap: React.FC<MapProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeLayer, selectedPlotName]);
 
-  // Fetch Growth / Water / Soil / Pest for the exact ribbon-selected date only (no date fallback).
-  // Wait until currentEndDate is snapped to timeline (never fetch with calendar today).
-  // Spinner clears when the *active* layer finishes — do not wait for slow Water/Pest.
+  // Fetch Growth / Water / Soil / Pest once we have an end_date.
+  // Do NOT wait for Field Score or stored-tiles ribbon — tiles load independently.
   useEffect(() => {
     if (!selectedPlotName) return;
     if (timelineLoading) return;
-    if (!latestRebinOverall) return;
     if (!currentEndDate) return;
-    // Avoid racing before snap: today / future dates cause Mandya Admin 404s.
-    if (currentEndDate > latestRebinOverall) return;
+    // If ribbon has dates, don't request beyond the latest stored image date.
+    if (latestRebinOverall && currentEndDate > latestRebinOverall) return;
 
-    const fetchKey = `${selectedPlotName}|img:${currentEndDate}|${latestRebinOverall}`;
+    const fetchKey = `${selectedPlotName}|img:${currentEndDate}|${latestRebinOverall || "no-ribbon"}`;
     if (layerFetchInFlightRef.current.has(fetchKey)) return;
     layerFetchInFlightRef.current.add(fetchKey);
     setError(null);
@@ -865,7 +998,12 @@ const CropEyeMap: React.FC<MapProps> = ({
     );
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPlotName, timelineLoading, latestRebinOverall, currentEndDate]);
+  }, [
+    selectedPlotName,
+    timelineLoading,
+    latestRebinOverall,
+    currentEndDate,
+  ]);
 
   useEffect(() => {
     if (!dateNavigationLoading) {
@@ -916,13 +1054,15 @@ const CropEyeMap: React.FC<MapProps> = ({
         Boolean(selectedPlotName?.trim()) &&
         normalizePlotKey(plotToUse) !== normalizePlotKey(selectedPlotName);
       setSelectedPlotName(plotToUse);
+      // Keep Soil Moisture / Irrigation Schedule on the same plot as the map.
+      setAppSelectedPlotName(plotToUse);
       if (!savedIsValid) localStorage.setItem('selectedPlot', plotToUse);
       if (switchingPlot) {
         setPlotBoundary(null);
         setOptimisticProfileBoundary(null);
       }
     }
-  }, [profile, profileLoading]);
+  }, [profile, profileLoading, selectedPlotName, setAppSelectedPlotName]);
 
   // Hydrate yellow border from sessionStorage when Home Map mounts / plot changes
   // (covers My Profile → Home even if the CustomEvent was missed while remounting).
@@ -1073,18 +1213,34 @@ const CropEyeMap: React.FC<MapProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedPlotName, refreshMyProfile]);
 
-  // Separate useEffect to fetch all 4 APIs on initial plot selection (after functions are defined)
-  // This runs once when selectedPlotName is first set (on login)
+  // Reset Field Score gate whenever the selected plot changes (login / plot switch).
+  useEffect(() => {
+    if (!selectedPlotName) {
+      setFieldScoreReady(false);
+      setFieldScoreLoading(false);
+      return;
+    }
+    setFieldScoreReady(false);
+    layerFetchInFlightRef.current.clear();
+    layersPendingRef.current = new Set();
+    setDateNavigationLoading(false);
+    setGrowthData(null);
+    setWaterUptakeData(null);
+    setSoilMoistureData(null);
+    setPestData(null);
+  }, [selectedPlotName]);
+
+  // Field Score runs in parallel — does not block map tiles.
   useEffect(() => {
     if (!selectedPlotName || initialFetchDoneRef.current || profileLoading) {
       return;
     }
-    if (timelineLoading || !latestRebinOverall) return;
+    if (timelineLoading) return;
+    // Need a date for /analyze; use ribbon latest or current UI date (today fallback).
+    if (!currentEndDate && !latestRebinOverall) return;
 
     initialFetchDoneRef.current = true;
 
-    // Growth tiles already load via the layer-fetch effect — do not call Admin Growth twice
-    // (that duplicated "Loading plot data..." and slowed first paint).
     console.log('🔄 Map: Fetching field analysis on login for plot:', selectedPlotName);
     fetchFieldAnalysis(selectedPlotName)
       .then(() => {
@@ -1094,7 +1250,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         console.error('❌ Map: Field analysis fetch failed:', err);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPlotName, profileLoading, timelineLoading, latestRebinOverall]);
+  }, [selectedPlotName, profileLoading, timelineLoading, currentEndDate, latestRebinOverall]);
 
   // Removed fetchAllLayerData - date-dependent layers are now fetched by useEffect
 
@@ -1258,7 +1414,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       } else if (err?.message) {
         errorMessage = err.message;
       }
-      setError(errorMessage);
+      setError(toSafeUserError(errorMessage, errorMessage));
     }
   };
 
@@ -1340,7 +1496,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       } else if (err?.message) {
         errorMessage = err.message;
       }
-      setError(errorMessage);
+      setError(toSafeUserError(errorMessage, errorMessage));
     }
   };
 
@@ -1422,7 +1578,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       } else if (err?.message) {
         errorMessage = err.message;
       }
-      setError(errorMessage);
+      setError(toSafeUserError(errorMessage, errorMessage));
     }
   };
 
@@ -1472,7 +1628,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       } else if (err?.message) {
         errorMessage = err.message;
       }
-      setError(errorMessage);
+      setError(toSafeUserError(errorMessage, errorMessage));
       if (
         !skipAnalysisBoundaryRef.current &&
         (!plotBoundary || plotBoundary.properties?.plot_name !== plotName)
@@ -1488,6 +1644,10 @@ const CropEyeMap: React.FC<MapProps> = ({
   const fetchFieldAnalysis = async (plotName: string) => {
     if (!plotName) return;
     const apiPlot = plotNameForApi(plotName);
+
+    setFieldScoreReady(false);
+    setFieldScoreLoading(true);
+    onFieldAnalysisLoadingChange?.(true);
 
     try {
       const currentDate = getApiEndDateForLayer(
@@ -1547,6 +1707,10 @@ const CropEyeMap: React.FC<MapProps> = ({
       }
     } catch (err) {
       // console.error("Error in fetchFieldAnalysis:", err);
+    } finally {
+      setFieldScoreLoading(false);
+      onFieldAnalysisLoadingChange?.(false);
+      setFieldScoreReady(true);
     }
   };
 
@@ -1662,7 +1826,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       } else if (err?.message) {
         errorMessage = err.message;
       }
-      setError(errorMessage);
+      setError(toSafeUserError(errorMessage, errorMessage));
     }
   };
 
@@ -1702,22 +1866,21 @@ const CropEyeMap: React.FC<MapProps> = ({
     else if (activeLayer === "Soil Moisture") rawUrl = extractTileUrl(soilMoistureData);
 
     if (!rawUrl) {
-      // console.warn(`[Map] No tile_url found for layer ${activeLayer}`);
       return null;
     }
 
-    // Validate tile template contains placeholders
-    const hasTemplate = rawUrl.includes('{z}') && rawUrl.includes('{x}') && rawUrl.includes('{y}');
-    if (!hasTemplate) {
-      // console.warn(`[Map] tile_url missing template placeholders for layer ${activeLayer}:`, rawUrl);
-      return null;
+    // XYZ templates OR stored PNG (SAR Index Mapping API → S3)
+    if (isXyzTileTemplate(rawUrl) || isStoredAnalysisPngUrl(rawUrl)) {
+      return rawUrl;
     }
 
-    return rawUrl;
+    return null;
   };
 
   // Memoize active URL to track changes
   const activeUrl = useMemo(() => getActiveLayerUrl(), [activeLayer, pestData, growthData, waterUptakeData, soilMoistureData]);
+  const activeOverlayIsPng = Boolean(activeUrl && isStoredAnalysisPngUrl(activeUrl));
+  const activeOverlayIsXyz = Boolean(activeUrl && isXyzTileTemplate(activeUrl));
 
   // Prefer saved/my-profile boundary; fall back to analysis API geometry.
   const profileBoundaryFeature = useMemo(() => {
@@ -1803,6 +1966,27 @@ const CropEyeMap: React.FC<MapProps> = ({
   const shouldShowAnalysisOverlay = Boolean(activeUrl);
   const clipTilesToSavedBoundary = Boolean(savedBoundaryGeometry);
 
+  const analysisPngBounds = useMemo(() => {
+    if (!activeOverlayIsPng) return null;
+    return (
+      boundsFromPolygonFeature(profileBoundaryFeature) ||
+      boundsFromPolygonFeature(currentPlotFeature) ||
+      boundsFromPolygonFeature(
+        analysisGeometry ? { geometry: analysisGeometry } : null,
+      )
+    );
+  }, [
+    activeOverlayIsPng,
+    profileBoundaryFeature,
+    currentPlotFeature,
+    analysisGeometry,
+  ]);
+
+  const shouldShowPngOverlay =
+    shouldShowAnalysisOverlay && activeOverlayIsPng && Boolean(analysisPngBounds);
+  const shouldShowXyzOverlay =
+    shouldShowAnalysisOverlay && activeOverlayIsXyz;
+
   const plotFitCoordinates = useMemo(() => {
     const ring =
       (profileBoundaryFeature ?? currentPlotFeature)?.geometry?.coordinates?.[0] ??
@@ -1825,10 +2009,13 @@ const CropEyeMap: React.FC<MapProps> = ({
   const waitingForLayerData =
     Boolean(selectedPlotName) &&
     !activeUrl &&
-    (loading || dateNavigationLoading || layersUpdatingAfterEdit);
-  const analysisOverlayReady = shouldShowAnalysisOverlay
-    ? loadedTileKey === analysisTileKey
-    : !waitingForLayerData;
+    (loading ||
+      dateNavigationLoading ||
+      layersUpdatingAfterEdit);
+  const analysisOverlayReady =
+    shouldShowPngOverlay || shouldShowXyzOverlay
+      ? loadedTileKey === analysisTileKey
+      : !waitingForLayerData;
 
   /** Base satellite readiness — without this the map flew in over blank tiles. */
   const baseTileLoadKey = `${selectedPlotName ?? "none"}|${plotFitNonce}`;
@@ -1871,6 +2058,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         plotData,
         selectedPlotName,
         apiAreaAcres: apiFallbackAreaAcres,
+        profile,
       }),
     [
       profileBoundaryFeature,
@@ -1878,6 +2066,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       plotData,
       selectedPlotName,
       apiFallbackAreaAcres,
+      profile,
     ],
   );
 
@@ -2497,31 +2686,17 @@ const CropEyeMap: React.FC<MapProps> = ({
                 onChange={(e) => {
                   const newPlot = e.target.value;
                   setSelectedPlotName(newPlot);
+                  // Soil Moisture / Schedule read AppContext — must stay in sync with map.
+                  setAppSelectedPlotName(newPlot);
                   localStorage.setItem("selectedPlot", newPlot);
                   setPlotBoundary(null);
                   initialFetchDoneRef.current = false;
                   console.log(
-                    "🔄 Map: Fetching all 4 layer APIs for new plot:",
+                    "🔄 Map: Plot changed — Field Score will load first:",
                     newPlot,
                   );
-                  Promise.all([
-                    fetchGrowthData(newPlot),
-                    fetchWaterUptakeData(newPlot),
-                    fetchSoilMoistureData(newPlot),
-                    fetchPestData(newPlot),
-                    fetchPlotData(newPlot),
-                    fetchFieldAnalysis(newPlot),
-                  ])
-                    .then(() => {
-                      console.log("✅ Map: All 4 layer APIs fetched for new plot");
-                      initialFetchDoneRef.current = true;
-                    })
-                    .catch((err) => {
-                      console.error(
-                        "❌ Map: Some APIs failed to fetch for new plot:",
-                        err,
-                      );
-                    });
+                  void fetchPlotData(newPlot);
+                  // Field Score runs in parallel; tiles load independently
                 }}
                 disabled={loading}
               >
@@ -2616,8 +2791,12 @@ const CropEyeMap: React.FC<MapProps> = ({
             />
           )}
 
-        {/* Loading Spinner Overlay - Shows when fetching map data */}
-        {dateNavigationLoading && (
+        {/* Loading Spinner — timeline / active layer only (Field Score does not block tiles) */}
+        {(dateNavigationLoading ||
+          (Boolean(selectedPlotName) &&
+            !profileLoading &&
+            !activeUrl &&
+            (timelineLoading || loading))) && (
           <div 
             style={{
               position: 'absolute',
@@ -2644,7 +2823,11 @@ const CropEyeMap: React.FC<MapProps> = ({
             >
               <Loader2 className="w-10 h-10 animate-spin" style={{ color: '#3B82F6' }} />
               <p
-                key={fetchRotationIndex}
+                key={
+                  timelineLoading
+                    ? "timeline"
+                    : fetchRotationIndex
+                }
                 className="map-layer-fetch-status-text"
                 style={{
                   fontSize: "24px",
@@ -2656,8 +2839,10 @@ const CropEyeMap: React.FC<MapProps> = ({
                   lineHeight: 1.4,
                 }}
               >
-                {LAYER_LOADING_MESSAGE[activeLayer] ??
-                  LAYER_FETCH_ROTATION_MESSAGES[fetchRotationIndex]}
+                {timelineLoading
+                  ? "Loading timeline…"
+                  : (LAYER_LOADING_MESSAGE[activeLayer] ??
+                      LAYER_FETCH_ROTATION_MESSAGES[fetchRotationIndex])}
               </p>
             </div>
           </div>
@@ -2814,21 +2999,34 @@ const CropEyeMap: React.FC<MapProps> = ({
             />
           )}
 
-          {shouldShowAnalysisOverlay && (
+          {(shouldShowPngOverlay || shouldShowXyzOverlay) && (
             <Pane name="analysisOverlay" style={{ zIndex: 450 }}>
               <ClipAnalysisPaneToBoundary
                 paneName="analysisOverlay"
                 boundary={savedBoundaryGeometry}
                 enabled={clipTilesToSavedBoundary}
               />
-              <CustomTileLayer
-                key={analysisTileKey}
-                url={activeUrl ?? ""}
-                opacity={0.85}
-                tileKey={analysisTileKey}
-                pane="analysisOverlay"
-                onAllTilesLoaded={handleAnalysisTilesLoaded}
-              />
+              {shouldShowPngOverlay && analysisPngBounds && activeUrl ? (
+                <AnalysisPngOverlay
+                  key={analysisTileKey}
+                  url={activeUrl}
+                  bounds={analysisPngBounds}
+                  opacity={0.85}
+                  overlayKey={analysisTileKey}
+                  pane="analysisOverlay"
+                  onLoaded={handleAnalysisTilesLoaded}
+                />
+              ) : null}
+              {shouldShowXyzOverlay && activeUrl ? (
+                <CustomTileLayer
+                  key={analysisTileKey}
+                  url={activeUrl}
+                  opacity={0.85}
+                  tileKey={analysisTileKey}
+                  pane="analysisOverlay"
+                  onAllTilesLoaded={handleAnalysisTilesLoaded}
+                />
+              ) : null}
             </Pane>
           )}
 

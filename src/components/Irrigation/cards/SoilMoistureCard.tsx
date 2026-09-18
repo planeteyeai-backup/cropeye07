@@ -1,7 +1,8 @@
 /**
  * Water Balance / Soil Moisture card — CropO Flutter logic port:
  * - SoilMoistureApi: GET irrigation-and-soil-moisture/{plot}
- * - WaterBalanceApi: GET water-remain-per-day?plot_name&crop_name&lat&lon&dates
+ * - WaterBalanceApi: GET water-remain-per-day?plot_name&crop_name&start_date&end_date
+ *   (SEF OpenAPI — lat/lon are not accepted on this route)
  * - Irrigation needed kL = remain < 0 ? abs(remainL)/1000 : 0
  * - ETo loss card = eto_loss_liters / 1000 (kL)
  * - Chart: Day = hourly irrigation trend; Week/Month = diverging bars
@@ -31,8 +32,9 @@ import {
   filterDaysInRange,
   formatIrrigationDateRange,
   formatWaterRemainError,
-  pastRange,
-  rangeToToday,
+  needKlFromWaterFields,
+  pastSameDayLastMonthRange,
+  remainKlFromWaterFields,
   waterBalanceStatus,
   type WaterHourStep,
   type WaterRemainDay,
@@ -185,28 +187,6 @@ function shortDateLabel(iso: string): string {
   return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 }
 
-/** Prefer plot → crop_type → farm plantation date as YYYY-MM-DD. */
-function resolvePlantationIso(plot: any): string | null {
-  const candidates = [
-    plot?.plantation_date,
-    plot?.planting_date,
-    plot?.crop_type?.plantation_date,
-    plot?.farms?.[0]?.plantation_date,
-    plot?.farms?.[0]?.planting_date,
-    plot?.farms?.[0]?.crop_type?.plantation_date,
-  ];
-  for (const raw of candidates) {
-    if (raw == null || raw === "") continue;
-    const day = String(raw).trim().slice(0, 10);
-    if (/^\d{4}-\d{2}-\d{2}$/.test(day)) return day;
-    const parsed = new Date(String(raw));
-    if (!Number.isNaN(parsed.getTime())) {
-      return parsed.toISOString().slice(0, 10);
-    }
-  }
-  return null;
-}
-
 /** Flutter: ETo loss card = eto_loss_liters / 1000 kL. */
 function etoLossKl(etoLossLiters: number): number {
   return Math.max(0, Number(etoLossLiters) || 0) / 1000;
@@ -219,24 +199,9 @@ function etoLossKl(etoLossLiters: number): number {
  * Do NOT invent remain from ETo / volume / chart math.
  * Week/Yearly used to prefer m³; that showed wrong KL when API m³ drifted.
  */
-function remainKlFromApi(
-  waterRemainLiters?: number | null,
-  waterRemainM3?: number | null,
-): number {
-  const liters = Number(waterRemainLiters);
-  if (Number.isFinite(liters)) return liters / 1000;
-  const m3 = Number(waterRemainM3);
-  if (Number.isFinite(m3)) return m3;
-  return 0;
-}
+const remainKlFromApi = remainKlFromWaterFields;
 
-function irrigationNeededKlFromApi(
-  waterRemainLiters?: number | null,
-  waterRemainM3?: number | null,
-): number {
-  const kl = remainKlFromApi(waterRemainLiters, waterRemainM3);
-  return kl < 0 ? Math.abs(kl) : 0;
-}
+const irrigationNeededKlFromApi = needKlFromWaterFields;
 
 function buildTubesFromWaterRemain(
   days: WaterRemainDay[],
@@ -287,12 +252,13 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
   const [yearlyLoaded, setYearlyLoaded] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [plotName, setPlotName] = useState<string>("");
-  const [plantationIso, setPlantationIso] = useState<string | null>(null);
   const [plotCoords, setPlotCoords] = useState<{
     lat: number;
     lon: number;
   } | null>(null);
   const [cropName, setCropName] = useState<string>("sugarcane");
+  /** True after profile/external plot meta (crop) is resolved. */
+  const [plotMetaReady, setPlotMetaReady] = useState(false);
   const chartScrollRef = useRef<HTMLDivElement | null>(null);
 
   const band = useMemo(() => {
@@ -314,11 +280,14 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
         lon: externalPlot.lon,
       });
       setCropName(externalPlot.cropName?.trim() || "sugarcane");
-      setPlantationIso(null);
+      setPlotMetaReady(true);
       return;
     }
 
-    if (!profile || profileLoading) return;
+    if (!profile || profileLoading) {
+      setPlotMetaReady(false);
+      return;
+    }
 
     let plotToUse = "";
     let coords: { lat: number; lon: number } | null = null;
@@ -347,14 +316,20 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
       const num = selectedPlot.plot_number != null
         ? String(selectedPlot.plot_number).trim()
         : "";
-      // Prefer underscore for pure-numeric gat/plot (SEF water-remain: 305_503 OK, 305/503 404).
+      // Prefer underscore for pure-numeric gat/plot (SEF: 305_503 OK).
+      // Prefer slash when plot has a letter suffix (SEF: 472/1B OK).
       const pureNumeric =
-        gat &&
-        num &&
+        Boolean(gat) &&
+        Boolean(num) &&
         /^\d+$/.test(gat) &&
         /^\d+$/.test(num);
+      const letterSuffix =
+        Boolean(gat) &&
+        Boolean(num) &&
+        /[a-zA-Z]/.test(`${gat}${num}`);
       plotToUse =
         (pureNumeric ? `${gat}_${num}` : "") ||
+        (letterSuffix ? `${gat}/${num}` : "") ||
         fastapi ||
         (gat && num ? `${gat}_${num}` : "") ||
         "";
@@ -396,9 +371,9 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
     }
 
     if (plotToUse && plotToUse !== plotName) setPlotName(plotToUse);
-    setPlantationIso(selectedPlot ? resolvePlantationIso(selectedPlot) : null);
     setPlotCoords(coords);
     setCropName(crop);
+    setPlotMetaReady(Boolean(plotToUse));
   }, [profile, profileLoading, selectedPlotName, plotName, externalPlot]);
 
   // Keep latest coords without re-triggering a full reload when moisture fills them in.
@@ -406,14 +381,13 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
   plotCoordsRef.current = plotCoords;
   const loadedPlotRef = useRef<string>("");
 
-  // Yearly chart: plantation date → today (fallback last 365 days if plantation missing).
-  const chartRange = useMemo(
-    () => rangeToToday(plantationIso),
-    [plantationIso],
-  );
+  // Month API window: same calendar day last month → today (e.g. 19 Aug → 18 Sep).
+  // Matches Month tab subtitle; SEF OpenAPI default is also ~1 calendar month.
+  const chartRange = useMemo(() => pastSameDayLastMonthRange(), []);
 
   useEffect(() => {
-    if (!plotName) return;
+    // Wait until plot + crop are resolved, then fetch the 1-month water-remain series.
+    if (!plotName || !plotMetaReady) return;
     let cancelled = false;
 
     const applyTubeDays = (
@@ -462,49 +436,32 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
       }
       setChartLoading(true);
 
-      const quickRange = pastRange(7);
-      const yearlyRange = chartRange;
+      const monthRange = chartRange;
       const rainDaysBack = Math.max(
         7,
         Math.ceil(
-          (new Date(`${yearlyRange.end_date}T12:00:00`).getTime() -
-            new Date(`${yearlyRange.start_date}T12:00:00`).getTime()) /
+          (new Date(`${monthRange.end_date}T12:00:00`).getTime() -
+            new Date(`${monthRange.start_date}T12:00:00`).getTime()) /
             86400000,
         ) + 1,
       );
 
       const coords = plotCoordsRef.current;
-      // Flutter WaterBalanceApi: crop + field centroid + date window
-      const waterExtras = {
+      const waterExtras: { cropName: string; allowShortRange: boolean } = {
         cropName: cropName || "sugarcane",
-        lat: coords?.lat,
-        lon: coords?.lon,
+        allowShortRange: true,
       };
-
-      const plotRefsForYear = externalPlot ? null : profile?.plots;
-      const yearlyWaterPromise = fetchWaterRemainForPlot(
-        plotName,
-        plotRefsForYear,
-        365,
-        yearlyRange,
-        waterExtras,
-      );
 
       try {
         const plotRefs = externalPlot ? null : profile?.plots;
-        const [moistureParsed, quickWater, rainByDate] = await Promise.all([
+        const [moistureParsed, rainByDate] = await Promise.all([
           fetchSoilMoistureForPlot(plotName, plotRefs).catch(() => null),
-          fetchWaterRemainForPlot(
-            plotName,
-            plotRefs,
-            7,
-            quickRange,
-            waterExtras,
-          ).catch(() => null),
           coords
-            ? fetchPastDailyRainfall(coords.lat, coords.lon, 7).catch(
-                () => new Map<string, number>(),
-              )
+            ? fetchPastDailyRainfall(
+                coords.lat,
+                coords.lon,
+                Math.min(rainDaysBack, 90),
+              ).catch(() => new Map<string, number>())
             : Promise.resolve(new Map<string, number>()),
         ]);
         if (cancelled) return;
@@ -543,67 +500,57 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
               lat: moistureParsed.latitude,
               lon: moistureParsed.longitude,
             });
-            waterExtras.lat = moistureParsed.latitude;
-            waterExtras.lon = moistureParsed.longitude;
           }
         }
 
-        // Paint UI as soon as 7-day / moisture is ready — do not wait for yearly window.
-        if (quickWater) {
-          applyTubeDays(
-            quickWater,
-            quickRange,
-            moistureByDate,
-            currentMoisture,
-            rainByDate,
-          );
-          publishWaterSeries(quickWater, quickRange);
-          loadedPlotRef.current = plotName;
-          setLoading(false);
-        }
-
         try {
-          const yearlyWater = await yearlyWaterPromise;
+          // SEF GET: plot_name + crop_name + 1-month dates (Month tab window).
+          const monthWater = await fetchWaterRemainForPlot(
+            plotName,
+            plotRefs,
+            31,
+            monthRange,
+            waterExtras,
+          );
           if (cancelled) return;
 
-          let yearlyRain = rainByDate;
+          let monthRain = rainByDate;
+          const rainLat = plotCoordsRef.current?.lat ?? moistureParsed?.latitude;
+          const rainLon = plotCoordsRef.current?.lon ?? moistureParsed?.longitude;
           if (
-            (waterExtras.lat != null && waterExtras.lon != null) &&
-            rainDaysBack > 7
+            rainLat != null &&
+            rainLon != null &&
+            rainDaysBack > 90
           ) {
-            yearlyRain = await fetchPastDailyRainfall(
-              waterExtras.lat,
-              waterExtras.lon,
+            monthRain = await fetchPastDailyRainfall(
+              rainLat,
+              rainLon,
               rainDaysBack,
             ).catch(() => rainByDate);
           }
           if (cancelled) return;
 
-          if (yearlyWater) {
+          if (monthWater) {
             applyTubeDays(
-              yearlyWater,
-              yearlyRange,
+              monthWater,
+              monthRange,
               moistureByDate,
               currentMoisture,
-              yearlyRain,
+              monthRain,
             );
-            publishWaterSeries(yearlyWater, yearlyRange);
+            publishWaterSeries(monthWater, monthRange);
             setYearlyLoaded(true);
             loadedPlotRef.current = plotName;
             setLoading(false);
-          } else if (!quickWater) {
+          } else {
             setLoading(false);
           }
-        } catch (yearlyErr: any) {
+        } catch (monthErr: any) {
           if (cancelled) return;
-          if (!quickWater) {
-            setTubeDays([]);
-            setSelDay(-1);
-            const msg = formatWaterRemainError(yearlyErr, plotName);
-            if (msg) setError(msg);
-          } else {
-            publishWaterSeries(quickWater, quickRange);
-          }
+          setTubeDays([]);
+          setSelDay(-1);
+          const msg = formatWaterRemainError(monthErr, plotName);
+          if (msg) setError(msg);
           setLoading(false);
         }
       } catch (err: any) {
@@ -626,10 +573,10 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
     };
   }, [
     plotName,
+    plotMetaReady,
     cropName,
-    chartRange,
-    band.minOptimal,
-    band.maxOptimal,
+    chartRange.start_date,
+    chartRange.end_date,
     setAppState,
     profile?.plots,
     externalPlot,
@@ -1006,7 +953,6 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
                         </div>
                         <div className="moisture-irrigation-ohlc">
                           <span style={{ color: dayChartColors.axis }}>
-                            R{" "}
                             <b style={{ color: dayChartColors.axis }}>
                               {(latestHourly?.requirementKl ?? 0).toFixed(1)}
                             </b>
@@ -1296,7 +1242,7 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
                           fontWeight: 700,
                         }}
                       >
-                        {selectedRemainKl.toFixed(1)} KL
+                        {Math.abs(selectedRemainKl).toFixed(1)} KL
                         remain
                       </span>
                       <span className="water-balance-day-footer-eto">

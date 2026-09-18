@@ -4,6 +4,7 @@ import "../Irrigation.css";
 import { useAppContext } from "../../../context/AppContext";
 import { useFarmerProfile } from "../../../hooks/useFarmerProfile";
 import { fetchComputeEtJson } from "../../../services/computeEtFetch";
+import { toSafeUserError } from "../../../utils/safeUserError";
 
 interface HourlyETRecord {
   time: string;
@@ -180,8 +181,12 @@ const EvapotranspirationCard: React.FC = () => {
       });
 
     } catch (err: any) {
-      const errorMessage = err.message || 'Unknown error';
-      setError(`Failed to fetch ET data: ${errorMessage}`);
+      setError(
+        toSafeUserError(
+          err?.message,
+          "Unable to load evapotranspiration data. Please try again.",
+        ),
+      );
       
       // Log detailed error for debugging
       console.error('ET API fetch error:', {

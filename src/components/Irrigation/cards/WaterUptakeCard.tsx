@@ -4,6 +4,7 @@ import { Activity } from "lucide-react";
 import "../Irrigation.css";
 import { useAppContext } from "../../../context/AppContext";
 import { useFarmerProfile } from "../../../hooks/useFarmerProfile";
+import { getSarIndexBaseUrl } from "../../../utils/sarIndexHost";
 
 const WaterUptakeCard: React.FC = () => {
   const { appState, getCached, setCached } = useAppContext();
@@ -74,7 +75,7 @@ const WaterUptakeCard: React.FC = () => {
           setLoading(false);
           return;
         }
-        const baseUrl = 'https://admin-cropeye.up.railway.app';
+        const baseUrl = getSarIndexBaseUrl();
         const url = `${baseUrl}/wateruptake?plot_name=${plotName}&end_date=${endDate}&days_back=15`;
         
         const response = await fetch(url, {
@@ -82,7 +83,10 @@ const WaterUptakeCard: React.FC = () => {
           mode: "cors",
           cache: "no-cache",
           credentials: "omit",
-          headers: { "Accept": "application/json" },
+          headers: {
+            Accept: "application/json",
+            "ngrok-skip-browser-warning": "true",
+          },
         });
 
         if (!response.ok) {

@@ -3,6 +3,7 @@ import { CloudRain, Droplets, Gauge } from "lucide-react";
 import { useAppContext } from "../../../context/AppContext";
 import { useFarmerProfile } from "../../../hooks/useFarmerProfile";
 import { fetchSoilMoistureForPlot } from "../../../utils/soilMoistureApi";
+import { toSafeApiError } from "../../../utils/safeUserError";
 
 interface MoistureData {
   date: string;
@@ -137,7 +138,9 @@ const SoilMoistureTrendCard: React.FC<SoilMoistureTrendCardProps> = ({
         ),
       );
     } catch (err: any) {
-      setError(`Unable to load soil moisture trend: ${err?.message || err}`);
+      setError(
+        toSafeApiError(err, "Unable to load soil moisture trend. Please try again."),
+      );
     } finally {
       setLoading(false);
     }
