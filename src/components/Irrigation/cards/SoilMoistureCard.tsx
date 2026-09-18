@@ -4,7 +4,7 @@
  * - WaterBalanceApi: GET water-remain-per-day?plot_name&crop_name&lat&lon&dates
  * - Irrigation needed kL = remain < 0 ? abs(remainL)/1000 : 0
  * - ETo loss card = eto_loss_liters / 1000 (kL)
- * - Chart: Day = hourly remain line (H0–H23); Week/Month = diverging bars
+ * - Chart: Day = dual-line hourly irrigation trend (selected day only); Week/Yearly = diverging bars
  */
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Droplets, Sun } from "lucide-react";
@@ -12,8 +12,8 @@ import {
   Area,
   CartesianGrid,
   ComposedChart,
+  LabelList,
   Line,
-  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -32,10 +32,18 @@ import {
   formatIrrigationDateRange,
   formatWaterRemainError,
   pastRange,
+  rangeToToday,
   waterBalanceStatus,
   type WaterHourStep,
   type WaterRemainDay,
 } from "../../../utils/waterRemainApi";
+
+export type SoilMoistureExternalPlot = {
+  plotName: string;
+  lat: number;
+  lon: number;
+  cropName?: string;
+};
 
 interface SoilMoistureCardProps {
   optimalRange?: [number, number];
@@ -44,6 +52,8 @@ interface SoilMoistureCardProps {
   compact?: boolean;
   medium?: boolean;
   fullWidth?: boolean;
+  /** Agro dashboard / non-farmer views: use plot + coords without useFarmerProfile. */
+  externalPlot?: SoilMoistureExternalPlot | null;
 }
 
 type TubeDay = {
@@ -59,20 +69,76 @@ type TubeDay = {
   hourlySteps: WaterHourStep[];
 };
 
-type WaterRange = "day" | "week" | "month";
+type WaterRange = "day" | "week" | "yearly";
 
 /** Flutter ListView diverging-bar colors */
 const SURPLUS_COLOR = "#1565C0";
 const DEFICIT_COLOR = "#D32F2F";
 const SELECT_DOT = "#29B6F6";
-const HOUR_LINE_COLOR = "#2E7D32";
 
-function hourBarColor(kl: number, maxAbs: number): string {
-  if (kl < 0) return DEFICIT_COLOR;
-  const frac = maxAbs <= 0 ? 0 : Math.min(1, Math.max(0, kl / maxAbs));
-  if (frac < 0.3) return "#FFA000";
-  if (frac < 0.7) return HOUR_LINE_COLOR;
-  return SURPLUS_COLOR;
+/** Open-Meteo forecast `past_days` max is typically 92. */
+const OPEN_METEO_PAST_DAYS_MAX = 92;
+
+type HourlyTrendPoint = {
+  hour: number;
+  label: string;
+  /** Cumulative ET / water requirement through the day (KL) */
+  requirementKl: number;
+  remainKl: number;
+  /** Instant hour loss (KL) */
+  hourRequiredKl: number;
+  /** Instant hour ETo (mm) from API */
+  hourEtoMm: number;
+  isLatest: boolean;
+};
+
+/** Compact multi-line labels on selected hour dots only. */
+function HourlyPointLabel(props: {
+  x?: number | string;
+  y?: number | string;
+  index?: number;
+  payload?: HourlyTrendPoint;
+}) {
+  const { x, y, payload } = props;
+  if (payload == null || x == null || y == null) return null;
+  // Keep chart readable: label every 3rd hour + latest.
+  if (payload.hour % 3 !== 0 && !payload.isLatest) return null;
+
+  const cx = Number(x);
+  const cy = Number(y);
+  if (!Number.isFinite(cx) || !Number.isFinite(cy)) return null;
+
+  return (
+    <g transform={`translate(${cx},${cy - 10})`} style={{ pointerEvents: "none" }}>
+      <text
+        textAnchor="middle"
+        fill="#0f172a"
+        fontSize={8.5}
+        fontWeight={800}
+        dy={-18}
+      >
+        {payload.label}
+      </text>
+      <text
+        textAnchor="middle"
+        fill="#0f172a"
+        fontSize={8}
+        fontWeight={700}
+        dy={-8}
+      >
+        {payload.remainKl.toFixed(1)} KL
+      </text>
+      <text
+        textAnchor="middle"
+        fill="#334155"
+        fontSize={7.5}
+        fontWeight={650}
+        dy={2}
+      >
+        ETo {payload.hourEtoMm.toFixed(2)} mm
+      </text>
+    </g>
+  );
 }
 
 function parsePrecipMm(raw: unknown): number {
@@ -93,7 +159,7 @@ async function fetchPastDailyRainfall(
   const qs = new URLSearchParams({
     latitude: String(lat),
     longitude: String(lon),
-    past_days: String(daysBack),
+    past_days: String(Math.min(Math.max(1, daysBack), OPEN_METEO_PAST_DAYS_MAX)),
     forecast_days: "1",
     daily: "precipitation_sum",
     timezone: "Asia/Kolkata",
@@ -116,10 +182,26 @@ function shortDateLabel(iso: string): string {
   return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 }
 
-/** Flutter: irrigation needed kL only when remain is deficit. */
-function irrigationNeededKl(remainLiters: number): number {
-  if (!(remainLiters < 0)) return 0;
-  return Math.abs(remainLiters) / 1000;
+/** Prefer plot → crop_type → farm plantation date as YYYY-MM-DD. */
+function resolvePlantationIso(plot: any): string | null {
+  const candidates = [
+    plot?.plantation_date,
+    plot?.planting_date,
+    plot?.crop_type?.plantation_date,
+    plot?.farms?.[0]?.plantation_date,
+    plot?.farms?.[0]?.planting_date,
+    plot?.farms?.[0]?.crop_type?.plantation_date,
+  ];
+  for (const raw of candidates) {
+    if (raw == null || raw === "") continue;
+    const day = String(raw).trim().slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(day)) return day;
+    const parsed = new Date(String(raw));
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toISOString().slice(0, 10);
+    }
+  }
+  return null;
 }
 
 /** Flutter: ETo loss card = eto_loss_liters / 1000 kL. */
@@ -127,8 +209,30 @@ function etoLossKl(etoLossLiters: number): number {
   return Math.max(0, Number(etoLossLiters) || 0) / 1000;
 }
 
-function remainKl(remainLiters: number): number {
-  return (Number(remainLiters) || 0) / 1000;
+/**
+ * Water remain in KL — always from water-remain API fields only:
+ *   prefer water_remain_liters / 1000  (source of truth)
+ *   else water_remain_m3 (1 m³ = 1 KL)
+ * Do NOT invent remain from ETo / volume / chart math.
+ * Week/Yearly used to prefer m³; that showed wrong KL when API m³ drifted.
+ */
+function remainKlFromApi(
+  waterRemainLiters?: number | null,
+  waterRemainM3?: number | null,
+): number {
+  const liters = Number(waterRemainLiters);
+  if (Number.isFinite(liters)) return liters / 1000;
+  const m3 = Number(waterRemainM3);
+  if (Number.isFinite(m3)) return m3;
+  return 0;
+}
+
+function irrigationNeededKlFromApi(
+  waterRemainLiters?: number | null,
+  waterRemainM3?: number | null,
+): number {
+  const kl = remainKlFromApi(waterRemainLiters, waterRemainM3);
+  return kl < 0 ? Math.abs(kl) : 0;
 }
 
 function buildTubesFromWaterRemain(
@@ -164,18 +268,20 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
   compact = false,
   medium = false,
   fullWidth = false,
+  externalPlot = null,
 }) => {
   const { setAppState, selectedPlotName } = useAppContext();
   const { profile, loading: profileLoading } = useFarmerProfile();
 
   const [tubeDays, setTubeDays] = useState<TubeDay[]>([]);
   const [selDay, setSelDay] = useState<number>(-1);
-  const [waterRange, setWaterRange] = useState<WaterRange>("week");
+  const [waterRange, setWaterRange] = useState<WaterRange>("day");
   const [loading, setLoading] = useState<boolean>(true);
   const [chartLoading, setChartLoading] = useState<boolean>(false);
-  const [monthLoaded, setMonthLoaded] = useState<boolean>(false);
+  const [yearlyLoaded, setYearlyLoaded] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [plotName, setPlotName] = useState<string>("");
+  const [plantationIso, setPlantationIso] = useState<string | null>(null);
   const [plotCoords, setPlotCoords] = useState<{
     lat: number;
     lon: number;
@@ -194,6 +300,18 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
   }, [optimalRange, cropName]);
 
   useEffect(() => {
+    if (externalPlot?.plotName?.trim()) {
+      const name = String(externalPlot.plotName).trim().replace(/^"|"$/g, "");
+      setPlotName(name);
+      setPlotCoords({
+        lat: externalPlot.lat,
+        lon: externalPlot.lon,
+      });
+      setCropName(externalPlot.cropName?.trim() || "sugarcane");
+      setPlantationIso(null);
+      return;
+    }
+
     if (!profile || profileLoading) return;
 
     let plotToUse = "";
@@ -214,9 +332,25 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
     }
 
     if (selectedPlot) {
+      const fastapi = selectedPlot.fastapi_plot_id
+        ? String(selectedPlot.fastapi_plot_id).trim()
+        : "";
+      const gat = selectedPlot.gat_number != null
+        ? String(selectedPlot.gat_number).trim()
+        : "";
+      const num = selectedPlot.plot_number != null
+        ? String(selectedPlot.plot_number).trim()
+        : "";
+      // Prefer underscore for pure-numeric gat/plot (SEF water-remain: 305_503 OK, 305/503 404).
+      const pureNumeric =
+        gat &&
+        num &&
+        /^\d+$/.test(gat) &&
+        /^\d+$/.test(num);
       plotToUse =
-        selectedPlot.fastapi_plot_id ||
-        `${selectedPlot.gat_number}_${selectedPlot.plot_number}` ||
+        (pureNumeric ? `${gat}_${num}` : "") ||
+        fastapi ||
+        (gat && num ? `${gat}_${num}` : "") ||
         "";
 
       const loc = selectedPlot?.coordinates?.location?.coordinates;
@@ -256,13 +390,21 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
     }
 
     if (plotToUse && plotToUse !== plotName) setPlotName(plotToUse);
+    setPlantationIso(selectedPlot ? resolvePlantationIso(selectedPlot) : null);
     setPlotCoords(coords);
     setCropName(crop);
-  }, [profile, profileLoading, selectedPlotName, plotName]);
+  }, [profile, profileLoading, selectedPlotName, plotName, externalPlot]);
 
-  // Flutter WaterBalanceApi: last 30 days ending today (NOT same-day-last-month).
-  // Cumulative water_remain_liters depends on start_date — wrong window ⇒ wrong Aug values.
-  const chartRange = useMemo(() => pastRange(30), []);
+  // Keep latest coords without re-triggering a full reload when moisture fills them in.
+  const plotCoordsRef = useRef(plotCoords);
+  plotCoordsRef.current = plotCoords;
+  const loadedPlotRef = useRef<string>("");
+
+  // Yearly chart: plantation date → today (fallback last 365 days if plantation missing).
+  const chartRange = useMemo(
+    () => rangeToToday(plantationIso),
+    [plantationIso],
+  );
 
   useEffect(() => {
     if (!plotName) return;
@@ -304,51 +446,57 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
     };
 
     const load = async () => {
-      setLoading(true);
+      const isNewPlot = loadedPlotRef.current !== plotName;
+      if (isNewPlot) {
+        setLoading(true);
+        setTubeDays([]);
+        setSelDay(-1);
+        setYearlyLoaded(false);
+        setError(null);
+      }
       setChartLoading(true);
-      setMonthLoaded(false);
-      setError(null);
-      setTubeDays([]);
-      setSelDay(-1);
 
       const quickRange = pastRange(7);
-      const monthRange = chartRange;
+      const yearlyRange = chartRange;
       const rainDaysBack = Math.max(
         7,
         Math.ceil(
-          (new Date(`${monthRange.end_date}T12:00:00`).getTime() -
-            new Date(`${monthRange.start_date}T12:00:00`).getTime()) /
+          (new Date(`${yearlyRange.end_date}T12:00:00`).getTime() -
+            new Date(`${yearlyRange.start_date}T12:00:00`).getTime()) /
             86400000,
         ) + 1,
       );
 
+      const coords = plotCoordsRef.current;
       // Flutter WaterBalanceApi: crop + field centroid + date window
       const waterExtras = {
         cropName: cropName || "sugarcane",
-        lat: plotCoords?.lat,
-        lon: plotCoords?.lon,
+        lat: coords?.lat,
+        lon: coords?.lon,
       };
 
-      const monthWaterPromise = fetchWaterRemainForPlot(
+      const plotRefsForYear = externalPlot ? null : profile?.plots;
+      const yearlyWaterPromise = fetchWaterRemainForPlot(
         plotName,
-        profile?.plots,
-        30,
-        monthRange,
+        plotRefsForYear,
+        365,
+        yearlyRange,
         waterExtras,
       );
 
       try {
+        const plotRefs = externalPlot ? null : profile?.plots;
         const [moistureParsed, quickWater, rainByDate] = await Promise.all([
-          fetchSoilMoistureForPlot(plotName, profile?.plots).catch(() => null),
+          fetchSoilMoistureForPlot(plotName, plotRefs).catch(() => null),
           fetchWaterRemainForPlot(
             plotName,
-            profile?.plots,
+            plotRefs,
             7,
             quickRange,
             waterExtras,
           ).catch(() => null),
-          plotCoords
-            ? fetchPastDailyRainfall(plotCoords.lat, plotCoords.lon, 7).catch(
+          coords
+            ? fetchPastDailyRainfall(coords.lat, coords.lon, 7).catch(
                 () => new Map<string, number>(),
               )
             : Promise.resolve(new Map<string, number>()),
@@ -379,9 +527,9 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
                   : "High",
           }));
 
-          // Prefer API coords when profile has none
+          // Prefer API coords when profile has none (do not re-trigger this effect).
           if (
-            !plotCoords &&
+            !plotCoordsRef.current &&
             moistureParsed.latitude != null &&
             moistureParsed.longitude != null
           ) {
@@ -389,9 +537,12 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
               lat: moistureParsed.latitude,
               lon: moistureParsed.longitude,
             });
+            waterExtras.lat = moistureParsed.latitude;
+            waterExtras.lon = moistureParsed.longitude;
           }
         }
 
+        // Paint UI as soon as 7-day / moisture is ready — do not wait for yearly window.
         if (quickWater) {
           applyTubeDays(
             quickWater,
@@ -401,43 +552,53 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
             rainByDate,
           );
           publishWaterSeries(quickWater, quickRange);
+          loadedPlotRef.current = plotName;
+          setLoading(false);
         }
 
         try {
-          const monthWater = await monthWaterPromise;
+          const yearlyWater = await yearlyWaterPromise;
           if (cancelled) return;
 
-          let monthRain = rainByDate;
-          if (plotCoords && rainDaysBack > 7) {
-            monthRain = await fetchPastDailyRainfall(
-              plotCoords.lat,
-              plotCoords.lon,
+          let yearlyRain = rainByDate;
+          if (
+            (waterExtras.lat != null && waterExtras.lon != null) &&
+            rainDaysBack > 7
+          ) {
+            yearlyRain = await fetchPastDailyRainfall(
+              waterExtras.lat,
+              waterExtras.lon,
               rainDaysBack,
             ).catch(() => rainByDate);
           }
           if (cancelled) return;
 
-          if (monthWater) {
+          if (yearlyWater) {
             applyTubeDays(
-              monthWater,
-              monthRange,
+              yearlyWater,
+              yearlyRange,
               moistureByDate,
               currentMoisture,
-              monthRain,
+              yearlyRain,
             );
-            publishWaterSeries(monthWater, monthRange);
-            setMonthLoaded(true);
+            publishWaterSeries(yearlyWater, yearlyRange);
+            setYearlyLoaded(true);
+            loadedPlotRef.current = plotName;
+            setLoading(false);
+          } else if (!quickWater) {
+            setLoading(false);
           }
-        } catch (monthErr: any) {
+        } catch (yearlyErr: any) {
           if (cancelled) return;
           if (!quickWater) {
             setTubeDays([]);
             setSelDay(-1);
-            const msg = formatWaterRemainError(monthErr, plotName);
+            const msg = formatWaterRemainError(yearlyErr, plotName);
             if (msg) setError(msg);
           } else {
             publishWaterSeries(quickWater, quickRange);
           }
+          setLoading(false);
         }
       } catch (err: any) {
         if (cancelled) return;
@@ -445,10 +606,10 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
         setSelDay(-1);
         const msg = formatWaterRemainError(err, plotName);
         if (msg) setError(msg);
+        setLoading(false);
       } finally {
         if (!cancelled) {
           setChartLoading(false);
-          setLoading(false);
         }
       }
     };
@@ -459,14 +620,13 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
     };
   }, [
     plotName,
-    plotCoords?.lat,
-    plotCoords?.lon,
     cropName,
     chartRange,
     band.minOptimal,
     band.maxOptimal,
     setAppState,
     profile?.plots,
+    externalPlot,
   ]);
 
   const visibleDays = useMemo(
@@ -490,9 +650,12 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
       if (prev < 0 || prev >= tubeDays.length) {
         return tubeDays.length - 1;
       }
-      // Day tab = hourly for the selected day — do not snap away from selection.
-      if (waterRange === "day") return prev;
-      // If current day is outside the visible Week/Month window, snap to last visible.
+      // Day chart = hourly for *today* (latest API day). Do not keep an old
+      // index after yearly load (index 0 became plantation e.g. 16 Feb).
+      if (waterRange === "day") {
+        return tubeDays.length - 1;
+      }
+      // If current day is outside the visible Week/Yearly window, snap to last visible.
       if (prev < visibleBase || prev >= visibleBase + visibleDays.length) {
         return visibleBase + visibleDays.length - 1;
       }
@@ -519,82 +682,172 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
   const selected =
     selDay >= 0 && selDay < tubeDays.length ? tubeDays[selDay] : null;
 
-  const irrigKl = irrigationNeededKl(selected?.waterRemainLiters ?? 0);
-  // Flutter ETo loss card: eto_loss_liters / 1000 → kL
+  // Always liters/1000 → KL (same for Day / Week / Yearly). m³ only as fallback.
+  const irrigKl = irrigationNeededKlFromApi(
+    selected?.waterRemainLiters,
+    selected?.waterRemainM3,
+  );
+  // Flutter ETo loss card: eto_loss_liters / 1000 → KL (API field as-is)
   const etoKl = etoLossKl(selected?.etoLossLiters ?? 0);
   const etoTodayMm = selected?.etoSumMm ?? 0;
-  const selectedRemainKl = remainKl(selected?.waterRemainLiters ?? 0);
+  const selectedRemainKl = remainKlFromApi(
+    selected?.waterRemainLiters,
+    selected?.waterRemainM3,
+  );
 
-  const chartH = compact ? 200 : medium ? 240 : fullWidth ? 280 : 280;
+  const chartH = useMemo(() => {
+    if (waterRange === "week") {
+      return compact ? 140 : medium ? 150 : 160;
+    }
+    if (waterRange === "yearly") {
+      return compact ? 160 : medium ? 180 : 190;
+    }
+    // Day line chart needs room for point labels
+    return compact ? 220 : medium ? 250 : 270;
+  }, [waterRange, compact, medium]);
 
   // Status badge uses full series; bar heights use visible window so Week fills space.
-  const seriesMaxRemainL = useMemo(() => {
+  const seriesMaxRemainKl = useMemo(() => {
     let max = 0;
     for (const d of tubeDays) {
-      max = Math.max(max, Math.abs(d.waterRemainLiters));
+      max = Math.max(
+        max,
+        Math.abs(remainKlFromApi(d.waterRemainLiters, d.waterRemainM3)),
+      );
     }
     return max > 0 ? max : 1;
   }, [tubeDays]);
 
-  const visibleMaxRemainL = useMemo(() => {
+  const visibleMaxRemainKl = useMemo(() => {
     let max = 0;
     for (const d of visibleDays) {
-      max = Math.max(max, Math.abs(d.waterRemainLiters));
+      max = Math.max(
+        max,
+        Math.abs(remainKlFromApi(d.waterRemainLiters, d.waterRemainM3)),
+      );
     }
     return max > 0 ? max : 1;
   }, [visibleDays]);
 
-  /** Week/month with only surplus → grow bars from bottom (use full height). */
+  /** Week/yearly with only surplus → grow bars from bottom (use full height). */
   const weekFillFromBottom = useMemo(() => {
     if (waterRange === "day" || !visibleDays.length) return false;
     return !visibleDays.some(
-      (d) => irrigationNeededKl(d.waterRemainLiters) >= 0.05,
+      (d) =>
+        irrigationNeededKlFromApi(d.waterRemainLiters, d.waterRemainM3) >= 0.05,
     );
   }, [visibleDays, waterRange]);
 
-  // Day tab only — Flutter LineChart: hourly waterVolumeAfterLiters / 1000 (kL).
-  const hourlyBars = useMemo(() => {
-    if (!selected?.hourlySteps?.length) return [];
-    return selected.hourlySteps.map((h, i) => {
-      const clock = `${String(i).padStart(2, "0")}:00`;
+  /**
+   * Day tab — water required only (cumulative ET loss from hourly_steps).
+   * Skip leading overnight hours that stay at 0 KL (no useful signal).
+   */
+  const hourlyTrendPoints = useMemo(() => {
+    const steps = selected?.hourlySteps ?? [];
+    if (!steps.length) return [] as HourlyTrendPoint[];
+
+    let cumRequirement = 0;
+
+    const all = steps.map((step, index) => {
+      const beforeL = Number(step.waterVolumeBeforeLiters) || 0;
+      const afterL = Number(step.waterVolumeAfterLiters) || 0;
+      const hourLossL = Number(step.hourLossLiters);
+      const lossL =
+        Number.isFinite(hourLossL) && hourLossL > 0
+          ? hourLossL
+          : Math.max(0, beforeL - afterL);
+      const hourRequiredKl = lossL / 1000;
+      cumRequirement += hourRequiredKl;
+
+      const hour =
+        step.hour != null && Number.isFinite(step.hour) ? Number(step.hour) : index;
+
       return {
-        hour: i,
-        label: `H${i}`,
-        clock,
-        kl: Number((h.waterVolumeAfterLiters / 1000).toFixed(2)),
-        liters: h.waterVolumeAfterLiters,
+        hour,
+        label: `${String(hour).padStart(2, "0")}:00`,
+        requirementKl: Number(cumRequirement.toFixed(2)),
+        remainKl: Number((afterL / 1000).toFixed(2)),
+        hourRequiredKl: Number(hourRequiredKl.toFixed(3)),
+        hourEtoMm: Number((Number(step.etoMm) || 0).toFixed(3)),
+        isLatest: false,
       };
     });
+
+    // Drop flat 0 KL prefix (e.g. 00:00–07:00 before ET starts).
+    let start = 0;
+    while (
+      start < all.length - 1 &&
+      all[start].requirementKl < 0.05 &&
+      all[start].hourRequiredKl < 0.005
+    ) {
+      start += 1;
+    }
+
+    const trimmed = all.slice(start);
+    if (trimmed.length) {
+      trimmed[trimmed.length - 1] = {
+        ...trimmed[trimmed.length - 1],
+        isLatest: true,
+      };
+    }
+    return trimmed;
   }, [selected]);
 
-  const hourlyMaxAbsKl = useMemo(() => {
-    let max = 0;
-    for (const h of hourlyBars) max = Math.max(max, Math.abs(h.kl));
-    return max > 0.01 ? max : 1;
-  }, [hourlyBars]);
+  const dayNeedsIrrigation = useMemo(
+    () =>
+      irrigationNeededKlFromApi(
+        selected?.waterRemainLiters,
+        selected?.waterRemainM3,
+      ) >= 0.05,
+    [selected],
+  );
 
-  /** Day Y-axis: match ref screenshot for all-deficit; Flutter symmetric when mixed. */
+  const dayChartColors = useMemo(() => {
+    if (dayNeedsIrrigation) {
+      return {
+        required: "#38BDF8",
+        grid: "#BAE6FD",
+        // Dark readable labels on light-blue chart
+        axis: "#0F172A",
+        surface: "#F0F9FF",
+        border: "#7DD3FC",
+      };
+    }
+    return {
+      required: "#4ADE80",
+      grid: "#DCFCE7",
+      axis: "#0F172A",
+      surface: "#F0FDF4",
+      border: "#86EFAC",
+    };
+  }, [dayNeedsIrrigation]);
+
   const hourlyYDomain = useMemo((): [number, number] => {
-    if (!hourlyBars.length) return [-1, 1];
-    const vals = hourlyBars.map((h) => h.kl);
-    const dataMin = Math.min(...vals);
-    const dataMax = Math.max(...vals);
-    // All deficit (screenshot case): top ≈ 0/1, bottom below min
-    if (dataMax <= 0) {
-      return [Math.floor(dataMin * 1.08), 1];
-    }
-    // All surplus: from 0 up
-    if (dataMin >= 0) {
-      return [0, Math.max(1, Math.ceil(dataMax * 1.08))];
-    }
-    // Mixed remain/deficit — Flutter: ±maxAbs
-    const m = hourlyMaxAbsKl;
-    return [-m, m];
-  }, [hourlyBars, hourlyMaxAbsKl]);
+    if (!hourlyTrendPoints.length) return [0, 1];
+    const dataMax = Math.max(
+      ...hourlyTrendPoints.map((p) => p.requirementKl),
+      0.1,
+    );
+    const pad = Math.max(0.25, dataMax * 0.12);
+    return [0, dataMax + pad];
+  }, [hourlyTrendPoints]);
+
+  const hourlyTicks = useMemo(() => {
+    if (!hourlyTrendPoints.length) return [] as number[];
+    const hours = hourlyTrendPoints.map((p) => p.hour);
+    const first = hours[0];
+    const last = hours[hours.length - 1];
+    const ticks = hours.filter(
+      (h) => h === first || h === last || h % 3 === 0,
+    );
+    return Array.from(new Set(ticks));
+  }, [hourlyTrendPoints]);
+
+  const latestHourly = hourlyTrendPoints[hourlyTrendPoints.length - 1] ?? null;
 
   const balanceStatus = waterBalanceStatus(
     selectedRemainKl,
-    Math.max(1, seriesMaxRemainL / 1000),
+    Math.max(1, seriesMaxRemainKl),
   );
 
   const dateRangeLabel = useMemo(() => {
@@ -645,25 +898,20 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
           </p>
         ) : (
           <>
-            {/* Flutter KPI row */}
+            {/* Flutter KPI: Irrigation Need = remain < 0 ? abs : 0 (show 0 when surplus) */}
             <div className="water-balance-kpi-row">
               <div
                 className="water-balance-kpi water-balance-kpi--irrigation"
                 style={{
                   backgroundColor:
-                    (selected?.waterRemainLiters ?? 0) < 0
-                      ? "#FFEBEE"
-                      : "#E3F2FD",
+                    selectedRemainKl < 0 ? "#FFEBEE" : "#E3F2FD",
                 }}
               >
                 <div className="water-balance-kpi-label">
                   <Droplets
                     className="h-3.5 w-3.5"
                     style={{
-                      color:
-                        (selected?.waterRemainLiters ?? 0) < 0
-                          ? "#D32F2F"
-                          : "#0288D1",
+                      color: selectedRemainKl < 0 ? "#D32F2F" : "#0288D1",
                     }}
                   />
                   Irrigation Need
@@ -671,13 +919,10 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
                 <div
                   className="water-balance-kpi-value"
                   style={{
-                    color:
-                      (selected?.waterRemainLiters ?? 0) < 0
-                        ? "#D32F2F"
-                        : "#0288D1",
+                    color: selectedRemainKl < 0 ? "#D32F2F" : "#0288D1",
                   }}
                 >
-                  {irrigKl.toFixed(1)} kL
+                  {irrigKl.toFixed(1)} KL
                 </div>
               </div>
               <div className="water-balance-kpi water-balance-kpi--eto">
@@ -685,15 +930,15 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
                   <Sun className="h-3.5 w-3.5" />
                   ETo loss
                 </div>
-                <div className="water-balance-kpi-value">{etoKl.toFixed(1)} kL</div>
+                <div className="water-balance-kpi-value">{etoKl.toFixed(1)} KL</div>
               </div>
             </div>
 
             <p className="water-balance-eto-hint">
               ETo today: {etoTodayMm.toFixed(1)} mm/day
               {dateRangeLabel ? ` · ${dateRangeLabel}` : ""}
-              {chartLoading && !monthLoaded && (
-                <span className="text-gray-400"> · loading month…</span>
+              {chartLoading && !yearlyLoaded && (
+                <span className="text-gray-400"> · loading year…</span>
               )}
             </p>
 
@@ -702,7 +947,7 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
                 [
                   ["day", "Day"],
                   ["week", "Week"],
-                  ["month", "Month"],
+                  ["yearly", "Yearly"],
                 ] as const
               ).map(([key, label]) => (
                 <button
@@ -718,145 +963,194 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
 
             {visibleDays.length > 0 ? (
               <>
-                <p className="water-balance-chart-hint">
-                  {waterRange === "day"
-                    ? hourlyBars.length
-                      ? "Hover or tap a point to see the clock time and remain (kL)."
-                      : "No hourly steps for this day"
-                    : "Tap a day for detail"}
-                </p>
+                {waterRange !== "day" ? (
+                  <p className="water-balance-chart-hint water-balance-chart-hint--compact">
+                    Tap a day for detail
+                  </p>
+                ) : null}
 
                 {waterRange === "day" ? (
-                  hourlyBars.length > 0 ? (
+                  hourlyTrendPoints.length > 0 ? (
                     <div
-                      className={`moisture-hourly-chart ${compact ? "moisture-hourly-chart--compact" : ""}`}
-                      style={{ height: chartH }}
-                      aria-label="Hourly water remain"
+                      className={`moisture-hourly-chart moisture-irrigation-trend-chart moisture-irrigation-trend-chart--farm moisture-irrigation-trend-chart--pro ${dayNeedsIrrigation ? "is-need" : "is-ok"}`}
+                      style={{
+                        height: chartH,
+                        background: dayChartColors.surface,
+                        borderColor: dayChartColors.border,
+                      }}
+                      aria-label="Water required"
                     >
+                      <div className="moisture-irrigation-trend-header">
+                        <div>
+                          <div
+                            className="moisture-irrigation-trend-title"
+                            style={{ color: dayChartColors.axis }}
+                          >
+                            {/* WATER REQUIRED */}
+                          </div>
+                          <div
+                            className="moisture-irrigation-trend-sub"
+                            style={{ color: dayChartColors.axis }}
+                          >
+                            {selected?.shortDate ?? "Day"}
+                            {latestHourly
+                              ? ` · ${latestHourly.requirementKl.toFixed(2)} KL`
+                              : ""}
+                          </div>
+                        </div>
+                        <div className="moisture-irrigation-ohlc">
+                          <span style={{ color: dayChartColors.axis }}>
+                            R{" "}
+                            <b style={{ color: dayChartColors.axis }}>
+                              {(latestHourly?.requirementKl ?? 0).toFixed(1)}
+                            </b>
+                          </span>
+                        </div>
+                      </div>
+
                       <div className="moisture-hourly-chart-plot">
                         <ResponsiveContainer width="100%" height="100%">
                           <ComposedChart
-                            data={hourlyBars}
-                            margin={{ top: 8, right: 8, left: 0, bottom: 0 }}
+                            data={hourlyTrendPoints}
+                            margin={{ top: 36, right: 12, left: 4, bottom: 4 }}
                           >
+                            <defs>
+                              <linearGradient
+                                id="smRequiredFill"
+                                x1="0"
+                                y1="0"
+                                x2="0"
+                                y2="1"
+                              >
+                                <stop
+                                  offset="0%"
+                                  stopColor={dayChartColors.required}
+                                  stopOpacity={0.28}
+                                />
+                                <stop
+                                  offset="100%"
+                                  stopColor={dayChartColors.required}
+                                  stopOpacity={0.02}
+                                />
+                              </linearGradient>
+                            </defs>
                             <CartesianGrid
-                              strokeDasharray="3 3"
+                              stroke={dayChartColors.grid}
+                              strokeDasharray="4 4"
                               vertical={false}
-                              stroke="#e2e8f0"
                             />
                             <XAxis
-                              dataKey="label"
-                              tick={{ fontSize: 13, fill: "#64748b" }}
-                              ticks={hourlyBars
-                                .filter(
-                                  (h) =>
-                                    h.hour % 2 === 0 ||
-                                    h.hour === hourlyBars.length - 1,
-                                )
-                                .map((h) => h.label)}
+                              type="number"
+                              dataKey="hour"
+                              domain={[
+                                hourlyTrendPoints[0]?.hour ?? 0,
+                                hourlyTrendPoints[
+                                  hourlyTrendPoints.length - 1
+                                ]?.hour ?? 23,
+                              ]}
+                              ticks={hourlyTicks}
+                              tickFormatter={(v) =>
+                                `${String(Number(v)).padStart(2, "0")}:00`
+                              }
+                              tick={{ fontSize: 11, fill: dayChartColors.axis }}
                               tickLine={false}
-                              axisLine={{ stroke: "#e2e8f0" }}
+                              axisLine={{ stroke: dayChartColors.border }}
                             />
                             <YAxis
-                              tick={{ fontSize: 13, fill: "#64748b" }}
-                              tickFormatter={(v) => `${Number(v).toFixed(0)}`}
-                              width={42}
+                              orientation="left"
+                              tick={{ fontSize: 11, fill: dayChartColors.axis }}
+                              tickFormatter={(v) =>
+                                `${Number(v).toFixed(1)} KL`
+                              }
+                              width={54}
                               tickLine={false}
-                              axisLine={false}
+                              axisLine={{ stroke: dayChartColors.border }}
                               domain={hourlyYDomain}
-                              label={{
-                                value: "kL",
-                                angle: -90,
-                                position: "insideLeft",
-                                style: { fontSize: 13, fill: "#64748b" },
-                              }}
-                            />
-                            <ReferenceLine
-                              y={0}
-                              stroke="#94a3b8"
-                              strokeWidth={1.5}
                             />
                             <Tooltip
-                              formatter={(value: number) => [
-                                `${Number(value).toFixed(1)} kL`,
-                                "Remain",
-                              ]}
-                              labelFormatter={(_label, payload) => {
-                                const row = payload?.[0]?.payload as
-                                  | { clock?: string; hour?: number; label?: string }
+                              content={({ active, payload }) => {
+                                if (!active || !payload?.length) return null;
+                                const row = payload[0]?.payload as
+                                  | HourlyTrendPoint
                                   | undefined;
-                                const clock =
-                                  row?.clock ??
-                                  (row?.hour != null
-                                    ? `${String(row.hour).padStart(2, "0")}:00`
-                                    : String(_label ?? ""));
-                                return `${clock} (${row?.label ?? _label})`;
-                              }}
-                              contentStyle={{
-                                fontSize: 13,
-                                borderRadius: 8,
-                                border: "1px solid #e2e8f0",
+                                if (!row) return null;
+                                return (
+                                  <div
+                                    style={{
+                                      fontSize: 12,
+                                      borderRadius: 8,
+                                      border: `1px solid ${dayChartColors.border}`,
+                                      background: "#FFFFFF",
+                                      color: dayChartColors.axis,
+                                      padding: "8px 10px",
+                                      lineHeight: 1.35,
+                                    }}
+                                  >
+                                    <div style={{ fontWeight: 800, marginBottom: 4 }}>
+                                      {row.label}
+                                    </div>
+                                    <div>
+                                      Water remain:{" "}
+                                      <b>{row.remainKl.toFixed(2)} KL</b>
+                                    </div>
+                                    <div>
+                                      ETo loss:{" "}
+                                      <b>{row.hourEtoMm.toFixed(2)} mm</b>
+                                      {" · "}
+                                      <b>{row.hourRequiredKl.toFixed(2)} KL</b>
+                                    </div>
+                                  </div>
+                                );
                               }}
                             />
-                            {/* Flutter belowBarData fill under the remain line */}
                             <Area
                               type="monotone"
-                              dataKey="kl"
+                              dataKey="requirementKl"
                               stroke="none"
-                              fill={HOUR_LINE_COLOR}
-                              fillOpacity={0.12}
-                              baseValue={0}
+                              fill="url(#smRequiredFill)"
+                              tooltipType="none"
+                              legendType="none"
                               isAnimationActive={false}
                             />
                             <Line
                               type="monotone"
-                              dataKey="kl"
-                              stroke={HOUR_LINE_COLOR}
-                              strokeWidth={2.5}
-                              strokeDasharray="6 4"
-                              dot={
-                                ((props: {
-                                  cx?: number;
-                                  cy?: number;
-                                  payload?: { hour?: number; kl?: number };
-                                }) => {
-                                  const { cx, cy, payload } = props;
-                                  if (cx == null || cy == null) {
-                                    return (
-                                      <circle
-                                        key={`dot-empty-${payload?.hour ?? 0}`}
-                                        r={0}
-                                      />
-                                    );
-                                  }
-                                  const color = hourBarColor(
-                                    Number(payload?.kl) || 0,
-                                    hourlyMaxAbsKl,
-                                  );
-                                  return (
-                                    <circle
-                                      key={`dot-${payload?.hour ?? 0}`}
-                                      cx={cx}
-                                      cy={cy}
-                                      r={3.5}
-                                      fill={color}
-                                      stroke="#fff"
-                                      strokeWidth={1}
-                                    />
-                                  );
-                                }) as any
-                              }
-                              activeDot={{ r: 5 }}
+                              dataKey="requirementKl"
+                              name="Water required"
+                              stroke={dayChartColors.required}
+                              strokeWidth={2.75}
+                              dot={{
+                                r: 3.5,
+                                fill: dayChartColors.required,
+                                stroke: "#fff",
+                                strokeWidth: 1.5,
+                              }}
+                              activeDot={{
+                                r: 5.5,
+                                fill: dayChartColors.required,
+                                stroke: "#fff",
+                                strokeWidth: 2,
+                              }}
                               isAnimationActive={false}
-                            />
+                            >
+                              <LabelList
+                                dataKey="requirementKl"
+                                content={<HourlyPointLabel />}
+                              />
+                            </Line>
                           </ComposedChart>
                         </ResponsiveContainer>
+                      </div>
+
+                      <div className="moisture-irrigation-trend-legend">
+                        <span>
+                          <i style={{ backgroundColor: dayChartColors.required }} />{" "}
+                        {/* Water required */}
+                        </span>
                       </div>
                     </div>
                   ) : (
                     <p className="text-xs text-slate-400 text-center py-6">
-                      No hourly water data for{" "}
-                      {selected?.shortDate ?? "this day"}
+                      No water data for this day
                     </p>
                   )
                 ) : (
@@ -871,23 +1165,28 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
                   {visibleDays.map((day, i) => {
                     const fullIdx = visibleBase + i;
                     const isSel = fullIdx === selDay;
-                    const remainL = day.waterRemainLiters;
-                    const needKl = irrigationNeededKl(remainL);
-                    const rKl = remainKl(remainL);
+                    const rKl = remainKlFromApi(
+                      day.waterRemainLiters,
+                      day.waterRemainM3,
+                    );
+                    const needKl = irrigationNeededKlFromApi(
+                      day.waterRemainLiters,
+                      day.waterRemainM3,
+                    );
                     const isDeficit = needKl >= 0.05;
                     const isSurplus = rKl >= 0.05;
                     const frac =
                       isDeficit || isSurplus
                         ? Math.min(
                             1,
-                            Math.max(0, Math.abs(remainL) / visibleMaxRemainL),
+                            Math.max(0, Math.abs(rKl) / visibleMaxRemainKl),
                           )
                         : 0;
                     const barColor = isDeficit ? DEFICIT_COLOR : SURPLUS_COLOR;
                     // Surplus-only week: use almost full track height. Mixed: half above/below zero.
                     const heightCss = weekFillFromBottom
-                      ? `max(12px, calc(${frac} * 92%))`
-                      : `max(10px, calc(${frac} * 48%))`;
+                      ? `max(8px, calc(${frac} * 78%))`
+                      : `max(8px, calc(${frac} * 40%))`;
 
                     return (
                       <button
@@ -904,7 +1203,7 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
                           height: "100%",
                         }}
                         onClick={() => setSelDay(fullIdx)}
-                        title={`${day.shortDate}: ${rKl.toFixed(1)} kL remain · need ${needKl.toFixed(1)} kL`}
+                        title={`${day.shortDate}: ${rKl.toFixed(1)} KL remain · need ${needKl.toFixed(1)} KL`}
                       >
                         {isSel ? (
                           <span
@@ -960,12 +1259,16 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
                 )}
 
                 <div className="moisture-diverging-legend">
-                  <span>
-                    <i style={{ backgroundColor: SURPLUS_COLOR }} /> Remain
-                  </span>
-                  <span>
-                    <i style={{ backgroundColor: DEFICIT_COLOR }} /> Deficit
-                  </span>
+                  {waterRange === "day" ? null : (
+                    <>
+                      <span>
+                        <i style={{ backgroundColor: SURPLUS_COLOR }} /> Remain
+                      </span>
+                      <span>
+                        <i style={{ backgroundColor: DEFICIT_COLOR }} /> Deficit
+                      </span>
+                    </>
+                  )}
                 </div>
 
                 {/* Flutter selected-day footer: date · water remain · ETo mm */}
@@ -978,22 +1281,16 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
                       <Droplets
                         className="h-3 w-3 shrink-0"
                         style={{
-                          color:
-                            selected.waterRemainLiters < 0
-                              ? "#D32F2F"
-                              : "#0288D1",
+                          color: selectedRemainKl < 0 ? "#D32F2F" : "#0288D1",
                         }}
                       />
                       <span
                         style={{
-                          color:
-                            selected.waterRemainLiters < 0
-                              ? "#D32F2F"
-                              : "#0288D1",
+                          color: selectedRemainKl < 0 ? "#D32F2F" : "#0288D1",
                           fontWeight: 700,
                         }}
                       >
-                        {remainKl(selected.waterRemainLiters).toFixed(1)} kL
+                        {selectedRemainKl.toFixed(1)} KL
                         remain
                       </span>
                       <span className="water-balance-day-footer-eto">

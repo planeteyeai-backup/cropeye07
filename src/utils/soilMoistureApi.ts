@@ -186,33 +186,35 @@ async function getSoilMoistureOnce(plotName: string): Promise<any> {
   let preferredRaw: any = null;
   try {
     preferredRaw = await fetchJsonGet(preferred);
-  } catch (err: any) {
-    const status = err?.status;
-    // Network / 404 / 405 → try legacy (same as Flutter).
-    if (status != null && status !== 404 && status !== 405) {
-      // Still try legacy once for robustness, then throw if both fail.
-    }
-  }
-
-  let legacyRaw: any = null;
-  try {
-    legacyRaw = await fetchJsonGet(legacy);
   } catch {
-    /* optional enrich / fallback */
+    /* try legacy below */
   }
 
+  // Prefer path alone when it already has usable moisture data.
+  // Only hit legacy when preferred failed or is missing lat/lon.
   if (preferredRaw) {
     const preferredParsed = parseSoilMoistureResponse(preferredRaw);
     const needsCoords =
       !preferredParsed?.latitude && !preferredParsed?.longitude;
-    if (needsCoords && legacyRaw) {
-      const legacyParsed = parseSoilMoistureResponse(legacyRaw);
+
+    if (!needsCoords) {
+      setCache(cacheKey, preferredRaw);
+      return preferredRaw;
+    }
+
+    let legacyRaw: any = null;
+    try {
+      legacyRaw = await fetchJsonGet(legacy);
+    } catch {
+      /* optional enrich */
+    }
+
+    if (legacyRaw) {
       const merged = {
         ...preferredRaw,
         latitude: preferredRaw.latitude ?? legacyRaw.latitude,
         longitude: preferredRaw.longitude ?? legacyRaw.longitude,
-        plot_name:
-          preferredRaw.plot_name || legacyRaw.plot_name || plotName,
+        plot_name: preferredRaw.plot_name || legacyRaw.plot_name || plotName,
         time_series:
           preferredRaw.time_series ??
           preferredRaw.soil_moisture_stack ??
@@ -222,8 +224,16 @@ async function getSoilMoistureOnce(plotName: string): Promise<any> {
       setCache(cacheKey, merged);
       return merged;
     }
+
     setCache(cacheKey, preferredRaw);
     return preferredRaw;
+  }
+
+  let legacyRaw: any = null;
+  try {
+    legacyRaw = await fetchJsonGet(legacy);
+  } catch {
+    /* fall through to POST */
   }
 
   if (legacyRaw) {

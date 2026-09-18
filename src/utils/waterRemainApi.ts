@@ -11,6 +11,7 @@ const WATER_REMAIN_TIMEOUT_MS = 60_000;
 const WATER_REMAIN_CACHE_MS = 15 * 60 * 1000;
 
 export type WaterHourStep = {
+  hour?: number;
   etoMm: number;
   hourLossLiters: number;
   waterVolumeBeforeLiters: number;
@@ -79,36 +80,40 @@ export function filterPastDays(
     .slice(-daysBack);
 }
 
+/**
+ * SEF plot ids are inconsistent:
+ *   - pure numeric gat/plot → usually underscore (`305_503`); slash 404s
+ *   - letter suffix (`8/1A`) → usually slash; underscore 404s
+ * Always try both forms; order reduces noisy 404s.
+ */
 function orderWaterRemainCandidates(candidates: string[]): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  const push = (v: string) => {
-    const s = String(v ?? "").trim();
-    if (!s) return;
-    const key = s.toLowerCase();
-    if (seen.has(key)) return;
-    seen.add(key);
-    out.push(s);
+  const forms = new Set<string>();
+  for (const raw of candidates) {
+    const s = String(raw ?? "").trim();
+    if (!s) continue;
+    forms.add(s);
+    if (s.includes("/")) forms.add(s.replace(/\//g, "_"));
+    if (s.includes("_")) forms.add(s.replace(/_/g, "/"));
+  }
+
+  const score = (s: string): number => {
+    const hasAlphaSuffix = /[/_]\d*[a-zA-Z]/i.test(s);
+    const underscoreOnly = s.includes("_") && !s.includes("/");
+    const slashOnly = s.includes("/") && !s.includes("_");
+    if (hasAlphaSuffix) {
+      if (slashOnly) return 0;
+      if (underscoreOnly) return 1;
+      return 2;
+    }
+    if (underscoreOnly) return 0;
+    if (slashOnly) return 1;
+    return 2;
   };
 
-  const isNumericPlot = (s: string) =>
-    /^\d+[/_]\d+[a-zA-Z]?$/.test(s.replace(/\//g, "_"));
-
-  for (const c of candidates) {
-    const s = String(c ?? "").trim();
-    if (!s) continue;
-    if (isNumericPlot(s)) {
-      // e.g. 305/503 → SEF often only has 305_503 — try underscore first.
-      if (s.includes("/")) push(s.replace(/\//g, "_"));
-      push(s);
-      if (s.includes("_")) push(s.replace(/_/g, "/"));
-    } else {
-      push(s);
-      if (s.includes("_")) push(s.replace(/_/g, "/"));
-      if (s.includes("/")) push(s.replace(/\//g, "_"));
-    }
-  }
-  return out;
+  return [...forms].sort((a, b) => {
+    const d = score(a) - score(b);
+    return d !== 0 ? d : a.localeCompare(b);
+  });
 }
 
 function waterRemainCacheKey(
@@ -129,9 +134,15 @@ function waterRemainCacheKey(
   return `waterRemain_${plotName}_${start_date}_${end_date}_${crop}_${lat}_${lon}`;
 }
 
-function normalizeHourStep(item: any): WaterHourStep | null {
+function normalizeHourStep(item: any, index = 0): WaterHourStep | null {
   if (!item || typeof item !== "object") return null;
+  const hourRaw =
+    toFinite(item.hour) ??
+    toFinite(item.hour_of_day) ??
+    toFinite(item.h) ??
+    index;
   return {
+    hour: hourRaw != null && hourRaw >= 0 && hourRaw <= 23 ? hourRaw : index,
     etoMm: toFinite(item.eto_mm) ?? 0,
     hourLossLiters: toFinite(item.hour_loss_liters) ?? 0,
     waterVolumeBeforeLiters: toFinite(item.water_volume_before_liters) ?? 0,
@@ -148,17 +159,23 @@ function normalizeDay(item: any): WaterRemainDay | null {
     toFinite(item.eto_loss_liters) ??
     toFinite(item.daily_water_loss_liters_from_eto_sum) ??
     0;
+  // Liters is the source of truth (Flutter). Derive m³/KL from liters when
+  // present so a bad/stale water_remain_m3 from the API cannot skew charts.
   const remainL =
     toFinite(item.water_remain_liters) ??
-    toFinite(item.waterRemainLiters) ??
-    0;
+    toFinite(item.waterRemainLiters);
+  const remainM3FromApi = toFinite(item.water_remain_m3);
   const remainM3 =
-    toFinite(item.water_remain_m3) ??
-    (remainL != null ? remainL / 1000 : 0);
+    remainL != null
+      ? remainL / 1000
+      : remainM3FromApi != null
+        ? remainM3FromApi
+        : 0;
+  const remainLitersFinal = remainL ?? (remainM3FromApi != null ? remainM3FromApi * 1000 : 0);
 
   const hourlyRaw = Array.isArray(item.hourly_steps) ? item.hourly_steps : [];
   const hourly_steps = hourlyRaw
-    .map(normalizeHourStep)
+    .map((step: any, i: number) => normalizeHourStep(step, i))
     .filter((s: WaterHourStep | null): s is WaterHourStep => s != null);
 
   return {
@@ -170,8 +187,8 @@ function normalizeDay(item: any): WaterRemainDay | null {
       toFinite(item.water_liter) ??
       toFinite(item.water_liters) ??
       0,
-    water_remain_liters: remainL ?? 0,
-    water_remain_m3: remainM3 ?? 0,
+    water_remain_liters: remainLitersFinal,
+    water_remain_m3: remainM3,
     one_mm_liters: toFinite(item.one_mm_liters) ?? undefined,
     ndmi: toFinite(item.ndmi),
     hourly_steps: hourly_steps.length ? hourly_steps : undefined,
@@ -235,6 +252,22 @@ export function pastRange(
   const start = new Date(end);
   start.setDate(start.getDate() - (daysBack - 1));
   return { start_date: isoDate(start), end_date };
+}
+
+/** Inclusive range clamped so start ≤ end ≤ today (IST). */
+export function rangeToToday(
+  startIso: string | null | undefined,
+  timeZone = IST,
+): { start_date: string; end_date: string } {
+  const end_date = todayIsoInTz(timeZone);
+  const raw = String(startIso ?? "")
+    .trim()
+    .slice(0, 10);
+  let start_date = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : "";
+  if (!start_date || start_date > end_date) {
+    return pastRange(365, timeZone);
+  }
+  return { start_date, end_date };
 }
 
 /** ~Same calendar day last month through today (e.g. 02 Aug → 02 Sep). */
@@ -416,11 +449,17 @@ export function formatWaterRemainError(err: unknown, plotId: string): string {
     msg.includes("404") ||
     /plot not found/i.test(msg)
   ) {
-    return `Plot "${plotId}" is not registered in the irrigation service. Save the plot boundary (KML) again or ask your field officer to sync it.`;
+    const safePlot = String(plotId ?? "")
+      .trim()
+      .slice(0, 64)
+      .replace(/[^\w/._+\-]/g, "");
+    return `Plot "${safePlot || "selected"}" is not registered in the irrigation service. Save the plot boundary (KML) again or ask your field officer to sync it.`;
   }
-  // Don't surface slow SEF timeouts — card already shows empty/0 state.
-  if (/timed out/i.test(msg)) {
+  if (/timed out|abort/i.test(msg)) {
     return "";
   }
-  return `Water remain failed: ${msg}`;
+  if (/HTTP\s*5\d\d|502|503|504|524|network|failed to fetch/i.test(msg)) {
+    return "Irrigation service is temporarily unavailable. Try again shortly.";
+  }
+  return "Could not load water remain for this plot.";
 }

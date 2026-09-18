@@ -26,7 +26,24 @@ type ScheduleDay = {
   rainfall: number;
 };
 
+type IrrigationSystemParams = {
+  irrigationTypeCode: string;
+  flowRateLph: number | null;
+  emittersCount: number;
+  totalPlants: number;
+  spacingA: number;
+  spacingB: number;
+  motorHp: number | null;
+  pipeWidthInches: number | null;
+  distanceMotorToPlot: number | null;
+};
+
 type PlotCoords = { lat: number; lon: number };
+
+const EVENTS_API_BASE =
+  String(import.meta.env.VITE_DEV_EVENTS_API_URL ?? "")
+    .trim()
+    .replace(/\/$/, "") || "https://events-cropeye.up.railway.app";
 
 function parsePrecipMm(raw: unknown): number {
   if (typeof raw === "number" && Number.isFinite(raw)) return Math.max(0, raw);
@@ -37,15 +54,214 @@ function parsePrecipMm(raw: unknown): number {
   return 0;
 }
 
-/** Flutter: irrigation needed kL only when remain is deficit. */
-function irrigationNeededKl(remainLiters: number): number {
-  if (!(remainLiters < 0)) return 0;
-  return Math.abs(remainLiters) / 1000;
+/**
+ * Irrigation needed (KL) from water-remain API only — same rules as SoilMoistureCard:
+ *   prefer water_remain_liters / 1000
+ *   else water_remain_m3 (1 m³ = 1 KL)
+ * Deficit (negative remain) → need = abs(remain KL); else 0.
+ */
+function irrigationNeededKlFromRemain(
+  waterRemainLiters?: number | null,
+  waterRemainM3?: number | null,
+): number {
+  const liters = Number(waterRemainLiters);
+  if (Number.isFinite(liters)) {
+    const kl = liters / 1000;
+    return kl < 0 ? Math.abs(kl) : 0;
+  }
+  const m3 = Number(waterRemainM3);
+  if (Number.isFinite(m3)) {
+    return m3 < 0 ? Math.abs(m3) : 0;
+  }
+  return 0;
 }
 
 /** Flutter: ETo loss volume in kL. */
 function etoLossKl(etoLossLiters: number): number {
   return Math.max(0, Number(etoLossLiters) || 0) / 1000;
+}
+
+function toFiniteNumber(v: unknown): number | null {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Liters applied vs previous remain after subtracting rainfall contribution. */
+function irrigatedLitersFromBalance(
+  curr: ScheduleDay,
+  prev: ScheduleDay | null,
+): number {
+  if (!prev) return 0;
+  const oneMm = toFiniteNumber(curr.oneMmLiters) ?? 0;
+  const rainL = Math.max(0, Number(curr.rainfall) || 0) * Math.max(0, oneMm);
+  const jump =
+    (Number(curr.waterVolumeLiters) || 0) -
+    (Number(prev.waterRemainLiters) || 0) -
+    rainL;
+  // Ignore tiny noise; treat only real positive water additions as irrigation.
+  return jump > 100 ? jump : 0;
+}
+
+/**
+ * Pump runtime from Need (KL) shown in the table:
+ *   water_liters = Need_KL × 1000
+ *   hours = water_liters ÷ (HP × 7000 × area)
+ * Example: 677 KL → 677000 L; 677000 ÷ (7.5 × 7000 × 12.36) ≈ 1.043 h
+ */
+const LITERS_PER_HOUR_PER_HP = 7000;
+/** Fallback when farm profile has no motor HP (matches common default in API mappers). */
+const DEFAULT_MOTOR_HP = 7.5;
+
+function calcPumpDurationMinutes(
+  needKl: number,
+  motorHp: number | null,
+  areaAcres: number | null,
+): number | null {
+  if (!(needKl > 0)) return 0;
+  const hp =
+    motorHp != null && motorHp > 0 ? motorHp : DEFAULT_MOTOR_HP;
+  const area = areaAcres != null && areaAcres > 0 ? areaAcres : 1;
+  // Water for the formula = Need (KL) from the table, in liters
+  const waterLiters = needKl * 1000;
+  const denom = hp * LITERS_PER_HOUR_PER_HP * area;
+  if (!(denom > 0)) return null;
+  const hours = waterLiters / denom;
+  return hours * 60;
+}
+
+function formatPumpHours(minutes: number | null): string {
+  if (minutes == null) return "—";
+  if (!(minutes > 0)) return "0 h";
+  const totalSec = Math.round(minutes * 60);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h >= 10) return `${(minutes / 60).toFixed(1)} h`;
+  if (h >= 1) {
+    return s > 0 ? `${h}h ${m}m ${s}s` : `${h}h ${m}m`;
+  }
+  if (m >= 1) return s > 0 ? `${m}m ${s}s` : `${m} min`;
+  return `${s}s`;
+}
+
+/** Prefer plot acres; else derive from one_mm_liters (≈ plot area m²). */
+function resolveAreaAcres(
+  plotAreaAcres: number | null,
+  oneMmLiters?: number,
+): number | null {
+  if (plotAreaAcres != null && plotAreaAcres > 0) return plotAreaAcres;
+  const oneMm = toFiniteNumber(oneMmLiters);
+  if (oneMm != null && oneMm > 0) {
+    const acres = oneMm / 4046.8564224;
+    return acres > 0 ? acres : null;
+  }
+  return null;
+}
+
+function parseAreaAcres(raw: unknown): number | null {
+  if (raw == null || raw === "") return null;
+  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) return raw;
+  const n = Number(String(raw).replace(/[^\d.-]/g, ""));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** Hours from applied/required liters using plot drip/flood system params. */
+function calcIrrigationHours(
+  waterLiters: number,
+  system: IrrigationSystemParams,
+): number | null {
+  if (!(waterLiters > 0)) return 0;
+
+  if (system.irrigationTypeCode === "drip") {
+    const flow = system.flowRateLph;
+    const emitters = system.emittersCount;
+    const plants = system.totalPlants;
+    if (flow == null || !(flow > 0) || !(emitters > 0)) {
+      return null;
+    }
+    // emitters_count is often per-plant; if it's clearly below plant count, scale up.
+    const totalEmitters =
+      plants > 0 && emitters < plants ? emitters * plants : emitters;
+    const totalFlowLph = totalEmitters * flow;
+    if (!(totalFlowLph > 0)) return null;
+    return waterLiters / totalFlowLph;
+  }
+
+  const motorHp = system.motorHp;
+  const pipeWidthInches = system.pipeWidthInches;
+  if (
+    motorHp == null ||
+    !(motorHp > 0) ||
+    pipeWidthInches == null ||
+    !(pipeWidthInches > 0)
+  ) {
+    return null;
+  }
+
+  const diameterMeters = pipeWidthInches * 0.0254;
+  const pipeAreaSqM = Math.PI * Math.pow(diameterMeters / 2, 2);
+  const baseVelocity = Math.max(0.75, Math.min(2.5, motorHp * 0.45));
+  let frictionFactor = 1;
+  if (system.distanceMotorToPlot && system.distanceMotorToPlot > 0) {
+    const reduction = (system.distanceMotorToPlot / 100) * 0.05;
+    frictionFactor = Math.max(0.5, 1 - reduction);
+  }
+  const flowRateLitersPerHour =
+    pipeAreaSqM * baseVelocity * frictionFactor * 3600 * 1000;
+  if (!(flowRateLitersPerHour > 0)) return null;
+  return waterLiters / flowRateLitersPerHour;
+}
+
+/** Fallback hours when system params are incomplete: depth(mm) as hours proxy. */
+function fallbackIrrigationHours(
+  waterLiters: number,
+  oneMmLiters?: number,
+): number | null {
+  if (!(waterLiters > 0)) return 0;
+  const oneMm = toFiniteNumber(oneMmLiters);
+  if (oneMm == null || !(oneMm > 0)) return null;
+  return waterLiters / oneMm;
+}
+
+async function fetchIrrigationEventDates(
+  plotName: string,
+): Promise<Set<string>> {
+  const dates = new Set<string>();
+  if (!plotName?.trim()) return dates;
+  const candidates = Array.from(
+    new Set([
+      plotName,
+      plotName.replace(/_/g, "/"),
+      plotName.replace(/\//g, "_"),
+    ]),
+  );
+  for (const candidate of candidates) {
+    try {
+      const qs = new URLSearchParams({
+        threshold_ndmi: "0.05",
+        threshold_ndwi: "0.05",
+        min_days_between_events: "10",
+      });
+      const url = `${EVENTS_API_BASE}/plots/${encodeURIComponent(candidate)}/irrigation?${qs}`;
+      const resp = await fetch(url, {
+        method: "GET",
+        mode: "cors",
+        headers: { Accept: "application/json" },
+      });
+      if (!resp.ok) continue;
+      const data = await resp.json();
+      const events = Array.isArray(data?.events) ? data.events : [];
+      for (const ev of events) {
+        const day = String(ev?.date ?? "").slice(0, 10);
+        if (day) dates.add(day);
+      }
+      return dates;
+    } catch {
+      /* try next plot-name form */
+    }
+  }
+  return dates;
 }
 
 /** Calendar day in Asia/Kolkata: today minus N days → YYYY-MM-DD. */
@@ -150,6 +366,22 @@ const IrrigationSchedule: React.FC = () => {
   const [rainByDate, setRainByDate] = useState<Map<string, number>>(
     () => new Map(),
   );
+  const [irrigationEventDates, setIrrigationEventDates] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [irrigationSystem, setIrrigationSystem] =
+    useState<IrrigationSystemParams>({
+      irrigationTypeCode: "flood",
+      flowRateLph: null,
+      emittersCount: 0,
+      totalPlants: 0,
+      spacingA: 0,
+      spacingB: 0,
+      motorHp: null,
+      pipeWidthInches: null,
+      distanceMotorToPlot: null,
+    });
+  const [plotAreaAcres, setPlotAreaAcres] = useState<number | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -187,10 +419,11 @@ const IrrigationSchedule: React.FC = () => {
   useEffect(() => {
     if (!profile || profileLoading) return;
 
-    let selectedPlot = null;
+    type FarmerPlot = NonNullable<typeof profile.plots>[number];
+    let selectedPlot: FarmerPlot | undefined;
     if (selectedPlotName) {
       selectedPlot = profile.plots?.find(
-        (p: any) =>
+        (p) =>
           p.fastapi_plot_id === selectedPlotName ||
           `${p.gat_number}_${p.plot_number}` === selectedPlotName,
       );
@@ -201,6 +434,7 @@ const IrrigationSchedule: React.FC = () => {
     if (!selectedPlot) {
       setPlotName("");
       setPlotCoords(null);
+      setPlotAreaAcres(null);
       return;
     }
 
@@ -211,13 +445,79 @@ const IrrigationSchedule: React.FC = () => {
     setPlotName(plotId);
 
     const cropRaw =
-      selectedPlot?.crop_variety ??
-      selectedPlot?.crop_type?.crop_variety ??
-      selectedPlot?.farms?.[0]?.crop_variety ??
-      selectedPlot?.farms?.[0]?.crop_type?.crop_variety ??
-      profile?.agricultural_summary?.crop_types?.[0] ??
+      selectedPlot.crop_variety ??
+      selectedPlot.crop_type?.crop_variety ??
+      selectedPlot.farms?.[0]?.crop_variety ??
+      selectedPlot.farms?.[0]?.crop_type?.crop_variety ??
+      profile.agricultural_summary?.crop_types?.[0] ??
       "sugarcane";
     setCropName(cropRaw ? String(cropRaw) : "sugarcane");
+
+    const firstFarm =
+      selectedPlot?.farms?.[0] ??
+      (Array.isArray((selectedPlot as any)?.farm)
+        ? (selectedPlot as any).farm[0]
+        : (selectedPlot as any)?.farm) ??
+      null;
+    const firstIrrigation =
+      firstFarm?.irrigations?.[0] ??
+      firstFarm?.irrigation ??
+      (selectedPlot as any)?.irrigations?.[0] ??
+      null;
+    const irrigationCode = String(
+      firstIrrigation?.irrigation_type_code ??
+        firstIrrigation?.irrigation_type_name ??
+        firstIrrigation?.irrigation_type ??
+        firstFarm?.irrigation_type ??
+        "flood",
+    )
+      .trim()
+      .toLowerCase();
+    setIrrigationSystem({
+      irrigationTypeCode: irrigationCode.includes("drip") ? "drip" : "flood",
+      flowRateLph: toFiniteNumber(
+        firstIrrigation?.flow_rate_lph ??
+          firstIrrigation?.flow_rate_liter_per_hour ??
+          firstFarm?.flow_rate_lph,
+      ),
+      emittersCount:
+        toFiniteNumber(
+          firstIrrigation?.emitters_count ??
+            firstIrrigation?.emitters_per_plant ??
+            firstFarm?.emitters_count,
+        ) ?? 0,
+      totalPlants: toFiniteNumber(firstFarm?.plants_in_field) ?? 0,
+      spacingA: toFiniteNumber(firstFarm?.spacing_a) ?? 0,
+      spacingB: toFiniteNumber(firstFarm?.spacing_b) ?? 0,
+      motorHp: toFiniteNumber(
+        firstIrrigation?.motor_horsepower ?? firstFarm?.motor_horsepower,
+      ),
+      pipeWidthInches: toFiniteNumber(
+        firstIrrigation?.pipe_width_inches ?? firstFarm?.pipe_width_inches,
+      ),
+      distanceMotorToPlot: toFiniteNumber(
+        firstIrrigation?.distance_motor_to_plot_m ??
+          firstFarm?.distance_motor_to_plot_m,
+      ),
+    });
+
+    setPlotAreaAcres(
+      (() => {
+        const acresDirect = parseAreaAcres(
+          (selectedPlot as any)?.area_acres ??
+            (selectedPlot as any)?.soil?.area_acres ??
+            firstFarm?.area_acres,
+        );
+        if (acresDirect != null) return acresDirect;
+        const hectares = parseAreaAcres(
+          (selectedPlot as any)?.area_size_numeric ??
+            (selectedPlot as any)?.area_size ??
+            firstFarm?.area_size_numeric ??
+            firstFarm?.area_size,
+        );
+        return hectares != null ? hectares * 2.47105 : null;
+      })(),
+    );
 
     try {
       let latN: number | null = null;
@@ -324,7 +624,7 @@ const IrrigationSchedule: React.FC = () => {
           lat: plotCoords?.lat,
           lon: plotCoords?.lon,
         };
-        const [apiResp, moistureResp, rainMap] = await Promise.all([
+        const [apiResp, moistureResp, rainMap, eventDates] = await Promise.all([
           fetchWaterRemainForPlot(
             plotName,
             profile?.plots,
@@ -334,6 +634,7 @@ const IrrigationSchedule: React.FC = () => {
           ),
           fetchSoilMoistureForPlot(plotName, profile?.plots).catch(() => null),
           rainPromise,
+          fetchIrrigationEventDates(plotName),
         ]);
         if (cancelled) return;
 
@@ -348,6 +649,7 @@ const IrrigationSchedule: React.FC = () => {
           }
         }
         setRainByDate(new Map(rainMap));
+        setIrrigationEventDates(eventDates);
 
         const todayStr = todayIsoInTz();
         const last7 = filterPastDays(apiResp.days, 7);
@@ -383,6 +685,7 @@ const IrrigationSchedule: React.FC = () => {
         const msg = formatWaterRemainError(e, plotName);
         if (msg) setError(msg);
         setRemainDays([]);
+        setIrrigationEventDates(new Set());
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -430,7 +733,7 @@ const IrrigationSchedule: React.FC = () => {
     const scheduleData: Array<any> = [];
     const todayStr = todayIsoInTz();
 
-    // Always show 7 IST calendar days. Missing API rows → irrigation need = 0.0 kL.
+    // Always show 7 IST calendar days ending today. Older dates are excluded.
     const byDate = new Map(remainDays.map((d) => [d.day, d]));
     const sourceDays: ScheduleDay[] = [];
     for (let idx = 6; idx >= 0; idx -= 1) {
@@ -450,7 +753,9 @@ const IrrigationSchedule: React.FC = () => {
       );
     }
 
-    for (const hist of sourceDays) {
+    for (let i = 0; i < sourceDays.length; i += 1) {
+      const hist = sourceDays[i];
+      const prev = i > 0 ? sourceDays[i - 1] : null;
       const date = new Date(hist.day + "T12:00:00");
       const isToday = hist.day === todayStr;
       const hasRemainSeries = byDate.has(hist.day);
@@ -470,11 +775,54 @@ const IrrigationSchedule: React.FC = () => {
             ? rainfallMm
             : hist.rainfall;
 
-      // Same rule as soil-moisture card: deficit remain → irrigation need kL.
+      // Need (KL) from water-remain API — same value shown in the Need column
       const irrigKl = hasRemainSeries
-        ? irrigationNeededKl(hist.waterRemainLiters)
+        ? irrigationNeededKlFromRemain(
+            hist.waterRemainLiters,
+            hist.waterRemainM3,
+          )
         : 0;
       const lossKl = hasRemainSeries ? etoLossKl(hist.etoLossLiters) : 0;
+
+      const irrigatedLiters = hasRemainSeries
+        ? irrigatedLitersFromBalance(
+            { ...hist, rainfall: rainMm },
+            prev && byDate.has(prev.day) ? prev : null,
+          )
+        : 0;
+      const givenFromEvents = irrigationEventDates.has(hist.day);
+      const givenFromVolume = irrigatedLiters > 0;
+      const irrigationGiven = givenFromEvents || givenFromVolume;
+
+      // Hours for applied irrigation (Given) and required irrigation (Not Given).
+      const requiredLiters = irrigKl > 0 ? irrigKl * 1000 : 0;
+      const givenLitersForHours = Math.max(
+        irrigatedLiters,
+        irrigationGiven
+          ? requiredLiters > 0
+            ? requiredLiters
+            : Math.max(0, Number(hist.etoLossLiters) || 0)
+          : 0,
+      );
+      const requiredHours =
+        requiredLiters > 0
+          ? (calcIrrigationHours(requiredLiters, irrigationSystem) ??
+            fallbackIrrigationHours(requiredLiters, hist.oneMmLiters))
+          : null;
+      let irrigationHours =
+        calcIrrigationHours(givenLitersForHours, irrigationSystem) ??
+        fallbackIrrigationHours(givenLitersForHours, hist.oneMmLiters);
+
+      if (irrigationGiven && (irrigationHours == null || irrigationHours <= 0)) {
+        irrigationHours = 0;
+      }
+
+      // Hours from the same Need (KL) shown in the table
+      const pumpMinutes = calcPumpDurationMinutes(
+        irrigKl,
+        irrigationSystem.motorHp,
+        resolveAreaAcres(plotAreaAcres, hist.oneMmLiters),
+      );
 
       scheduleData.push({
         date: date.toLocaleDateString("en-GB", {
@@ -492,6 +840,12 @@ const IrrigationSchedule: React.FC = () => {
         waterRemainM3: hasRemainSeries ? hist.waterRemainM3 : 0,
         rainfall: rainMm,
         dataMissing: !hasRemainSeries,
+        irrigatedLiters,
+        irrigationGiven,
+        irrigationHours,
+        requiredHours,
+        pumpMinutes,
+        waterRequiredKl: irrigKl,
       });
     }
 
@@ -511,18 +865,14 @@ const IrrigationSchedule: React.FC = () => {
             scheduleData[0].isoDate,
           )
         : "";
-  const totalEtoMm = scheduleData.reduce(
-    (sum, day) => sum + (Number(day.etDisplayed) || 0),
-    0,
-  );
-  const totalRainMm = scheduleData.reduce(
-    (sum, day) => sum + (Number(day.rainfall) || 0),
-    0,
-  );
-  const totalIrrigationNeedKl = scheduleData.reduce(
-    (sum, day) => sum + (Number(day.irrigationNeedKl) || 0),
-    0,
-  );
+  const todayRow = scheduleData.find((d) => d.isToday);
+  const todayGiven = Boolean(todayRow?.irrigationGiven);
+  const todayNeedKl = Number(todayRow?.irrigationNeedKl) || 0;
+  const waterRequirementMessage = todayGiven
+    ? "Water requirement fulfilled — irrigation has been provided as required."
+    : todayNeedKl > 0.05
+      ? "Water requirement pending — irrigation is still required."
+      : "Water requirement fulfilled — no irrigation needed today.";
 
   useEffect(() => {
     const data = generateScheduleData();
@@ -533,108 +883,189 @@ const IrrigationSchedule: React.FC = () => {
       }));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [etValue, rainfallMm, remainDays, setAppState]);
+  }, [
+    etValue,
+    rainfallMm,
+    remainDays,
+    irrigationEventDates,
+    irrigationSystem,
+    plotAreaAcres,
+    setAppState,
+  ]);
 
-  return (
-    <div className="bg-white rounded-lg overflow-hidden shadow h-full flex flex-col">
-      {/* Slim title bar */}
-      <div className="bg-green-600 text-white px-2 py-1 flex flex-col items-center justify-center shrink-0 gap-0.5">
-        <h2 className="text-xs font-semibold text-center leading-tight">
-          Past 7-Day Irrigation /Acre
-        </h2>
-        {dateRangeLabel && (
-          <p className="text-[9px] text-green-100 leading-tight">{dateRangeLabel}</p>
+  const renderIrrigationStatus = (day: any) => {
+    if (loading) return <div className="loading-spinner-small" />;
+
+    if (day.irrigationGiven) {
+      const givenKl =
+        Number(day.irrigatedLiters) > 0
+          ? Number(day.irrigatedLiters) / 1000
+          : Number(day.irrigationNeedKl) > 0
+            ? Number(day.irrigationNeedKl)
+            : 0;
+      return (
+        <div className="irrigation-schedule-status-block">
+          <div className="irrigation-status-title irrigation-status-title--given">
+            Irrigation Given
+          </div>
+          <div className="irrigation-status-detail irrigation-status-detail--given">
+            Water given: {givenKl > 0 ? `${givenKl.toFixed(1)} KL` : "—"}
+          </div>
+        </div>
+      );
+    }
+
+    const needKl = Number(day.waterRequiredKl ?? day.irrigationNeedKl) || 0;
+    const hasNeed = needKl > 0.05;
+
+    return (
+      <div className="irrigation-schedule-status-block">
+        <div className="irrigation-status-title irrigation-status-title--not-given">
+          Irrigation required
+        </div>
+        {hasNeed ? (
+          <div className="irrigation-status-detail">{needKl.toFixed(1)} KL</div>
+        ) : (
+          <div className="irrigation-status-detail irrigation-status-detail--secondary">
+            No water required
+          </div>
         )}
       </div>
+    );
+  };
 
-      <div className="flex-1 min-h-0 flex flex-col px-1.5 pt-1 pb-1 gap-0.5 overflow-hidden">
-        {/* Header row */}
-        <div className="irrigation-schedule-grid irrigation-schedule-grid--head shrink-0 rounded bg-green-100 px-2 py-0.5 text-[9px] font-semibold text-gray-700">
+  return (
+    <div className="irrigation-schedule-card">
+      <div className="irrigation-schedule-card-header">
+        <h2>Past 7-Day Irrigation /Acre</h2>
+        {dateRangeLabel && <p>{dateRangeLabel}</p>}
+      </div>
+
+      <div className="irrigation-schedule-card-body">
+        <div className="irrigation-schedule-grid irrigation-schedule-grid--head">
           <span>Date</span>
           <span>ETO Loss (mm)</span>
           <span>Rain (mm)</span>
-          <span>Irrigation needed (kL)</span>
+          <span>Irrigation needed (KL)</span>
+          <span>Water given (KL)</span>
+          <span className="irrigation-schedule-hours-head"></span>
         </div>
 
-        {/* 7 data rows — flex-1 so they share space equally, no scroll */}
-        <div className="irrigation-schedule-days flex-1 min-h-0 flex flex-col gap-0.5">
+        <div className="irrigation-schedule-days">
           {scheduleData.length === 0 && error ? (
             <p className="flex-1 flex items-center justify-center text-[10px] text-red-600 px-2 text-center leading-snug">
               {error}
             </p>
           ) : (
             scheduleData.map((day, idx) => (
-            <div
-              key={day.isoDate || idx}
-              className={[
-                "irrigation-schedule-grid irrigation-schedule-day-card flex-1 min-h-0 rounded px-2 py-0.5 text-[9px]",
-                day.isToday
-                  ? "bg-blue-50 ring-1 ring-blue-300"
-                  : idx % 2
-                    ? "bg-white"
-                    : "bg-gray-50",
-              ].join(" ")}
-            >
-              <div className="min-w-0 flex items-center gap-1">
-                <span className="font-semibold text-gray-800 whitespace-nowrap">
-                  {day.date}
-                </span>
-                <Sun className="h-2.5 w-2.5 shrink-0 text-orange-500" />
-                {day.isToday && (
-                  <span className="inline-block rounded bg-blue-100 px-0.5 text-[7px] font-semibold text-blue-800">
-                    Today
-                  </span>
-                )}
-              </div>
-
-              <div className="flex flex-col items-start justify-center min-w-0 gap-0.5">
-                {loading ? (
-                  <div className="loading-spinner-small" />
-                ) : (
-                  <>
-                    <span className="text-[11px] font-semibold text-gray-800 whitespace-nowrap">
-                      {Number(day.etDisplayed || 0).toFixed(1)}
-                    </span>
-                    <span
-                      className={`inline-block rounded px-1 py-0.5 text-[11px] font-medium leading-none ${getETRangeColor(day.etRange)}`}
-                    >
-                      {day.etRange}
-                    </span>
-                  </>
-                )}
-              </div>
-
-              <div className="flex items-center gap-0.5 font-semibold text-sky-700 whitespace-nowrap">
-                <CloudRain className="h-2.5 w-2.5 shrink-0 text-sky-600" />
-                {Number(day.rainfall || 0).toFixed(1)}
-              </div>
-
               <div
-                className={`font-semibold whitespace-nowrap ${
-                  (day.irrigationNeedKl ?? 0) > 0
-                    ? "text-red-700"
-                    : "text-emerald-800"
-                }`}
+                key={day.isoDate || idx}
+                className={[
+                  "irrigation-schedule-grid irrigation-schedule-day-card",
+                  day.isToday
+                    ? "irrigation-schedule-day-card--today"
+                    : "irrigation-schedule-day-card--past",
+                ].join(" ")}
               >
-                {(Number(day.irrigationNeedKl) || 0).toFixed(1)}
+                <div className="irrigation-schedule-date-cell">
+                  <div className="irrigation-schedule-date-row">
+                    <span
+                      className={`irrigation-schedule-date-text ${
+                        day.isToday
+                          ? "irrigation-schedule-date--today"
+                          : "irrigation-schedule-date--past"
+                      }`}
+                    >
+                      {day.date}
+                    </span>
+                    <Sun
+                      className={`h-2.5 w-2.5 shrink-0 ${
+                        day.isToday ? "text-amber-300" : "text-slate-300"
+                      }`}
+                    />
+                  </div>
+                  {day.isToday ? (
+                    <span className="irrigation-schedule-today-badge">Today</span>
+                  ) : null}
+                </div>
+
+                <div className="flex flex-col items-start justify-center min-w-0 leading-tight">
+                  {loading ? (
+                    <div className="loading-spinner-small" />
+                  ) : (
+                    <>
+                      <span className="text-[10px] font-semibold whitespace-nowrap">
+                        {Number(day.etDisplayed || 0).toFixed(1)} mm
+                      </span>
+                      <span
+                        className={`inline-block rounded px-1 text-[9px] font-medium leading-none ${getETRangeColor(day.etRange)}`}
+                      >
+                        {day.etRange}
+                      </span>
+                    </>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-0.5 font-semibold text-sky-700 whitespace-nowrap text-[10px]">
+                  <CloudRain className="h-2.5 w-2.5 shrink-0 text-sky-600" />
+                  {Number(day.rainfall || 0).toFixed(1)} mm
+                </div>
+
+                <div
+                  className={`irrigation-schedule-need ${
+                    (day.irrigationNeedKl ?? 0) > 0
+                      ? "irrigation-schedule-need--active"
+                      : "irrigation-schedule-need--zero"
+                  }`}
+                >
+                  {(Number(day.irrigationNeedKl) || 0).toFixed(1)} KL
+                </div>
+
+                <div className="irrigation-schedule-status min-w-0">
+                  {renderIrrigationStatus(day)}
+                </div>
+
+                <div
+                  className="irrigation-schedule-hours"
+                  title={
+                    day.isToday
+                      ? day.pumpMinutes != null && day.pumpMinutes > 0
+                        ? `Need ${Number(day.irrigationNeedKl || 0).toFixed(1)} KL → ${(Number(day.pumpMinutes) / 60).toFixed(3)} h · (Need×1000) ÷ (HP×7000×area)`
+                        : "No irrigation needed"
+                      : "Hours shown for today only"
+                  }
+                >
+                  {!day.isToday ? (
+                    <span className="text-slate-300">—</span>
+                  ) : loading ? (
+                    <div className="loading-spinner-small" />
+                  ) : (
+                    formatPumpHours(
+                      day.pumpMinutes == null ? null : Number(day.pumpMinutes),
+                    )
+                  )}
+                </div>
               </div>
-            </div>
             ))
           )}
         </div>
 
-        {/* Total row */}
+        {/* 7-Day Total — keep row; hide numeric totals */}
         {scheduleData.length > 0 && (
-        <div className="irrigation-schedule-grid irrigation-schedule-grid--total shrink-0 rounded border border-green-200 bg-green-50 px-2 py-0.5 text-[9px] font-semibold">
-          <span className="text-gray-800">7-Day Total</span>
-          <span className="text-gray-700 whitespace-nowrap">
-            {totalEtoMm.toFixed(1)}
-          </span>
-          <span className="text-sky-700 whitespace-nowrap">{totalRainMm.toFixed(1)}</span>
-          <span className="text-emerald-800 whitespace-nowrap">
-            {totalIrrigationNeedKl.toFixed(1)}
-          </span>
-        </div>
+          <div className="irrigation-schedule-grid irrigation-schedule-grid--total irrigation-schedule-grid--total-blue">
+            <span className="text-blue-900">7-Day Total</span>
+            <span aria-hidden="true" />
+            <span aria-hidden="true" />
+            <span aria-hidden="true" />
+            <span
+              className={`irrigation-schedule-status irrigation-schedule-total-msg ${
+                todayGiven ? "text-emerald-800" : "text-blue-900"
+              }`}
+            >
+              {waterRequirementMessage}
+            </span>
+            <span aria-hidden="true" />
+          </div>
         )}
       </div>
 
