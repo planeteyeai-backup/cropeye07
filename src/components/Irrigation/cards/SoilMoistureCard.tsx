@@ -796,8 +796,6 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
     return Array.from(new Set(ticks));
   }, [hourlyTrendPoints]);
 
-  const latestHourly = hourlyTrendPoints[hourlyTrendPoints.length - 1] ?? null;
-
   const balanceStatus = waterBalanceStatus(
     selectedRemainKl,
     Math.max(1, seriesMaxRemainKl),
@@ -946,17 +944,7 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
                             style={{ color: dayChartColors.axis }}
                           >
                             {selected?.shortDate ?? "Day"}
-                            {latestHourly
-                              ? ` · ${latestHourly.requirementKl.toFixed(2)} KL`
-                              : ""}
                           </div>
-                        </div>
-                        <div className="moisture-irrigation-ohlc">
-                          <span style={{ color: dayChartColors.axis }}>
-                            <b style={{ color: dayChartColors.axis }}>
-                              {(latestHourly?.requirementKl ?? 0).toFixed(1)}
-                            </b>
-                          </span>
                         </div>
                       </div>
 
