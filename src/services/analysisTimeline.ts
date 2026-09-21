@@ -1,6 +1,17 @@
-/** GET https://cropeye-database-production.up.railway.app/analysis_timeline?plot_name=... */
-
-const TIMELINE_PATH = "/analysis_timeline";
+/**
+ * Analysis image dates for the map timeline ribbon (optional testing helper).
+ * Endpoint: GET {VITE_SAR_INDEX_API_URL}/stored-tiles?plot_name=…
+ * Not required for hosted Events/Django APIs — skipped when SAR URL is unset.
+ */
+import {
+  getSarIndexBaseUrl,
+  isSarMappingHostAvailable,
+  sarIndexUpstream,
+} from "../utils/sarIndexHost";
+import {
+  getStoredTilesPlotCandidates,
+  type PlotRef,
+} from "../utils/plotName";
 
 export interface TimelineBucket {
   growth_dates: string[];
@@ -12,6 +23,8 @@ export interface TimelineBucket {
 export interface AnalysisTimelineResponse {
   plot_name: string;
   timeline: TimelineBucket[];
+  plantation_date?: string;
+  end_date?: string;
 }
 
 export type MapAnalysisLayer = "Growth" | "Water Uptake" | "Soil Moisture" | "PEST";
@@ -23,74 +36,306 @@ const LAYER_TO_KEY: Record<MapAnalysisLayer, keyof TimelineBucket> = {
   PEST: "pest_detection_dates",
 };
 
-/**
- * Dev: Vite proxies `/api/analysis-timeline` → cropeye-database (no CORS).
- * Prod: browser calls this URL directly — the database host must allow your site’s origin (CORS),
- * or set `VITE_ANALYSIS_TIMELINE_BASE_URL` to a same-origin path your host proxies (e.g. `/api/analysis-timeline`).
- */
+/** Absolute floss host for ribbon dates (same as tiles). */
 export function getAnalysisTimelineBaseUrl(): string {
-  const fromEnv = (import.meta.env.VITE_ANALYSIS_TIMELINE_BASE_URL as string | undefined)?.trim();
-  if (fromEnv) return fromEnv.replace(/\/$/, "");
-  if (import.meta.env.DEV) return "/api/analysis-timeline";
-  return "https://cropeye-database-production.up.railway.app";
+  return sarIndexUpstream();
 }
 
-/** Try slash and underscore forms — timeline DB keys differ per plot (`8/1A` vs `597_45`). */
+/** Try slash form first — floss uses `8/1A`, not `8_1A`. */
 export function analysisTimelinePlotCandidates(plotName: string): string[] {
   const raw = String(plotName ?? "").trim();
   if (!raw) return [];
-  const slash = raw.replace(/_/g, "/");
-  const underscore = raw.replace(/\//g, "_");
-  return [...new Set([raw, slash, underscore].filter(Boolean))];
+  const slash = raw.includes("_") && !raw.includes("/") ? raw.replace(/_/g, "/") : raw;
+  const out = [slash, raw].filter(Boolean);
+  // Never add underscore twin — breaks stored-tiles / tile lookups
+  return [...new Set(out)];
 }
 
-async function fetchAnalysisTimelineOnce(
+function asDateArray(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== "string") continue;
+    const day = item.split("T")[0].trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(day)) out.push(day);
+  }
+  return out;
+}
+
+/** Dates from stored-tiles `by_type[key][].analysis_date` (or string dates). */
+function datesFromByTypeEntries(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const set = new Set<string>();
+  for (const item of raw) {
+    if (typeof item === "string") {
+      const day = item.split("T")[0].trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(day)) set.add(day);
+      continue;
+    }
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const cand =
+      row.analysis_date ?? row.end_date ?? row.date ?? row.image_date;
+    if (typeof cand !== "string") continue;
+    const day = cand.split("T")[0].trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(day)) set.add(day);
+  }
+  return [...set].sort();
+}
+
+/**
+ * Normalize floss stored-tiles payload:
+ * { plot_name, dates, by_type: { growth, water_uptake, soil_moisture, pest_detection } }
+ */
+export function normalizeStoredTilesResponse(
+  data: any,
+  fallbackPlotName: string,
+): AnalysisTimelineResponse | null {
+  if (!data || typeof data !== "object") return null;
+
+  const byType =
+    data.by_type && typeof data.by_type === "object" ? data.by_type : null;
+
+  const growth = datesFromByTypeEntries(
+    byType?.growth ?? byType?.analyze_Growth ?? data.growth,
+  );
+  const water = datesFromByTypeEntries(
+    byType?.water_uptake ?? byType?.wateruptake ?? data.water_uptake,
+  );
+  const soil = datesFromByTypeEntries(
+    byType?.soil_moisture ?? byType?.SoilMoisture ?? data.soil_moisture,
+  );
+  const pest = datesFromByTypeEntries(
+    byType?.pest_detection ?? byType?.["pest-detection"] ?? data.pest_detection,
+  );
+
+  // If by_type is empty but top-level dates exist, use them for all layers
+  // only when we have no typed lists (rare empty by_type with shared dates).
+  const shared = asDateArray(data.dates);
+  const growthDates = growth.length ? growth : [];
+  const waterDates = water.length ? water : [];
+  const soilDates = soil.length ? soil : [];
+  const pestDates = pest.length ? pest : [];
+
+  if (
+    !growthDates.length &&
+    !waterDates.length &&
+    !soilDates.length &&
+    !pestDates.length
+  ) {
+    if (!shared.length) return null;
+    // Shared dates only — show on Growth so the ribbon is not empty.
+    return {
+      plot_name: String(data.plot_name || fallbackPlotName),
+      end_date: shared[shared.length - 1],
+      timeline: [
+        {
+          growth_dates: shared,
+          water_uptake_dates: [],
+          soil_moisture_dates: [],
+          pest_detection_dates: [],
+        },
+      ],
+    };
+  }
+
+  const allLatest = [
+    ...growthDates,
+    ...waterDates,
+    ...soilDates,
+    ...pestDates,
+  ].sort();
+
+  return {
+    plot_name: String(data.plot_name || fallbackPlotName),
+    end_date: allLatest[allLatest.length - 1],
+    timeline: [
+      {
+        growth_dates: growthDates,
+        water_uptake_dates: waterDates,
+        soil_moisture_dates: soilDates,
+        pest_detection_dates: pestDates,
+      },
+    ],
+  };
+}
+
+/**
+ * Normalize legacy image-dates / analysis_timeline payloads.
+ */
+export function normalizeImageDatesResponse(
+  data: any,
+  fallbackPlotName: string,
+): AnalysisTimelineResponse | null {
+  if (!data || typeof data !== "object") return null;
+
+  // stored-tiles shape
+  if (data.by_type || (Array.isArray(data.dates) && data.tiles !== undefined)) {
+    return normalizeStoredTilesResponse(data, fallbackPlotName);
+  }
+
+  if (Array.isArray(data.timeline)) {
+    const buckets = data.timeline
+      .map((bucket: any) => ({
+        growth_dates: asDateArray(bucket?.growth_dates),
+        water_uptake_dates: asDateArray(bucket?.water_uptake_dates),
+        soil_moisture_dates: asDateArray(bucket?.soil_moisture_dates),
+        pest_detection_dates: asDateArray(bucket?.pest_detection_dates),
+      }))
+      .filter(
+        (b: TimelineBucket) =>
+          b.growth_dates.length ||
+          b.water_uptake_dates.length ||
+          b.soil_moisture_dates.length ||
+          b.pest_detection_dates.length,
+      );
+    if (!buckets.length) return null;
+    return {
+      plot_name: String(data.plot_name || fallbackPlotName),
+      timeline: buckets,
+      plantation_date:
+        typeof data.plantation_date === "string"
+          ? data.plantation_date
+          : undefined,
+      end_date: typeof data.end_date === "string" ? data.end_date : undefined,
+    };
+  }
+
+  const growth = asDateArray(
+    data.growth ?? data.growth_dates ?? data.analysis_dates,
+  );
+  const water = asDateArray(data.water_uptake ?? data.water_uptake_dates);
+  const soil = asDateArray(
+    data.soil ?? data.soil_moisture ?? data.soil_moisture_dates,
+  );
+  const pest = asDateArray(data.pest ?? data.pest_detection_dates);
+
+  if (!growth.length && !water.length && !soil.length && !pest.length) {
+    return null;
+  }
+
+  return {
+    plot_name: String(data.plot_name || fallbackPlotName),
+    plantation_date:
+      typeof data.plantation_date === "string" ? data.plantation_date : undefined,
+    end_date: typeof data.end_date === "string" ? data.end_date : undefined,
+    timeline: [
+      {
+        growth_dates: growth,
+        water_uptake_dates: water,
+        soil_moisture_dates: soil,
+        pest_detection_dates: pest,
+      },
+    ],
+  };
+}
+
+async function fetchStoredTilesJson(
+  url: string,
+): Promise<any | null> {
+  const res = await fetch(url, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      "ngrok-skip-browser-warning": "true",
+    },
+  });
+  if (!res.ok) return null;
+  const ct = res.headers.get("content-type") || "";
+  if (!ct.toLowerCase().includes("application/json")) return null;
+  return res.json();
+}
+
+/** In-flight / short cache so Map + ribbon + prefetch don't stampede ngrok. */
+const storedTilesInflight = new Map<
+  string,
+  Promise<AnalysisTimelineResponse | null>
+>();
+const storedTilesCache = new Map<
+  string,
+  { at: number; data: AnalysisTimelineResponse | null }
+>();
+const STORED_TILES_CACHE_MS = 60_000;
+
+async function fetchStoredTilesOnce(
   plotName: string,
 ): Promise<AnalysisTimelineResponse | null> {
-  const url = `${getAnalysisTimelineBaseUrl()}${TIMELINE_PATH}?plot_name=${encodeURIComponent(plotName)}`;
-  try {
-    const res = await fetch(url, {
-      method: "GET",
-      headers: { Accept: "application/json" },
-    });
-    if (!res.ok) return null;
-    const ct = res.headers.get("content-type") || "";
-    if (!ct.toLowerCase().includes("application/json")) {
-      const snippet = await res.text().catch(() => "");
-      throw new Error(
-        `Timeline endpoint returned non-JSON (content-type: ${ct || "unknown"}). ` +
-          `This usually means your production host is serving index.html for "${TIMELINE_PATH}" ` +
-          `because a proxy/rewrite is missing or VITE_ANALYSIS_TIMELINE_BASE_URL is wrong. ` +
-          (snippet ? `First bytes: ${JSON.stringify(snippet.slice(0, 120))}` : ""),
-      );
+  const cacheKey = plotName.trim();
+  const hit = storedTilesCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < STORED_TILES_CACHE_MS) return hit.data;
+
+  const existing = storedTilesInflight.get(cacheKey);
+  if (existing) return existing;
+
+  const run = (async () => {
+    // Exact endpoint user specified (absolute floss — avoids Vite 502 hang-ups).
+    // GET /stored-tiles?plot_name=…
+    const absoluteBase = getAnalysisTimelineBaseUrl();
+    const proxyBase = getSarIndexBaseUrl();
+    const qs = `plot_name=${encodeURIComponent(plotName)}`;
+    const urls = [
+      `${absoluteBase}/stored-tiles?${qs}`,
+      // Same-origin proxy fallback if browser blocks absolute CORS
+      proxyBase && proxyBase !== absoluteBase
+        ? `${proxyBase}/stored-tiles?${qs}`
+        : "",
+    ].filter(Boolean);
+
+    let normalized: AnalysisTimelineResponse | null = null;
+    for (const url of urls) {
+      try {
+        let data = await fetchStoredTilesJson(url);
+        if (!data) {
+          await new Promise((r) => setTimeout(r, 400));
+          data = await fetchStoredTilesJson(url);
+        }
+        if (!data) continue;
+        normalized = normalizeStoredTilesResponse(data, plotName);
+        // Accept 200 even when empty (no dates for this plot key)
+        if (normalized?.timeline?.length) break;
+        if (
+          data &&
+          typeof data === "object" &&
+          (Array.isArray(data.dates) || data.by_type != null)
+        ) {
+          // Valid stored-tiles response but no imagery — stop trying other hosts
+          normalized = null;
+          break;
+        }
+        normalized = null;
+      } catch {
+        // try next base
+      }
     }
-    const data = (await res.json()) as AnalysisTimelineResponse;
-    if (data?.timeline && Array.isArray(data.timeline)) return data;
-    return null;
-  } catch (err) {
-    if (err instanceof Error && err.message.includes("non-JSON")) throw err;
-    return null;
+
+    storedTilesCache.set(cacheKey, { at: Date.now(), data: normalized });
+    return normalized;
+  })();
+
+  storedTilesInflight.set(cacheKey, run);
+  try {
+    return await run;
+  } finally {
+    storedTilesInflight.delete(cacheKey);
   }
 }
 
 export async function fetchAnalysisTimeline(
   plotName: string,
+  plots?: PlotRef[] | null,
 ): Promise<AnalysisTimelineResponse | null> {
   const trimmed = plotName?.trim();
   if (!trimmed) return null;
+  if (!(await isSarMappingHostAvailable())) return null;
 
-  let lastHtmlError: Error | null = null;
-  for (const candidate of analysisTimelinePlotCandidates(trimmed)) {
-    try {
-      const data = await fetchAnalysisTimelineOnce(candidate);
-      if (data?.timeline?.length) return data;
-    } catch (err) {
-      if (err instanceof Error && err.message.includes("non-JSON")) {
-        lastHtmlError = err;
-      }
-    }
+  const candidates = plots?.length
+    ? getStoredTilesPlotCandidates(trimmed, plots)
+    : analysisTimelinePlotCandidates(trimmed);
+
+  for (const candidate of candidates) {
+    const data = await fetchStoredTilesOnce(candidate);
+    if (data?.timeline?.length) return data;
   }
-  if (lastHtmlError) throw lastHtmlError;
   return null;
 }
 
@@ -137,7 +382,12 @@ export function latestRebinDateAcrossAllLayers(
 ): string {
   if (!timeline?.length) return "";
   let best = "";
-  const layers: MapAnalysisLayer[] = ["Growth", "Water Uptake", "Soil Moisture", "PEST"];
+  const layers: MapAnalysisLayer[] = [
+    "Growth",
+    "Water Uptake",
+    "Soil Moisture",
+    "PEST",
+  ];
   for (const layer of layers) {
     const last = latestRebinDateForLayer(timeline, layer);
     if (last && last > best) best = last;

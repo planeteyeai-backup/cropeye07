@@ -1,5 +1,5 @@
 // vite.config.ts
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 
 /** leaflet-draw uses global `L` and has no ESM default export — both break edit tools in production. */
@@ -22,7 +22,86 @@ function leafletDrawViteFix() {
   };
 }
 
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), "");
+  const sarIndexTarget = (
+    env.VITE_SAR_INDEX_API_URL ||
+    "https://admin-cropeye.up.railway.app"
+  ).replace(/\/$/, "");
+
+  const sarProxy: Record<string, object> = {
+    "/api/analysis-timeline": {
+      target: sarIndexTarget,
+      changeOrigin: true,
+      secure: false,
+      timeout: 120_000,
+      proxyTimeout: 120_000,
+      rewrite: (path: string) =>
+        path.replace(/^\/api\/analysis-timeline/, ""),
+      configure: (proxy: any) => {
+        proxy.on("proxyReq", (proxyReq: any) => {
+          proxyReq.setHeader("Accept", "application/json");
+          proxyReq.setHeader("ngrok-skip-browser-warning", "true");
+        });
+      },
+    },
+    "/api/sar-index": {
+      target: sarIndexTarget,
+      changeOrigin: true,
+      secure: false,
+      timeout: 180_000,
+      proxyTimeout: 180_000,
+      rewrite: (path: string) => path.replace(/^\/api\/sar-index/, ""),
+      configure: (proxy: any) => {
+        proxy.on("proxyReq", (proxyReq: any) => {
+          proxyReq.setHeader("Accept", "application/json");
+          proxyReq.setHeader("ngrok-skip-browser-warning", "true");
+          proxyReq.setTimeout(180_000);
+        });
+        proxy.on("proxyRes", (proxyRes: any) => {
+          proxyRes.headers["connection"] = "keep-alive";
+        });
+        proxy.on("error", (err: any, _req: any, res: any) => {
+          console.log("sar-index proxy error:", err?.message || err);
+          if (res && !res.headersSent) {
+            res.writeHead(502, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                error: "SAR index upstream unavailable",
+                detail: String(err?.message || err),
+              }),
+            );
+          }
+        });
+      },
+    },
+    "/api/dev-plot": {
+      target: sarIndexTarget,
+      changeOrigin: true,
+      secure: false,
+      rewrite: (path: string) => path.replace(/^\/api\/dev-plot/, ""),
+      configure: (proxy: any) => {
+        proxy.on("proxyReq", (proxyReq: any) => {
+          proxyReq.setHeader("Accept", "application/json");
+          proxyReq.setHeader("ngrok-skip-browser-warning", "true");
+        });
+        proxy.on("error", (err: any, _req: any, res: any) => {
+          console.log("dev-plot (sar) proxy error", err);
+          if (res && !res.headersSent) {
+            res.writeHead(502, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                error: "SAR index upstream unavailable",
+                detail: String(err?.message || err),
+              }),
+            );
+          }
+        });
+      },
+    },
+  };
+
+  return {
   plugins: [react(), leafletDrawViteFix()],
   assetsInclude: ["**/*.geojson"],
 
@@ -124,27 +203,70 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/sef/, ''),
       },
-      '/api/analysis-timeline': {
-        target: 'https://cropeye-database-production.up.railway.app',
+      ...sarProxy,
+      '/api/agriculture-analysis': {
+        // Events Railway hosts analyzeSinglePlot / indices / stress / harvest.
+        // Cloudflare trycloudflare tunnel often 502s (origin down).
+        target: (
+          env.VITE_AGRICULTURE_ANALYSIS_API_URL ||
+          env.VITE_DEV_EVENTS_API_URL ||
+          'https://events-cropeye.up.railway.app'
+        ).replace(/\/$/, ''),
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/analysis-timeline/, ''),
-      },
-      '/api/dev-plot': {
-        target: 'https://admin-cropeye.up.railway.app',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/dev-plot/, ''),
-        configure: (proxy, _options) => {
+        secure: true,
+        timeout: 180_000,
+        proxyTimeout: 180_000,
+        rewrite: (path) => path.replace(/^\/api\/agriculture-analysis/, ''),
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq) => {
+            proxyReq.setHeader('Accept', 'application/json');
+            proxyReq.setTimeout(180_000);
+          });
           proxy.on('error', (err, _req, res) => {
-            console.log('proxy error', err);
+            console.log('agriculture-analysis proxy error:', err?.message || err);
+            if (res && !res.headersSent) {
+              res.writeHead(502, { 'Content-Type': 'application/json' });
+              res.end(
+                JSON.stringify({
+                  error: 'Agriculture analysis upstream unavailable',
+                  detail: String(err?.message || err),
+                }),
+              );
+            }
           });
-          proxy.on('proxyReq', (proxyReq, req, _res) => {
-            console.log('Proxying request:', req.method, req.url);
+        },
+      },
+      '/api/factory-owner-dashboard': {
+        // Events host: /factories/dashboard (days_to_harvest, cci_avg, crop_status)
+        target: (
+          env.VITE_FACTORY_OWNER_DASH_URL ||
+          "https://events-cropeye.up.railway.app"
+        ).replace(/\/$/, ""),
+        changeOrigin: true,
+        secure: false,
+        timeout: 180_000,
+        proxyTimeout: 180_000,
+        rewrite: (path) => path.replace(/^\/api\/factory-owner-dashboard/, ''),
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq) => {
+            proxyReq.setHeader('Accept', 'application/json');
+            proxyReq.setTimeout(180_000);
           });
-          proxy.on('proxyRes', (proxyRes, req, _res) => {
-            console.log('Proxy response:', proxyRes.statusCode, req.url);
+          proxy.on('error', (err, _req, res) => {
+            console.log('factory-owner-dashboard proxy error:', err?.message || err);
+            if (res && !res.headersSent) {
+              res.writeHead(502, { 'Content-Type': 'application/json' });
+              res.end(
+                JSON.stringify({
+                  error: 'Factory dashboard upstream unavailable',
+                  detail: String(err?.message || err),
+                }),
+              );
+            }
           });
         },
       },
     },
   },
+};
 });

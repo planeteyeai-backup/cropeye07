@@ -69,8 +69,14 @@ export const resolveApiPlotName = (
     matched?.plot_number != null
       ? sanitizePlotName(String(matched.plot_number))
       : "";
+  /** Prefer slash (`8/1A`) — never convert fastapi id to underscore. */
   if (gat && num) {
     return `${gat}/${num}`;
+  }
+
+  // If UI key used underscore, still send slash to floss tile APIs
+  if (key.includes("_") && !key.includes("/")) {
+    return key.replace(/_/g, "/");
   }
 
   return key;
@@ -143,30 +149,57 @@ export function getPlotNameCandidates(
     out.push(s);
   };
 
-  const addWithForms = (value: string | undefined | null) => {
+  /** Prefer slash (`8/1A`) over underscore (`8_1A`) — floss SAR rejects/ignores `_`. */
+  const addSlashPreferred = (value: string | undefined | null) => {
     const s = sanitizePlotName(String(value ?? ""));
     if (!s) return;
+    if (s.includes("_") && !s.includes("/")) {
+      addExact(s.replace(/_/g, "/"));
+      addExact(s); // underscore last
+      return;
+    }
     addExact(s);
-    // SAR water-stress accepts slash (`8/1A`) but 404s on underscore (`8_1A`).
-    if (s.includes("_")) addExact(s.replace(/_/g, "/"));
-    if (s.includes("/")) addExact(s.replace(/\//g, "_"));
+    if (s.includes("/")) {
+      // Do not add underscore twin — causes failed stored-tiles / wrong plot keys
+      return;
+    }
   };
 
   const matched = findPlotRef(plots, plotId);
 
-  if (matched?.fastapi_plot_id) addWithForms(matched.fastapi_plot_id);
-  addWithForms(plotId);
-  addWithForms(resolveApiPlotName(plotId, plots));
+  if (matched?.fastapi_plot_id) addSlashPreferred(matched.fastapi_plot_id);
+  addSlashPreferred(plotId);
+  addSlashPreferred(resolveApiPlotName(plotId, plots));
   if (matched?.gat_number != null && matched?.plot_number != null) {
     const gat = sanitizePlotName(String(matched.gat_number));
     const num = sanitizePlotName(String(matched.plot_number));
     if (gat && num) {
-      addWithForms(`${gat}_${num}`);
-      addWithForms(`${gat}/${num}`);
+      addSlashPreferred(`${gat}/${num}`);
     }
   }
-  if (matched?.plot_name) addWithForms(matched.plot_name);
+  if (matched?.plot_name) addSlashPreferred(matched.plot_name);
+
+  // Numeric Django id last — SEF /analyze 404s/500s on bare ids; stored-tiles may need it.
+  if (matched?.id != null) addExact(String(matched.id));
 
   const cleaned = sanitizePlotName(plotId);
   return out.length > 0 ? out : cleaned ? [cleaned] : [];
+}
+
+/**
+ * Candidates for GET /stored-tiles?plot_name=…
+ * Prefer numeric id + slash fastapi id (`8/1A`). Never send underscore (`8_1A`).
+ */
+export function getStoredTilesPlotCandidates(
+  plotId: string,
+  plots?: PlotRef[] | null,
+): string[] {
+  const matched = findPlotRef(plots, plotId);
+  const base = getPlotNameCandidates(plotId, plots).filter(
+    (c) => !c.includes("_"),
+  );
+  if (matched?.id == null) return base;
+  const numeric = sanitizePlotName(String(matched.id));
+  if (!numeric || !/^\d+$/.test(numeric)) return base;
+  return [numeric, ...base.filter((c) => c !== numeric)];
 }

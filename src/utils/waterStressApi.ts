@@ -5,9 +5,19 @@ import {
   sanitizePlotName,
   type PlotRef,
 } from './plotName';
+import {
+  getSarIndexBaseUrl,
+  isSarMappingHostAvailable,
+  sarIndexUpstream,
+} from './sarIndexHost';
 
-export const SAR_API_BASE_URL = 'https://admin-cropeye.up.railway.app';
+export const SAR_API_BASE_URL = sarIndexUpstream();
 export const WATER_STRESS_TIMEOUT_MS = 180_000;
+
+/** Same floss SAR host as map tiles (Vite `/api/sar-index` in DEV). */
+function waterStressBaseUrl(): string {
+  return getSarIndexBaseUrl();
+}
 
 export interface WaterStressCci {
   value: number;
@@ -170,13 +180,16 @@ async function fetchWaterStressOnce(
 
   try {
     const response = await fetch(
-      `${SAR_API_BASE_URL}/water-stress?${params.toString()}`,
+      `${waterStressBaseUrl()}/water-stress?${params.toString()}`,
       {
         method: 'GET',
         mode: 'cors',
         cache: 'no-cache',
         credentials: 'omit',
-        headers: { Accept: 'application/json' },
+        headers: {
+          Accept: 'application/json',
+          'ngrok-skip-browser-warning': 'true',
+        },
         signal: controller.signal,
       },
     );
@@ -213,14 +226,24 @@ export async function fetchWaterStressAnalysis(
   const trimmedPlot = sanitizePlotName(plotName ?? '');
   if (!trimmedPlot) return null;
 
+  if (!(await isSarMappingHostAvailable())) return null;
+
   const endDate =
     options.endDate ?? new Date().toISOString().slice(0, 10);
   const plantationDate = formatPlantationDate(options.plantationDate);
   const candidates = orderWaterStressCandidates(
-    getPlotNameCandidates(trimmedPlot, options.plots),
+    getPlotNameCandidates(trimmedPlot, options.plots).filter(
+      (c) => !/^\d+$/.test(c),
+    ),
   );
+  const names =
+    candidates.length > 0
+      ? candidates
+      : orderWaterStressCandidates(
+          getPlotNameCandidates(trimmedPlot, options.plots),
+        );
 
-  for (const candidate of candidates) {
+  for (const candidate of names) {
     if (plantationDate) {
       const withPlant = await fetchWaterStressOnce(
         candidate,

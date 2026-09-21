@@ -22,6 +22,8 @@ import {
   Polygon,
   Tooltip as LeafletTooltip,
   useMap,
+  ImageOverlay,
+  Pane,
 } from "react-leaflet";
 import {
   AlertTriangle,
@@ -48,10 +50,25 @@ import {
   Gauge,
 } from "lucide-react";
 import "leaflet/dist/leaflet.css";
+import "./Map.css";
 import axios from "axios";
 import { getCache, setCache } from "../utils/cache";
 import { fetchFieldScoreForPlot, fieldScoreCacheKey } from "../utils/fieldScore";
-import { findPlotRef } from "../utils/plotName";
+import {
+  findPlotRef,
+  getPlotNameCandidates,
+  resolveApiPlotName,
+} from "../utils/plotName";
+import {
+  buildAdminEndDateCandidates,
+  fetchAdminLayerWithDateFallback,
+} from "../utils/adminLayerApi";
+import {
+  fetchAnalysisTimeline,
+  latestRebinDateForLayer,
+  type AnalysisTimelineResponse,
+} from "../services/analysisTimeline";
+import { readStoredPlotImageEndDates } from "../utils/plotImageEndDates";
 import MapCropStatusOverlay from "./MapCropStatusOverlay";
 import FieldIndicesStageBadge from "./FieldIndicesStageBadge";
 import { useFieldIndicesCropStage } from "../hooks/useFieldIndicesCropStage";
@@ -68,17 +85,41 @@ import {
 } from "../utils/waterStressApi";
 import api, {
   encodePlotIdForEventsUrl,
+  fetchAllOwnerFactoryBoundaryPlots,
   getCurrentUser,
   getFarmersByFieldOfficer,
   getFarmsByFarmerId,
+  getFieldOfficerAgroStats,
+  getOwnerFieldOfficersAgroStats,
   getTeamConnect,
   isAnalyzeSinglePlotPlantationDateError,
   parseFarmersByFieldOfficerResponse,
   PLANTATION_DATE_NOT_PROVIDED_MSG,
 } from "../api"; // Import the authenticated api instance + hierarchy helpers
+import {
+  buildFoMapPlotsFromAgroStats,
+  buildFoMapPlotsFromOwnerBoundaries,
+  factoryDashboardEndDate,
+  factoryRecoveryComparisonBars,
+  factoryRecoveryPeersFromRollup,
+  fetchFactoriesOwnerDashboard,
+  fetchFactoryOwnerDashboardById,
+  fetchOwnerFactoriesDetailedDashboard,
+  filterAgroStatsByOfficerIds,
+  filterFoMapPlotsByFactoryId,
+  formatFactoryCropStatusLabel,
+  mergeFoMapPlots,
+  resolveEventsFactoryId,
+  type FactoryDashboardFactory,
+  type FactoryTop25Farmer,
+  type FoMapPlot,
+} from "../utils/factoryOwnerDashboard";
+import { agricultureAnalysisBaseUrl } from "../utils/agricultureAnalysisApi";
+import { resolveProgressOwnerId } from "./progressbar/useFactoryProgress";
+import { LatLngBounds } from "leaflet";
 
-// Constants (same as FarmerDashboard)
-const BASE_URL = "https://events-cropeye.up.railway.app";
+// Comprehensive Agriculture Analysis API (Cloudflare tunnel + Vite proxy in DEV)
+const BASE_URL = agricultureAnalysisBaseUrl();
 
 /** indices / stress / irrigation on this host are often slow; 10s caused AbortController + axios to cancel (Network shows "(canceled)" ~10s). */
 const OWNER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS = 90_000;
@@ -89,6 +130,162 @@ const OTHER_FARMERS_RECOVERY = {
   bottom_quartile: 6.58,
   similar_farms: 7.63,
 };
+
+function extractAdminTileUrl(data: unknown): string | null {
+  const d = data as Record<string, any> | null | undefined;
+  const candidates = [
+    d?.features?.[0]?.properties?.tile_url,
+    d?.features?.[0]?.properties?.tileURL,
+    d?.features?.[0]?.properties?.tileServerUrl,
+    d?.features?.[0]?.properties?.tiles,
+    d?.properties?.tile_url,
+    d?.tile_url,
+    d?.tileURL,
+    d?.tileServerUrl,
+  ].filter(Boolean);
+
+  for (const c of candidates) {
+    if (Array.isArray(c) && c.length > 0 && typeof c[0] === "string") {
+      return c[0];
+    }
+    if (typeof c === "string") return c;
+  }
+  return null;
+}
+
+function isXyzTileTemplate(url: string): boolean {
+  return url.includes("{z}") && url.includes("{x}") && url.includes("{y}");
+}
+
+function isStoredAnalysisPngUrl(url: string): boolean {
+  if (!url || isXyzTileTemplate(url)) return false;
+  if (/\.png(\?|#|$)/i.test(url)) return true;
+  return /^https?:\/\//i.test(url);
+}
+
+function boundsFromLeafletPositions(
+  positions: [number, number][],
+): LatLngBounds | null {
+  if (!positions?.length) return null;
+  try {
+    const bounds = new LatLngBounds(positions);
+    return bounds.isValid() ? bounds : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Clip Growth tiles/PNG to the FO plot outline so green fills the full white
+ * border (same idea as Map ClipAnalysisPaneToBoundary).
+ * positions are Leaflet [lat, lng].
+ */
+function ClipOwnerGrowthPane({
+  paneName,
+  positions,
+  enabled,
+}: {
+  paneName: string;
+  positions: [number, number][];
+  enabled: boolean;
+}) {
+  const map = useMap();
+
+  useEffect(() => {
+    const apply = () => {
+      const pane = map.getPane(paneName);
+      if (!pane) return;
+
+      pane.style.overflow = "visible";
+      pane.style.pointerEvents = "none";
+      pane.style.zIndex = "450";
+
+      if (!enabled || !positions || positions.length < 3) {
+        pane.style.clipPath = "";
+        (pane.style as any).webkitClipPath = "";
+        return;
+      }
+
+      const points: string[] = [];
+      for (const pt of positions) {
+        const lat = Number(pt[0]);
+        const lng = Number(pt[1]);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+        const p = map.latLngToLayerPoint([lat, lng]);
+        points.push(`${Math.round(p.x)}px ${Math.round(p.y)}px`);
+      }
+      if (points.length < 3) {
+        pane.style.clipPath = "";
+        (pane.style as any).webkitClipPath = "";
+        return;
+      }
+      const clip = `polygon(${points.join(", ")})`;
+      pane.style.clipPath = clip;
+      (pane.style as any).webkitClipPath = clip;
+    };
+
+    apply();
+    map.on("move zoom zoomend moveend viewreset", apply);
+    const raf = window.requestAnimationFrame(apply);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      map.off("move zoom zoomend moveend viewreset", apply);
+      const pane = map.getPane(paneName);
+      if (pane) {
+        pane.style.clipPath = "";
+        (pane.style as any).webkitClipPath = "";
+      }
+    };
+  }, [map, paneName, positions, enabled]);
+
+  return null;
+}
+
+function ownerGrowthDateCandidates(
+  plotName: string,
+  timeline: AnalysisTimelineResponse["timeline"] | undefined,
+): string[] {
+  const fromApi = buildAdminEndDateCandidates(plotName, "Growth", timeline);
+  if (fromApi.length) return fromApi;
+
+  const days: string[] = [];
+  const push = (d: string | undefined | null) => {
+    const day = String(d || "")
+      .trim()
+      .split("T")[0];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return;
+    if (!days.includes(day)) days.push(day);
+  };
+
+  const stored = readStoredPlotImageEndDates(plotName);
+  push(stored?.verified?.growth);
+  push(stored?.growth);
+  push(stored?.overall);
+  push(latestRebinDateForLayer(timeline, "Growth"));
+
+  const today = new Date();
+  for (let i = 0; i < 5; i++) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - i * 5);
+    push(d.toISOString().split("T")[0]);
+  }
+  return days.slice(0, 5);
+}
+
+/** User-facing errors: never expose URLs, hosts, or API paths. */
+function toSafeUserError(message: unknown): string {
+  const raw = String(message ?? "").trim();
+  if (!raw) return "Something went wrong. Please try again.";
+  if (
+    /https?:\/\//i.test(raw) ||
+    /\/(factories|plots|api|field-officers)\b/i.test(raw) ||
+    /\.(railway\.app|ngrok|cloudflare|trycloudflare)/i.test(raw) ||
+    /owner_id=|end_date=|factory_id=/i.test(raw)
+  ) {
+    return "Unable to load data right now. Please try again.";
+  }
+  return raw;
+}
 
 // Type definitions (keeping the same as original)
 interface LineChartData {
@@ -199,17 +396,26 @@ function extractPlantationInfo(source: any): {
   const plantationDate = formatPlantationDateLabel(
     source.plantation_date ??
       source.planting_date ??
-      source.crop_type?.plantation_date,
+      source.planted_on ??
+      source.date_of_plantation ??
+      source.crop_type?.plantation_date ??
+      source.crop_type?.planting_date ??
+      source.farms?.[0]?.plantation_date ??
+      source.farms?.[0]?.crop_type?.plantation_date,
   );
 
   const plantationTypeRaw =
     source.plantation_type_display ??
     source.plantation_type ??
     source.planting_method ??
+    source.planting_method_display ??
     source.crop_type?.planting_method ??
     source.crop_type?.planting_method_display ??
     source.crop_type?.plantation_type_display ??
-    source.crop_type?.plantation_type;
+    source.crop_type?.plantation_type ??
+    source.farms?.[0]?.plantation_type ??
+    source.farms?.[0]?.crop_type?.plantation_type ??
+    source.farms?.[0]?.crop_type?.planting_method;
 
   return {
     plantationDate,
@@ -222,6 +428,93 @@ function parseCreatedByUsername(createdBy: unknown): string | null {
   if (typeof createdBy !== "string" || !createdBy.trim()) return null;
   const match = createdBy.trim().match(/^(\S+)/);
   return match ? match[1].toLowerCase() : null;
+}
+
+/** Candidate industry/factory ids from a manager row (may be owner_id — validate later). */
+function factoryIdCandidatesFromManager(manager: any): string[] {
+  const raw = [
+    manager?.industry_id,
+    manager?.industry?.industry_id,
+    manager?.industry?.id,
+    manager?.factory_id,
+    manager?.factory?.id,
+  ];
+  const out: string[] = [];
+  for (const value of raw) {
+    if (value == null || value === "") continue;
+    const n = Number(value);
+    const id =
+      Number.isFinite(n) && n > 0
+        ? String(Math.trunc(n))
+        : String(value).trim();
+    if (id && !out.includes(id)) out.push(id);
+  }
+  return out;
+}
+
+function nestedOfficerIdsFromManager(manager: any): string[] {
+  const nested = Array.isArray(manager?.field_officers)
+    ? manager.field_officers
+    : [];
+  return nested
+    .map((fo: any) => String(fo?.id ?? fo?.user_id ?? "").trim())
+    .filter(Boolean);
+}
+
+/**
+ * Map manager/industry → Events factory id for GET /factories/{id}/dashboard.
+ * Never use Django owner_id / manager user id (those 404 on the Events API).
+ */
+async function resolveFactoryIdForManagerSelection(
+  ownerId: string,
+  endDate: string,
+  manager: any,
+  fieldOfficerId: string,
+  managerOfficerIds: string[] = [],
+): Promise<{ factoryId: string; list: Awaited<ReturnType<typeof fetchFactoriesOwnerDashboard>> }> {
+  const list = await fetchFactoriesOwnerDashboard(ownerId, endDate);
+  const fieldOfficerIds = [
+    fieldOfficerId.trim(),
+    ...managerOfficerIds,
+    ...nestedOfficerIdsFromManager(manager),
+  ].filter(Boolean);
+
+  const factoryId = resolveEventsFactoryId({
+    list,
+    candidateIds: factoryIdCandidatesFromManager(manager),
+    fieldOfficerIds,
+  });
+
+  return { factoryId, list };
+}
+
+function officerIdsForManager(
+  managerId: string,
+  managers: any[],
+  fieldOfficers: any[],
+): Set<string> {
+  const selectedManager = managers.find(
+    (m) => String(m?.id ?? m?.user_id) === String(managerId),
+  );
+  return new Set(
+    fieldOfficers
+      .filter((fo: any) => {
+        const mid = fo?.manager_id ?? fo?.manager?.id ?? fo?.managerId;
+        if (mid != null && String(mid) === String(managerId)) return true;
+        if (!selectedManager) return false;
+        const creatorUsername = parseCreatedByUsername(fo?.created_by);
+        const managerUsername = `${selectedManager?.username ?? ""}`
+          .trim()
+          .toLowerCase();
+        return (
+          !!creatorUsername &&
+          !!managerUsername &&
+          creatorUsername === managerUsername
+        );
+      })
+      .map((fo: any) => String(fo?.id ?? fo?.user_id))
+      .filter(Boolean),
+  );
 }
 
 function enrichFieldOfficersWithManagerIds(
@@ -732,11 +1025,30 @@ const OwnerFarmDash: React.FC = () => {
   const [plotCoordinatesCache, setPlotCoordinatesCache] = useState<
     Map<string, [number, number][]>
   >(new Map());
+  /** Logged-in / configured factory owner id for GET /factories/dashboard?owner_id= */
+  const [dashboardOwnerId, setDashboardOwnerId] = useState<string>("");
+  const [loadingFactoryDash, setLoadingFactoryDash] = useState(false);
+  const [factoryRollup, setFactoryRollup] =
+    useState<FactoryDashboardFactory | null>(null);
+  const [foMapPlots, setFoMapPlots] = useState<FoMapPlot[]>([]);
+  /** Backend Growth PNG/XYZ from analyze_Growth (same as Map page). */
+  const [growthOverlayUrl, setGrowthOverlayUrl] = useState<string | null>(null);
+  const [growthOverlayBounds, setGrowthOverlayBounds] =
+    useState<LatLngBounds | null>(null);
+  const growthOverlayRequestRef = useRef(0);
+  const [factoryRecoveryPeers, setFactoryRecoveryPeers] = useState<{
+    factoryAvg: number | null;
+    top25Avg: number | null;
+    similarPct: number | null;
+    topFarmerAvg: number | null;
+    topFarmers: FactoryTop25Farmer[];
+  } | null>(null);
   const hierarchyRequestIdRef = useRef<number>(0);
   const prevFieldOfficerIdRef = useRef<string>("");
   const lastFetchedFarmerIdRef = useRef<string>("");
   const dashboardLoadedForPlotRef = useRef<string>("");
   const farmerFetchGenRef = useRef(0);
+  const factoryDashRequestIdRef = useRef(0);
 
   const selectedFarmerForUi =
     farmersForSelectedOfficer.find(
@@ -749,6 +1061,21 @@ const OwnerFarmDash: React.FC = () => {
     selectedFarmerForUi?.fullName ??
     selectedFarmerForUi?.username ??
     (selectedFarmerId ? `Farmer ${selectedFarmerId}` : "Farmer");
+
+  /** Stable key so loading managers does not cancel an in-flight owner dashboard. */
+  const selectedManagerForDash = selectedManagerId
+    ? managers.find(
+        (m) => String(m?.id ?? m?.user_id) === String(selectedManagerId),
+      )
+    : null;
+  const managerDashKey = selectedManagerId
+    ? String(
+        selectedManagerForDash?.industry_id ??
+          selectedManagerForDash?.factory_id ??
+          selectedManagerForDash?.industry?.id ??
+          (managers.length ? "none" : "wait"),
+      )
+    : "owner-all";
 
   // Fetch farmers list on component mount
   useEffect(() => {
@@ -853,19 +1180,23 @@ const OwnerFarmDash: React.FC = () => {
   );
 
   const displayPlantationDate =
-    metrics.plantationDate ?? selectedPlotPlantation.plantationDate;
+    selectedPlotPlantation.plantationDate ?? metrics.plantationDate;
   const displayPlantationType =
-    metrics.plantationType ?? selectedPlotPlantation.plantationType;
+    selectedPlotPlantation.plantationType ?? metrics.plantationType;
 
   // Update field officers dropdown when manager changes
   useEffect(() => {
     if (!selectedManagerId) {
       setFieldOfficers([]);
-      setSelectedFieldOfficerId("");
-      setFarmersForSelectedOfficer([]);
-      setSelectedFarmerId("");
-      setPlots([]);
-      setSelectedPlotId("");
+      // Do not reset FO/farmer on every hierarchy refresh — that re-fires factory fetch
+      // and can drop owner totals while the slow dashboard request is in flight.
+      if (selectedFieldOfficerId) {
+        setSelectedFieldOfficerId("");
+        setFarmersForSelectedOfficer([]);
+        setSelectedFarmerId("");
+        setPlots([]);
+        setSelectedPlotId("");
+      }
       return;
     }
 
@@ -900,7 +1231,248 @@ const OwnerFarmDash: React.FC = () => {
     setSelectedFarmerId("");
     setPlots([]);
     setSelectedPlotId("");
-  }, [selectedManagerId, teamFieldOfficersRaw, managers]);
+  }, [selectedManagerId, teamFieldOfficersRaw, managers]); // eslint-disable-line react-hooks/exhaustive-deps -- intentional: avoid FO clear loop
+
+  // KPI cards: factory dashboard only (do NOT wait on agroStats — that was
+  // keeping spinners forever while FO agroStats 404/hang on Cloudflare).
+  // 1) No manager → GET /factories/dashboard (detailed aggregate)
+  // 2) Manager → GET /factories/{industry_id}/dashboard
+  // 3) Farmer selected → skip factory cards
+  useEffect(() => {
+    const foId = selectedFieldOfficerId
+      ? String(selectedFieldOfficerId).trim()
+      : "";
+    const farmerId = selectedFarmerId ? String(selectedFarmerId).trim() : "";
+    const managerId = selectedManagerId
+      ? String(selectedManagerId).trim()
+      : "";
+
+    if (farmerId) {
+      factoryDashRequestIdRef.current += 1;
+      setLoadingFactoryDash(false);
+      return;
+    }
+
+    // Manager picked but hierarchy not loaded yet — wait (don't cancel later).
+    if (managerId && managerDashKey === "wait") {
+      setLoadingFactoryDash(true);
+      return;
+    }
+
+    const requestId = ++factoryDashRequestIdRef.current;
+    setLoadingFactoryDash(true);
+
+    void (async () => {
+      try {
+        const ownerId = String(
+          dashboardOwnerId.trim() || resolveProgressOwnerId() || "",
+        );
+        if (ownerId && ownerId !== dashboardOwnerId) {
+          setDashboardOwnerId(ownerId);
+        }
+        if (!ownerId) {
+          if (requestId === factoryDashRequestIdRef.current) {
+            setFactoryRollup(null);
+            setFactoryRecoveryPeers(null);
+            setLoadingFactoryDash(false);
+          }
+          return;
+        }
+
+        const endDate = factoryDashboardEndDate();
+        let factory: FactoryDashboardFactory | null = null;
+
+        if (!managerId) {
+          factory = await fetchOwnerFactoriesDetailedDashboard(
+            ownerId,
+            endDate,
+          );
+        } else {
+          const officerIds = selectedManagerForDash
+            ? Array.from(
+                officerIdsForManager(
+                  managerId,
+                  managers,
+                  teamFieldOfficersRaw,
+                ),
+              )
+            : [];
+          const { factoryId } = selectedManagerForDash
+            ? await resolveFactoryIdForManagerSelection(
+                ownerId,
+                endDate,
+                selectedManagerForDash,
+                foId,
+                officerIds,
+              )
+            : { factoryId: "" };
+          if (requestId !== factoryDashRequestIdRef.current) return;
+
+          // List /factories/dashboard rows are metric-empty shells. Biomass +
+          // recovery live only on GET /factories/{id}/dashboard — never fall
+          // back to the shell or owner-root rollup for a single district.
+          if (factoryId) {
+            factory = await fetchFactoryOwnerDashboardById(
+              factoryId,
+              ownerId,
+              endDate,
+            );
+            if (
+              (!factory ||
+                (factory.biomass_avg_t_per_acre == null &&
+                  factory.recovery?.factory_avg_pct == null)) &&
+              requestId === factoryDashRequestIdRef.current
+            ) {
+              await new Promise((r) => setTimeout(r, 1200));
+              if (requestId !== factoryDashRequestIdRef.current) return;
+              factory =
+                (await fetchFactoryOwnerDashboardById(
+                  factoryId,
+                  ownerId,
+                  endDate,
+                )) ?? factory;
+            }
+          }
+        }
+
+        if (requestId !== factoryDashRequestIdRef.current) return;
+
+        if (factory) {
+          setFactoryRollup(factory);
+          setFactoryRecoveryPeers(factoryRecoveryPeersFromRollup(factory));
+        } else {
+          setFactoryRollup(null);
+          setFactoryRecoveryPeers(null);
+        }
+      } catch {
+        if (requestId !== factoryDashRequestIdRef.current) return;
+        setFactoryRollup(null);
+        setFactoryRecoveryPeers(null);
+      } finally {
+        if (requestId === factoryDashRequestIdRef.current) {
+          setLoadingFactoryDash(false);
+        }
+      }
+    })();
+  }, [
+    selectedFieldOfficerId,
+    selectedFarmerId,
+    selectedManagerId,
+    managerDashKey,
+    selectedManagerForDash,
+    managers,
+    teamFieldOfficersRaw,
+  ]); // eslint-disable-line react-hooks/exhaustive-deps -- owner resolved inside
+
+  // Map polygons — all owner industries when no manager; filter when manager/FO selected.
+  useEffect(() => {
+    const foId = selectedFieldOfficerId
+      ? String(selectedFieldOfficerId).trim()
+      : "";
+    const farmerId = selectedFarmerId ? String(selectedFarmerId).trim() : "";
+    const managerId = selectedManagerId
+      ? String(selectedManagerId).trim()
+      : "";
+
+    // Farmer+plot view uses selected plot polygon only.
+    if (farmerId) {
+      setFoMapPlots([]);
+      return;
+    }
+
+    let cancelled = false;
+    const endDate = factoryDashboardEndDate();
+
+    void (async () => {
+      try {
+        // 1) Always try owner-factory-boundaries first (all industries / districts).
+        const ownerBoundaryPlots = await fetchAllOwnerFactoryBoundaryPlots().catch(
+          () => [],
+        );
+        let mapPlots = buildFoMapPlotsFromOwnerBoundaries(
+          ownerBoundaryPlots as Array<Record<string, any>>,
+        );
+
+        // 2) Merge FO agroStats geometries (status / extra plots).
+        let agroStats: Record<string, unknown> | null = null;
+        if (foId) {
+          const raw = await getFieldOfficerAgroStats(foId, endDate).catch(
+            () => null,
+          );
+          agroStats =
+            raw && typeof raw === "object"
+              ? (raw as Record<string, unknown>)
+              : null;
+        } else {
+          const officers =
+            teamFieldOfficersRaw.length > 0
+              ? teamFieldOfficersRaw
+              : managers.flatMap((m: any) =>
+                  Array.isArray(m?.field_officers) ? m.field_officers : [],
+                );
+          const agroStatsRaw = await getOwnerFieldOfficersAgroStats(endDate, {
+            hierarchy: {
+              fieldOfficers: officers,
+              managers,
+            },
+          }).catch(() => null);
+
+          agroStats =
+            agroStatsRaw && typeof agroStatsRaw === "object"
+              ? (agroStatsRaw as Record<string, unknown>)
+              : null;
+
+          if (managerId && agroStats) {
+            agroStats = filterAgroStatsByOfficerIds(
+              agroStats,
+              officerIdsForManager(
+                managerId,
+                managers,
+                teamFieldOfficersRaw,
+              ),
+            );
+          }
+        }
+
+        if (cancelled) return;
+
+        const fromAgro = buildFoMapPlotsFromAgroStats(agroStats);
+        mapPlots = mergeFoMapPlots(mapPlots, fromAgro);
+
+        // Manager selected → keep that factory/industry plots when ids match.
+        if (managerId && !foId) {
+          const factoryId =
+            selectedManagerForDash?.industry_id ??
+            selectedManagerForDash?.factory_id ??
+            selectedManagerForDash?.industry?.id ??
+            selectedManagerForDash?.industry?.industry_id ??
+            null;
+          if (factoryId != null) {
+            mapPlots = filterFoMapPlotsByFactoryId(mapPlots, factoryId);
+          }
+        }
+
+        setFoMapPlots(mapPlots);
+        if (mapPlots[0]?.positions[0]) {
+          setMapCenter(mapPlots[0].positions[0]);
+          setMapKey((k) => k + 1);
+        }
+      } catch {
+        if (!cancelled) setFoMapPlots([]);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    selectedFieldOfficerId,
+    selectedFarmerId,
+    selectedManagerId,
+    selectedManagerForDash,
+    teamFieldOfficersRaw,
+    managers,
+  ]);
 
   // Load farmers for the selected field officer from dedicated API.
   useEffect(() => {
@@ -1110,6 +1682,135 @@ const OwnerFarmDash: React.FC = () => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- load dashboard once per plot id
   }, [selectedPlotId]);
+
+  // Backend Growth tile fill — only when Mapping host is configured (optional testing).
+  const plotCoordsKey =
+    selectedPlotId && plotCoordinates.length >= 3
+      ? `${selectedPlotId}|${plotCoordinates
+          .map(([lat, lng]) => `${lat.toFixed(5)},${lng.toFixed(5)}`)
+          .join(";")}`
+      : "";
+
+  useEffect(() => {
+    if (!plotCoordsKey || !selectedPlotId || plotCoordinates.length < 3) {
+      setGrowthOverlayUrl(null);
+      setGrowthOverlayBounds(null);
+      return;
+    }
+
+    const plotBounds = boundsFromLeafletPositions(plotCoordinates);
+    if (!plotBounds) {
+      setGrowthOverlayUrl(null);
+      setGrowthOverlayBounds(null);
+      return;
+    }
+
+    const requestId = ++growthOverlayRequestRef.current;
+    let cancelled = false;
+    const plotIdAtStart = selectedPlotId;
+    const farmerPlotsAtStart =
+      (selectedFarmerForUi as { plots?: unknown[] } | null)?.plots ??
+      farmersForSelectedOfficer.flatMap((f: any) =>
+        Array.isArray(f?.plots) ? f.plots : [],
+      );
+
+    const run = async () => {
+      try {
+        const { isSarMappingHostAvailable } = await import(
+          "../utils/sarIndexHost"
+        );
+        if (!(await isSarMappingHostAvailable())) {
+          setGrowthOverlayUrl(null);
+          setGrowthOverlayBounds(null);
+          return;
+        }
+
+        const plotNameCandidates = getPlotNameCandidates(
+          plotIdAtStart,
+          farmerPlotsAtStart as any,
+        );
+        const apiPlots =
+          plotNameCandidates.length > 0
+            ? plotNameCandidates
+            : [
+                resolveApiPlotName(
+                  plotIdAtStart,
+                  farmerPlotsAtStart as any,
+                ),
+              ].filter(Boolean);
+
+        let lastErr: unknown = null;
+        for (const apiPlot of apiPlots) {
+          try {
+            const timeline = await fetchAnalysisTimeline(
+              apiPlot,
+              farmerPlotsAtStart as any,
+            ).catch(() => null);
+            if (cancelled || growthOverlayRequestRef.current !== requestId)
+              return;
+
+            const candidateDates = ownerGrowthDateCandidates(
+              plotIdAtStart,
+              timeline?.timeline,
+            );
+            if (!candidateDates.length) continue;
+
+            const { data } = await fetchAdminLayerWithDateFallback({
+              plotName: plotIdAtStart,
+              apiPlotName: apiPlot,
+              layer: "Growth",
+              candidateDates,
+            });
+            if (cancelled || growthOverlayRequestRef.current !== requestId)
+              return;
+
+            const tileUrl = extractAdminTileUrl(data);
+            // Always stretch/clip to the FO UI boundary so green fills the full outline
+            // (Admin GEE geometry can be smaller / offset vs farmers-by-FO boundary).
+            if (
+              tileUrl &&
+              (isStoredAnalysisPngUrl(tileUrl) || isXyzTileTemplate(tileUrl))
+            ) {
+              setGrowthOverlayUrl(tileUrl);
+              setGrowthOverlayBounds(plotBounds);
+              return;
+            }
+          } catch (err) {
+            lastErr = err;
+            console.warn(
+              `[OwnerFarmDash] Growth tiles failed for ${apiPlot}:`,
+              err instanceof Error ? err.message : err,
+            );
+          }
+        }
+
+        if (cancelled || growthOverlayRequestRef.current !== requestId) return;
+        if (lastErr) {
+          console.warn(
+            "[OwnerFarmDash] No Growth overlay for plot",
+            plotIdAtStart,
+            lastErr instanceof Error ? lastErr.message : lastErr,
+          );
+        }
+        setGrowthOverlayUrl(null);
+        setGrowthOverlayBounds(null);
+      } catch (err) {
+        if (cancelled || growthOverlayRequestRef.current !== requestId) return;
+        console.warn(
+          "[OwnerFarmDash] Growth overlay error:",
+          err instanceof Error ? err.message : err,
+        );
+        setGrowthOverlayUrl(null);
+        setGrowthOverlayBounds(null);
+      }
+    };
+
+    void run();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- plotCoordsKey captures plot + boundary
+  }, [plotCoordsKey]);
 
   useEffect(() => {
     if (lineChartData.length > 0) {
@@ -1388,7 +2089,7 @@ const OwnerFarmDash: React.FC = () => {
             if (!plotData) {
               try {
                 const singleRes = await axios.get(
-                  `https://events-cropeye.up.railway.app/plots/analyzeSinglePlot?plot_id=${encodePlotIdForEventsUrl(plotIdAtStart)}`,
+                  `${BASE_URL}/plots/analyzeSinglePlot?plot_id=${encodePlotIdForEventsUrl(plotIdAtStart)}`,
                 );
                 plotData = singleRes?.data ?? null;
                 if (plotData) setCache(singlePlotCacheKey, plotData);
@@ -1407,28 +2108,11 @@ const OwnerFarmDash: React.FC = () => {
               }
             }
 
-            // Fallback: use all-plots agroStats only if single-plot has no usable data.
+            // Fallback: FO / plot agroStats path — never call removed /plots/agroStats bulk.
             if (!plotData) {
-              const agroStatsCacheKey = `agroStats_v3_${yieldDataDate}`;
-              let allPlotsData = getCache(agroStatsCacheKey);
-              if (!allPlotsData) {
-                const agroStatsRes = await axios.get(
-                  `https://events-cropeye.up.railway.app/plots/agroStats?end_date=${yieldDataDate}`,
-                );
-                allPlotsData = agroStatsRes?.data ?? null;
-                if (allPlotsData) setCache(agroStatsCacheKey, allPlotsData);
-              }
-
-              const keys = Object.keys(allPlotsData || {});
-              const keyCandidate =
-                keys.find(
-                  (k) =>
-                    k === plotIdAtStart ||
-                    k === `"${plotIdAtStart}"` ||
-                    k.replace(/^"|"$/g, "") === plotIdAtStart,
-                ) ?? null;
-              plotData = keyCandidate ? (allPlotsData as any)[keyCandidate] : null;
-              if (plotData) setCache(singlePlotCacheKey, plotData);
+              console.warn(
+                "[OwnerFarmDash] analyzeSinglePlot empty; skipping removed /plots/agroStats bulk endpoint",
+              );
             }
 
             if (
@@ -1677,6 +2361,37 @@ const OwnerFarmDash: React.FC = () => {
       let fieldOfficersTmp: any[] = [];
       let farmersTmp: any[] = [];
 
+      // Prefer owner-hierarchy so ALL industries/managers appear (not one industry_id only).
+      try {
+        const response = await api.get(
+          `${import.meta.env.VITE_API_BASE_URL || "https://cropeye-backendd.up.railway.app/api"}/users/owner-hierarchy/`,
+        );
+        const responseData = response.data;
+        managersTmp = Array.isArray(responseData?.managers)
+          ? responseData.managers
+          : Array.isArray(responseData?.results)
+            ? responseData.results
+            : [];
+        if (Array.isArray(managersTmp) && managersTmp.length > 0) {
+          fieldOfficersTmp = managersTmp.flatMap((m: any) =>
+            (Array.isArray(m?.field_officers) ? m.field_officers : []).map(
+              (fo: any) => ({
+                ...fo,
+                manager_id: fo?.manager_id ?? fo?.manager?.id ?? m?.id,
+              }),
+            ),
+          );
+          farmersTmp = managersTmp.flatMap((m: any) =>
+            (Array.isArray(m?.field_officers) ? m.field_officers : []).flatMap(
+              (fo: any) =>
+                Array.isArray(fo?.farmers) ? fo.farmers : [],
+            ),
+          );
+        }
+      } catch {
+        // fall through to team-connect
+      }
+
       // Prefer team-connect for lighter payload (if possible)
       const meRes = await getCurrentUser();
       const me = meRes?.data;
@@ -1686,6 +2401,11 @@ const OwnerFarmDash: React.FC = () => {
         me?.industry?.industry_id ??
         me?.industryId;
 
+      // Merge team-connect for current industry if hierarchy was empty / incomplete
+      if (
+        (!managersTmp || managersTmp.length === 0) ||
+        (!fieldOfficersTmp || fieldOfficersTmp.length === 0)
+      ) {
       if (industryId) {
         const teamRes = await getTeamConnect(industryId);
         const d = teamRes?.data;
@@ -1740,6 +2460,7 @@ const OwnerFarmDash: React.FC = () => {
           });
         }
       }
+      } // end incomplete hierarchy → team-connect merge
 
       // If team-connect gives managers but no flat field-officers array,
       // try deriving field officers from nested manager objects.
@@ -2237,26 +2958,213 @@ const OwnerFarmDash: React.FC = () => {
     );
   };
 
-  // Map auto-center component (from Harvest Dashboard)
-  function MapAutoCenter({ center }: { center: [number, number] }) {
+  // Map auto-center / zoom to current plots
+  function MapAutoCenter({
+    center,
+    zoom = 17,
+  }: {
+    center: [number, number];
+    zoom?: number;
+  }) {
     const map = useMap();
     useEffect(() => {
-      map.setView(center, map.getZoom());
-    }, [center, map]);
+      if (!center?.[0] || !center?.[1]) return;
+      map.setView(center, zoom, { animate: false });
+    }, [center, zoom, map]);
     return null;
+  }
+
+  function FitPlotPositions({
+    positions,
+    maxZoom = 18,
+    minZoom,
+  }: {
+    positions: [number, number][];
+    maxZoom?: number;
+    /** When set, never zoom out past this (keeps multi-plot views readable). */
+    minZoom?: number;
+  }) {
+    const map = useMap();
+    useEffect(() => {
+      const coords = (positions || []).filter(([lat, lng]) => {
+        const la = Number(lat);
+        const ln = Number(lng);
+        return (
+          Number.isFinite(la) &&
+          Number.isFinite(ln) &&
+          Math.abs(la) > 0.5 &&
+          Math.abs(ln) > 0.5 &&
+          Math.abs(la) <= 90 &&
+          Math.abs(ln) <= 180
+        );
+      });
+      if (coords.length < 2) return;
+      try {
+        const bounds = new LatLngBounds(coords);
+        if (bounds.isValid()) {
+          map.fitBounds(bounds, {
+            padding: [48, 48],
+            maxZoom,
+            animate: false,
+          });
+          // Statewide / multi-district bounds zoom too far out — plots become dots.
+          if (minZoom != null && map.getZoom() < minZoom) {
+            map.setView(bounds.getCenter(), minZoom, { animate: false });
+          }
+        }
+      } catch {
+        // ignore invalid geometries
+      }
+    }, [positions, maxZoom, minZoom, map]);
+    return null;
+  }
+
+  /** Owner FO / industry plot cloud.
+   * One factory → keep a readable mid zoom.
+   * All districts → fit full bounds (do NOT force zoom-in; that hid most plots).
+   */
+  function FitFoMapPlots({ plots }: { plots: FoMapPlot[] }) {
+    const coords = plots.flatMap((p) => p.positions);
+    let minLat = Infinity;
+    let maxLat = -Infinity;
+    let minLng = Infinity;
+    let maxLng = -Infinity;
+    for (const [lat, lng] of coords) {
+      const la = Number(lat);
+      const ln = Number(lng);
+      if (!Number.isFinite(la) || !Number.isFinite(ln)) continue;
+      minLat = Math.min(minLat, la);
+      maxLat = Math.max(maxLat, la);
+      minLng = Math.min(minLng, ln);
+      maxLng = Math.max(maxLng, ln);
+    }
+    const latSpan = Number.isFinite(minLat) ? maxLat - minLat : 0;
+    const lngSpan = Number.isFinite(minLng) ? maxLng - minLng : 0;
+    // ~0.35° ≈ 35–40 km — wider than one factory / district cluster
+    const multiDistrict = latSpan > 0.35 || lngSpan > 0.35;
+
+    return (
+      <FitPlotPositions
+        positions={coords}
+        maxZoom={multiDistrict ? 11 : 14}
+        minZoom={multiDistrict ? undefined : 12}
+      />
+    );
   }
 
   const getPlotBorderStyle = () => ({
     color: "#ffffff",
     fillColor: "#10b981",
+    fill: true,
     weight: 3,
     opacity: 1,
-    fillOpacity: 0.3,
+    // Always paint green inside the boundary (Growth tiles layer on top when present).
+    fillOpacity: 0.45,
   });
 
-  // Biomass data setup (same as FarmerDashboard)
-  const currentBiomass = metrics.biomass || 0;
-  const totalBiomass = metrics.totalBiomass || 0;
+  /** FO / district overview — green fill on every plot so map is not hollow outlines. */
+  const getFoPlotBorderStyle = (plotId: string) => {
+    const sel = String(selectedPlotId || "")
+      .replace(/^"|"$/g, "")
+      .trim()
+      .toLowerCase()
+      .replace(/_/g, "/");
+    const pid = String(plotId || "")
+      .replace(/^"|"$/g, "")
+      .trim()
+      .toLowerCase()
+      .replace(/_/g, "/");
+    const isSelected = !!sel && sel === pid;
+    return {
+      color: isSelected ? "#facc15" : "#ffffff",
+      fillColor: "#10b981",
+      fill: true,
+      weight: isSelected ? 3 : 2,
+      opacity: 1,
+      fillOpacity: isSelected ? 0.5 : 0.35,
+    };
+  };
+
+  // 1–2) No farmer → factory dashboard cards. 3) Farmer selected → plot/farmer metrics.
+  const useFoFactoryMetrics =
+    !selectedFarmerId && (Boolean(factoryRollup) || loadingFactoryDash);
+  const foCropStatusLabel = formatFactoryCropStatusLabel(factoryRollup);
+  const foArea = factoryRollup?.total_field_area_acres ?? null;
+  const foExpectedYield =
+    factoryRollup?.expected_yield_t_per_acre ??
+    factoryRollup?.average_yield_t_per_acre ??
+    null;
+  const foExpectedYieldMin =
+    factoryRollup?.expected_yield_min_t_per_acre ?? null;
+  const foExpectedYieldMax =
+    factoryRollup?.expected_yield_max_t_per_acre ?? null;
+  const foBiomassAvg = factoryRollup?.biomass_avg_t_per_acre ?? null;
+  const foBiomassMin = factoryRollup?.biomass_min_t_per_acre ?? null;
+  const foBiomassMax = factoryRollup?.biomass_max_t_per_acre ?? null;
+  const foRecoveryAvg = factoryRollup?.recovery?.factory_avg_pct ?? null;
+  const foBrixAvg =
+    factoryRollup?.brix_avg != null &&
+    Number.isFinite(Number(factoryRollup.brix_avg))
+      ? Number(factoryRollup.brix_avg)
+      : null;
+  const foBrixMin =
+    factoryRollup?.brix_min != null &&
+    Number.isFinite(Number(factoryRollup.brix_min))
+      ? Number(factoryRollup.brix_min)
+      : null;
+  const foBrixMax =
+    factoryRollup?.brix_max != null &&
+    Number.isFinite(Number(factoryRollup.brix_max))
+      ? Number(factoryRollup.brix_max)
+      : null;
+  const foFieldScoreAvg =
+    factoryRollup?.field_score_avg != null &&
+    Number.isFinite(Number(factoryRollup.field_score_avg))
+      ? Number(factoryRollup.field_score_avg)
+      : null;
+
+  const displayArea = useFoFactoryMetrics ? foArea : metrics.area;
+  const displayCropStatus = useFoFactoryMetrics
+    ? foCropStatusLabel
+    : metrics.growthStage;
+  const displayExpectedYield = useFoFactoryMetrics
+    ? foExpectedYield
+    : metrics.expectedYield;
+  const displayBiomassAvg = useFoFactoryMetrics
+    ? foBiomassAvg
+    : metrics.totalBiomass;
+  const displayRecovery = useFoFactoryMetrics
+    ? foRecoveryAvg
+    : metrics.recovery;
+  const displayBrix = useFoFactoryMetrics ? foBrixAvg : metrics.brix;
+  const displayBrixMin = useFoFactoryMetrics ? foBrixMin : metrics.brixMin;
+  const displayBrixMax = useFoFactoryMetrics ? foBrixMax : metrics.brixMax;
+  const displayExpectedYieldMin = useFoFactoryMetrics
+    ? foExpectedYieldMin
+    : metrics.sugarYieldMin;
+  const displayExpectedYieldMax = useFoFactoryMetrics
+    ? foExpectedYieldMax
+    : metrics.sugarYieldMax;
+  const displayBiomassMin = useFoFactoryMetrics
+    ? foBiomassMin
+    : metrics.biomassMin;
+  const displayBiomassMax = useFoFactoryMetrics
+    ? foBiomassMax
+    : metrics.biomassMax;
+  const displayFieldScore = useFoFactoryMetrics
+    ? foFieldScoreAvg
+    : metrics.fieldScore;
+  const foCardsLoading = useFoFactoryMetrics && loadingFactoryDash;
+
+  // Biomass pie: use factory avg when in FO mode; avoid fake zeros when missing
+  const totalBiomass = useFoFactoryMetrics
+    ? foBiomassAvg ?? 0
+    : metrics.totalBiomass ?? 0;
+  const currentBiomass = useFoFactoryMetrics
+    ? foBiomassAvg != null
+      ? foBiomassAvg * 0.12
+      : 0
+    : metrics.biomass ?? 0;
 
   const biomassData = [
     {
@@ -2271,33 +3179,40 @@ const OwnerFarmDash: React.FC = () => {
     },
   ];
 
-  // Recovery Rate Comparison data (matching FarmerDashboard)
-  const recoveryComparisonData = [
-    {
-      name: "Your Farm",
-      value: metrics.recovery || 0,
-      fill: "#10b981",
-      label: "Your Recovery Rate",
-    },
-    {
-      name: "Regional Average",
-      value: OTHER_FARMERS_RECOVERY.regional_average,
-      fill: "#3b82f6",
-      label: "Regional Average",
-    },
-    {
-      name: "Top 25%",
-      value: OTHER_FARMERS_RECOVERY.top_quartile,
-      fill: "#22c55e",
-      label: "Top Quartile",
-    },
-    {
-      name: "Similar Farms",
-      value: OTHER_FARMERS_RECOVERY.similar_farms,
-      fill: "#f59e0b",
-      label: "Similar Farms",
-    },
-  ];
+  // Recovery Rate Comparison (factory mode = Regional + Top 25 recovery %)
+  const recoveryComparisonData = useFoFactoryMetrics
+    ? factoryRecoveryComparisonBars(factoryRollup)
+    : [
+        {
+          name: "Your Farm",
+          value: metrics.recovery ?? 0,
+          fill: "#10b981",
+          label: "Your Recovery Rate",
+        },
+        {
+          name: "Regional Average",
+          value: OTHER_FARMERS_RECOVERY.regional_average,
+          fill: "#3b82f6",
+          label: "Regional Average",
+        },
+        {
+          name: "Top 25%",
+          value: OTHER_FARMERS_RECOVERY.top_quartile,
+          fill: "#22c55e",
+          label: "Top Quartile",
+        },
+        {
+          name: "Similar Farms",
+          value: OTHER_FARMERS_RECOVERY.similar_farms,
+          fill: "#f59e0b",
+          label: "Similar Farms",
+        },
+      ];
+
+  const recoveryYMax = Math.max(
+    10,
+    ...recoveryComparisonData.map((d) => Number(d.value) || 0),
+  );
 
   // Time period toggle component
   const TimePeriodToggle: React.FC = () => (
@@ -2605,8 +3520,8 @@ const OwnerFarmDash: React.FC = () => {
                         <option value="">Select an officer</option>
                         {fieldOfficers.map((officer) => (
                           <option
-                            key={`officer-${officer.id}`}
-                            value={officer.id}
+                            key={`officer-${officer.id ?? officer.user_id}`}
+                            value={String(officer.id ?? officer.user_id ?? "")}
                           >
                             {officer.first_name} {officer.last_name} (
                             {officer.farmers_count ??
@@ -2740,7 +3655,7 @@ const OwnerFarmDash: React.FC = () => {
         {plotStatsError && (
           <div className="flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
             <AlertTriangle className="w-4 h-4 shrink-0" />
-            <span>{plotStatsError}</span>
+            <span>{toSafeUserError(plotStatsError)}</span>
           </div>
         )}
         {/* Top Priority Metrics - 4 Key Cards */}
@@ -2750,10 +3665,12 @@ const OwnerFarmDash: React.FC = () => {
               <MapPin className="w-6 h-6 text-green-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
+                  {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : displayArea != null ? (
+                    Number(displayArea).toFixed(2)
                   ) : (
-                    metrics.area?.toFixed(2) || "-"
+                    "-"
                   )}
                 </div>
                 <div className="text-sm font-semibold text-green-600">acre</div>
@@ -2763,44 +3680,154 @@ const OwnerFarmDash: React.FC = () => {
           </div>
 
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-emerald-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2">
-              <Leaf className="w-6 h-6 text-emerald-600" />
-              <div className="text-right">
-                <div className="text-lg font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
+            <div className="flex items-center justify-between mb-2 gap-2">
+              <Leaf className="w-6 h-6 text-emerald-600 shrink-0" />
+              <div className="text-right min-w-0 flex-1">
+                <div className="text-xs sm:text-sm font-bold text-gray-800 leading-snug break-words">
+                  {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
+                    <Loader2 className="w-5 h-5 animate-spin ml-auto" />
+                  ) : useFoFactoryMetrics && factoryRollup?.crop_status?.counts ? (
+                    <div className="space-y-0.5">
+                      <div>
+                        Harvest Maturity:{" "}
+                        {Number(
+                          factoryRollup.crop_status.counts.harvest_maturity ?? 0,
+                        )}{" "}
+                        <span className="font-semibold text-emerald-600">
+                          plots/h
+                        </span>
+                      </div>
+                      <div>
+                        Grand Growth:{" "}
+                        {Number(
+                          factoryRollup.crop_status.counts.grand_growth ?? 0,
+                        )}{" "}
+                        <span className="font-semibold text-emerald-600">
+                          plots/h
+                        </span>
+                      </div>
+                      <div>
+                        Tillering:{" "}
+                        {Number(factoryRollup.crop_status.counts.tillering ?? 0)}{" "}
+                        <span className="font-semibold text-emerald-600">
+                          plots/h
+                        </span>
+                      </div>
+                      {Number(
+                        factoryRollup.crop_status.counts.other_or_unknown ?? 0,
+                      ) > 0 ? (
+                        <div>
+                          Other:{" "}
+                          {Number(
+                            factoryRollup.crop_status.counts.other_or_unknown ??
+                              0,
+                          )}{" "}
+                          <span className="font-semibold text-emerald-600">
+                            plots/h
+                          </span>
+                        </div>
+                      ) : null}
+                    </div>
                   ) : (
-                    metrics.growthStage || "-"
+                    displayCropStatus || "-"
                   )}
                 </div>
               </div>
             </div>
-            <p className="text-xs text-gray-600 font-medium mt-7">
+            <p className="text-xs text-gray-600 font-medium mt-3">
               Crop Status
             </p>
           </div>
 
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-orange-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2">
-              <Calendar className="w-6 h-6 text-orange-600" />
-              <div className="text-right">
-                <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : metrics.growthStage?.toLowerCase().includes("harvested") ? (
-                    0
-                  ) : metrics.daysToHarvest !== null ? (
-                    metrics.daysToHarvest
-                  ) : (
-                    "-"
-                  )}
-                </div>
-                <div className="text-sm font-semibold text-orange-600">
-                  Days
-                </div>
+            <div className="flex items-center justify-between mb-2 gap-2">
+              <Calendar className="w-6 h-6 text-orange-600 shrink-0" />
+              <div className="text-right min-w-0 flex-1">
+                {foCardsLoading ||
+                (useFoFactoryMetrics && loadingFactoryDash) ||
+                (!useFoFactoryMetrics && loadingData) ? (
+                  <Loader2 className="w-5 h-5 animate-spin ml-auto" />
+                ) : useFoFactoryMetrics && factoryRollup?.days_to_harvest ? (
+                  <div className="text-[11px] sm:text-xs font-bold text-gray-800 leading-snug space-y-0.5">
+                    <div>
+                      ≤15 days:{" "}
+                      {Number(
+                        factoryRollup.days_to_harvest.within_15_days ?? 0,
+                      )}{" "}
+                      <span className="font-semibold text-orange-600">
+                        plots/h
+                      </span>
+                    </div>
+                    <div>
+                      ≤1 month:{" "}
+                      {Number(
+                        factoryRollup.days_to_harvest.within_1_month ?? 0,
+                      )}{" "}
+                      <span className="font-semibold text-orange-600">
+                        plots/h
+                      </span>
+                    </div>
+                    <div>
+                      ≤45 days:{" "}
+                      {Number(
+                        factoryRollup.days_to_harvest.within_45_days ?? 0,
+                      )}{" "}
+                      <span className="font-semibold text-orange-600">
+                        plots/h
+                      </span>
+                    </div>
+                    <div>
+                      ≤90 days:{" "}
+                      {Number(
+                        factoryRollup.days_to_harvest.within_90_days ?? 0,
+                      )}{" "}
+                      <span className="font-semibold text-orange-600">
+                        plots/h
+                      </span>
+                    </div>
+                    <div>
+                      ≤120 days:{" "}
+                      {Number(
+                        factoryRollup.days_to_harvest.within_120_days ?? 0,
+                      )}{" "}
+                      <span className="font-semibold text-orange-600">
+                        plots/h
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-right">
+                    <div className="text-2xl font-bold text-gray-800">
+                      {metrics.growthStage
+                        ?.toLowerCase()
+                        .includes("harvested")
+                        ? 0
+                        : metrics.daysToHarvest !== null
+                          ? metrics.daysToHarvest
+                          : "-"}
+                    </div>
+                    <div className="text-sm font-semibold text-orange-600">
+                      Days
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
-            <p className="text-xs text-gray-600 font-medium">Days to Harvest</p>
+            <p className="text-xs text-gray-600 font-medium">
+              Days to Harvest
+              {useFoFactoryMetrics &&
+              factoryRollup?.days_to_harvest?.plots_with_days_to_harvest !=
+                null ? (
+                <span className="text-gray-400 font-normal">
+                  {" "}
+                  ·{" "}
+                  {Number(
+                    factoryRollup.days_to_harvest.plots_with_days_to_harvest,
+                  )}{" "}
+                  plots tracked
+                </span>
+              ) : null}
+            </p>
           </div>
 
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-blue-200 hover:shadow-xl transition-all duration-300">
@@ -2808,11 +3835,11 @@ const OwnerFarmDash: React.FC = () => {
               <Beaker className="w-6 h-6 text-blue-600" />
               <div className="text-right">
                 <div className="text-xl font-bold text-gray-800">
-                  {loadingData ? (
+                  {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
                   ) : (
                     <>
-                      {metrics.brix || "-"}
+                      {displayBrix != null ? Number(displayBrix).toFixed(2) : "-"}
                       <span className="text-xl font-bold text-blue-600">
                         {"\u00B0"}Brix(Avg)
                       </span>
@@ -2827,20 +3854,24 @@ const OwnerFarmDash: React.FC = () => {
               <div className="flex gap-4">
                 <div className="text-center">
                   <div className="font-semibold text-red-600">
-                    {loadingData ? (
+                    {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
                       <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : displayBrixMax != null ? (
+                      Number(displayBrixMax).toFixed(2)
                     ) : (
-                      metrics.brixMax || "-"
+                      "-"
                     )}
                   </div>
                   <div className="text-gray-500">Max</div>
                 </div>
                 <div className="text-center">
                   <div className="font-semibold text-green-600">
-                    {loadingData ? (
+                    {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
                       <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : displayBrixMin != null ? (
+                      Number(displayBrixMin).toFixed(2)
                     ) : (
-                      metrics.brixMin || "-"
+                      "-"
                     )}
                   </div>
                   <div className="text-gray-500">Min</div>
@@ -2857,10 +3888,12 @@ const OwnerFarmDash: React.FC = () => {
               <Target className="w-6 h-6 text-purple-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
+                  {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : displayRecovery != null ? (
+                    Number(displayRecovery).toFixed(1)
                   ) : (
-                    metrics.recovery?.toFixed(1) || "-"
+                    "-"
                   )}
                 </div>
                 <div className="text-sm font-semibold text-purple-600">%</div>
@@ -2870,49 +3903,221 @@ const OwnerFarmDash: React.FC = () => {
           </div>
 
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-emerald-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2">
-              <Gauge className="w-6 h-6 text-emerald-600" />
-              <div className="text-right">
-                <div className="text-2xl font-bold text-gray-800">
-                  {!selectedPlotId ? (
-                    "0"
-                  ) : loadingData ||
-                    (metrics.fieldScore === null && loadingSections.irrigation) ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
+            <div className="flex items-center justify-between mb-2 gap-2">
+              <Gauge className="w-6 h-6 text-emerald-600 shrink-0" />
+              <div className="text-right min-w-0 flex-1">
+                {useFoFactoryMetrics ? (
+                  foCardsLoading ? (
+                    <Loader2 className="w-5 h-5 animate-spin ml-auto" />
+                  ) : factoryRollup?.field_score_distribution ? (
+                    <div className="text-[11px] sm:text-xs font-bold text-gray-800 leading-snug space-y-0.5">
+                      <div>
+                        &gt;80%:{" "}
+                        {Number(
+                          factoryRollup.field_score_distribution.above_80 ?? 0,
+                        )}{" "}
+                        <span className="font-semibold text-emerald-600">
+                          plots/h
+                        </span>
+                      </div>
+                      <div>
+                        60–80%:{" "}
+                        {Number(
+                          factoryRollup.field_score_distribution
+                            .between_60_80 ?? 0,
+                        )}{" "}
+                        <span className="font-semibold text-emerald-600">
+                          plots/h
+                        </span>
+                      </div>
+                      <div>
+                        40–60%:{" "}
+                        {Number(
+                          factoryRollup.field_score_distribution
+                            .between_40_60 ?? 0,
+                        )}{" "}
+                        <span className="font-semibold text-emerald-600">
+                          plots/h
+                        </span>
+                      </div>
+                      <div>
+                        &lt;40%:{" "}
+                        {Number(
+                          factoryRollup.field_score_distribution.below_40 ?? 0,
+                        )}{" "}
+                        <span className="font-semibold text-emerald-600">
+                          plots/h
+                        </span>
+                      </div>
+                    </div>
+                  ) : displayFieldScore != null ? (
+                    <>
+                      <div className="text-2xl font-bold text-gray-800">
+                        {Number(displayFieldScore).toFixed(1)}
+                      </div>
+                      <div className="text-sm font-semibold text-emerald-600">
+                        %
+                      </div>
+                    </>
                   ) : (
-                    (metrics.fieldScore ?? 0).toFixed(1)
-                  )}
-                </div>
-                <div className="text-sm font-semibold text-emerald-600">%</div>
+                    "-"
+                  )
+                ) : !selectedPlotId ? (
+                  "0"
+                ) : loadingData ||
+                  (metrics.fieldScore === null &&
+                    loadingSections.irrigation) ? (
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                ) : (
+                  <>
+                    <div className="text-2xl font-bold text-gray-800">
+                      {(metrics.fieldScore ?? 0).toFixed(1)}
+                    </div>
+                    <div className="text-sm font-semibold text-emerald-600">
+                      %
+                    </div>
+                  </>
+                )}
               </div>
             </div>
-            <p className="text-xs text-gray-600 font-medium">Field Score</p>
+            <p className="text-xs text-gray-600 font-medium">
+              Field Score
+              {useFoFactoryMetrics &&
+              factoryRollup?.field_score_distribution
+                ?.plots_with_field_score != null ? (
+                <span className="text-gray-400 font-normal">
+                  {" "}
+                  ·{" "}
+                  {Number(
+                    factoryRollup.field_score_distribution
+                      .plots_with_field_score,
+                  )}{" "}
+                  plots tracked
+                </span>
+              ) : null}
+            </p>
           </div>
 
           <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-indigo-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2">
-              <BarChart3 className="w-6 h-6 text-indigo-600" />
-              <div className="text-right">
-                <div className="text-2xl font-bold text-gray-800">
-                  {loadingData ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    metrics.expectedYield?.toFixed(1) || "-"
-                  )}
-                </div>
-                <div className="text-sm font-semibold text-indigo-600">
-                  T/acre
-                </div>
+            <div className="flex items-center justify-between mb-2 gap-2">
+              <BarChart3 className="w-6 h-6 text-indigo-600 shrink-0" />
+              <div className="text-right min-w-0 flex-1">
+                {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
+                  <Loader2 className="w-5 h-5 animate-spin ml-auto" />
+                ) : useFoFactoryMetrics &&
+                  factoryRollup?.expected_yield_distribution ? (
+                  <div className="text-[11px] sm:text-xs font-bold text-gray-800 leading-snug space-y-0.5">
+                    <div>
+                      &gt;100 T/h:{" "}
+                      {Number(
+                        factoryRollup.expected_yield_distribution.above_100 ??
+                          0,
+                      )}{" "}
+                      <span className="font-semibold text-indigo-600">
+                        plots/h
+                      </span>
+                    </div>
+                    <div>
+                      75–100 T/h:{" "}
+                      {Number(
+                        factoryRollup.expected_yield_distribution
+                          .between_75_100 ?? 0,
+                      )}{" "}
+                      <span className="font-semibold text-indigo-600">
+                        plots/h
+                      </span>
+                    </div>
+                    <div>
+                      50–75 T/h:{" "}
+                      {Number(
+                        factoryRollup.expected_yield_distribution
+                          .between_50_75 ?? 0,
+                      )}{" "}
+                      <span className="font-semibold text-indigo-600">
+                        plots/h
+                      </span>
+                    </div>
+                    <div>
+                      &lt;50 T/h:{" "}
+                      {Number(
+                        factoryRollup.expected_yield_distribution.below_50 ?? 0,
+                      )}{" "}
+                      <span className="font-semibold text-indigo-600">
+                        plots/h
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="text-2xl font-bold text-gray-800">
+                      {displayExpectedYield != null
+                        ? Number(displayExpectedYield).toFixed(1)
+                        : "-"}
+                    </div>
+                    <div className="text-sm font-semibold text-indigo-600">
+                      {useFoFactoryMetrics ? "T/hectare" : "T/acre"}
+                    </div>
+                  </>
+                )}
               </div>
             </div>
-            <p className="text-xs text-gray-600 font-medium">Expected Yield</p>
+            {useFoFactoryMetrics &&
+            factoryRollup?.expected_yield_distribution ? (
+              <p className="text-xs text-gray-600 font-medium">
+                Expected Yield
+                {factoryRollup.expected_yield_distribution.plots_with_yield !=
+                null ? (
+                  <span className="text-gray-400 font-normal">
+                    {" "}
+                    ·{" "}
+                    {Number(
+                      factoryRollup.expected_yield_distribution.plots_with_yield,
+                    )}{" "}
+                    plots tracked
+                  </span>
+                ) : null}
+              </p>
+            ) : (
+              <div className="flex items-center justify-between text-xs text-gray-600">
+                <p className="text-xs font-medium">Expected Yield</p>
+                <div className="flex gap-4">
+                  <div className="text-center">
+                    <div className="font-semibold text-red-600 text-sm">
+                      {foCardsLoading || (!useFoFactoryMetrics && loadingData)
+                        ? "-"
+                        : displayExpectedYieldMax != null
+                          ? Number(displayExpectedYieldMax).toFixed(1)
+                          : "-"}
+                    </div>
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wide">
+                      Max
+                    </div>
+                  </div>
+                  <div className="text-center">
+                    <div className="font-semibold text-green-600 text-sm">
+                      {foCardsLoading || (!useFoFactoryMetrics && loadingData)
+                        ? "-"
+                        : displayExpectedYieldMin != null
+                          ? Number(displayExpectedYieldMin).toFixed(1)
+                          : "-"}
+                    </div>
+                    <div className="text-[10px] text-gray-500 uppercase tracking-wide">
+                      Min
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           {(() => {
+            const factoryCci = useFoFactoryMetrics
+              ? factoryRollup?.cci_avg ?? null
+              : null;
             const cciStyle = cropConditionStyleFromCci(
-              metrics.cropConditionValue,
+              selectedPlotId ? metrics.cropConditionValue : null,
             );
-            const showCciValue =
+            const showPlotCci =
               selectedPlotId &&
               !loadingSections.waterStress &&
               metrics.cropConditionValue != null;
@@ -2923,31 +4128,50 @@ const OwnerFarmDash: React.FC = () => {
                   <Sprout className="w-6 h-6 shrink-0 text-emerald-600" />
                   <div className="text-right min-w-0">
                     <div className="text-2xl font-bold text-gray-800">
-                      {!selectedPlotId ? (
-                        "0"
-                      ) : loadingSections.waterStress ? (
+                      {selectedPlotId ? (
+                        loadingSections.waterStress ? (
+                          <Loader2 className="w-5 h-5 animate-spin inline-block" />
+                        ) : (
+                          (metrics.cropConditionValue ?? 0).toFixed(1)
+                        )
+                      ) : foCardsLoading ? (
                         <Loader2 className="w-5 h-5 animate-spin inline-block" />
+                      ) : factoryCci != null ? (
+                        Number(factoryCci).toFixed(1)
                       ) : (
-                        (metrics.cropConditionValue ?? 0).toFixed(1)
+                        "-"
                       )}
                     </div>
                     <div
                       className="text-xs font-semibold leading-tight max-w-[7.5rem] ml-auto truncate"
-                      style={{ color: cciStyle?.textColor ?? "#6b7280" }}
+                      style={{
+                        color: showPlotCci
+                          ? (cciStyle?.textColor ?? "#6b7280")
+                          : "#059669",
+                      }}
                       title={
-                        showCciValue
+                        showPlotCci
                           ? (cciStyle?.label ?? metrics.cropConditionLabel ?? "")
-                          : undefined
+                          : factoryCci != null
+                            ? "Factory CCI average"
+                            : undefined
                       }
                     >
-                      {!selectedPlotId || loadingSections.waterStress
-                        ? "CCI"
-                        : (cciStyle?.label ?? metrics.cropConditionLabel ?? "CCI")}
+                      {selectedPlotId
+                        ? loadingSections.waterStress
+                          ? "CCI"
+                          : (cciStyle?.label ??
+                            metrics.cropConditionLabel ??
+                            "CCI")
+                        : "CCI avg"}
                     </div>
                   </div>
                 </div>
                 <p className="text-xs text-gray-600 font-medium">
                   Crop Condition Index
+                  {!selectedPlotId && factoryCci != null ? (
+                    <span className="text-gray-400 font-normal"> · 0–100</span>
+                  ) : null}
                 </p>
               </div>
             );
@@ -2981,14 +4205,15 @@ const OwnerFarmDash: React.FC = () => {
               <Activity className="w-6 h-6 text-pink-600" />
               <div className="text-right">
                 <div className="text-2xl font-bold text-gray-800 flex items-center gap-1 justify-end">
-                  {loadingData ? (
+                  {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : metrics.totalBiomass !== null ? (
-                    metrics.totalBiomass.toFixed(1)
+                  ) : displayBiomassAvg !== null ? (
+                    Number(displayBiomassAvg).toFixed(1)
                   ) : (
                     "-"
                   )}
-                  {!loadingData && (
+                  {!foCardsLoading &&
+                    (useFoFactoryMetrics || !loadingData) && (
                     <span className="text-sm font-semibold text-pink-600">
                       T/acre
                     </span>
@@ -3001,9 +4226,11 @@ const OwnerFarmDash: React.FC = () => {
               <div className="flex gap-4">
                 <div className="text-center">
                   <div className="font-semibold text-red-600 text-sm">
-                    {metrics.biomassMax !== null
-                      ? metrics.biomassMax.toFixed(1)
-                      : "-"}
+                    {foCardsLoading || (!useFoFactoryMetrics && loadingData)
+                      ? "-"
+                      : displayBiomassMax != null
+                        ? Number(displayBiomassMax).toFixed(1)
+                        : "-"}
                   </div>
                   <div className="text-[10px] text-gray-500 uppercase tracking-wide">
                     Max
@@ -3011,9 +4238,11 @@ const OwnerFarmDash: React.FC = () => {
                 </div>
                 <div className="text-center">
                   <div className="font-semibold text-green-600 text-sm">
-                    {metrics.biomassMin !== null
-                      ? metrics.biomassMin.toFixed(1)
-                      : "-"}
+                    {foCardsLoading || (!useFoFactoryMetrics && loadingData)
+                      ? "-"
+                      : displayBiomassMin != null
+                        ? Number(displayBiomassMin).toFixed(1)
+                        : "-"}
                   </div>
                   <div className="text-[10px] text-gray-500 uppercase tracking-wide">
                     Min
@@ -3064,17 +4293,34 @@ const OwnerFarmDash: React.FC = () => {
               ) : null}
 
               <MapCropStatusOverlay
-                growthStage={metrics.growthStage}
+                growthStage={
+                  useFoFactoryMetrics
+                    ? displayCropStatus
+                    : metrics.growthStage
+                }
                 plantationDate={displayPlantationDate}
                 plantationType={displayPlantationType}
-                loading={loadingData || isFarmerDataLoading}
+                loading={
+                  useFoFactoryMetrics
+                    ? foCardsLoading && !displayCropStatus
+                    : (loadingData || isFarmerDataLoading) &&
+                      !displayPlantationDate &&
+                      !displayPlantationType &&
+                      !metrics.growthStage
+                }
               />
 
               <MapContainer
-                key={`owner-farm-map-${selectedPlotId || "none"}-${mapKey}`}
+                key={`owner-farm-map-${selectedFieldOfficerId || "none"}-${selectedPlotId || "none"}-${mapKey}`}
                 center={mapCenter}
-                zoom={16}
-                minZoom={10}
+                zoom={
+                  selectedPlotId && plotCoordinates.length > 0
+                    ? 17
+                    : foMapPlots.length > 0
+                      ? 12
+                      : 15
+                }
+                minZoom={8}
                 maxZoom={20}
                 className="w-full h-full z-0"
                 style={{
@@ -3084,20 +4330,61 @@ const OwnerFarmDash: React.FC = () => {
                   position: "relative",
                 }}
               >
-                <MapAutoCenter center={mapCenter} />
+                {selectedPlotId && plotCoordinates.length > 0 ? (
+                  <FitPlotPositions positions={plotCoordinates} maxZoom={18} />
+                ) : foMapPlots.length > 0 ? (
+                  <FitFoMapPlots plots={foMapPlots} />
+                ) : (
+                  <MapAutoCenter center={mapCenter} zoom={15} />
+                )}
                 <TileLayer
                   url="http://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
                   attribution="© Google"
                   maxZoom={20}
                   maxNativeZoom={18}
-                  minZoom={10}
+                  minZoom={8}
                   tileSize={256}
                   zoomOffset={0}
                   updateWhenZooming={false}
                   updateWhenIdle={true}
                 />
-                {plotCoordinates.length > 0 && (
+                {growthOverlayUrl &&
+                  growthOverlayBounds &&
+                  selectedPlotId &&
+                  plotCoordinates.length > 0 && (
+                    <Pane name="ownerGrowthOverlay" style={{ zIndex: 450 }}>
+                      <ClipOwnerGrowthPane
+                        paneName="ownerGrowthOverlay"
+                        positions={plotCoordinates}
+                        enabled={plotCoordinates.length >= 3}
+                      />
+                      {isStoredAnalysisPngUrl(growthOverlayUrl) ? (
+                        <ImageOverlay
+                          key={`growth-png-${selectedPlotId}-${growthOverlayUrl}`}
+                          url={growthOverlayUrl}
+                          bounds={growthOverlayBounds}
+                          opacity={0.85}
+                          pane="ownerGrowthOverlay"
+                          zIndex={450}
+                        />
+                      ) : isXyzTileTemplate(growthOverlayUrl) ? (
+                        <TileLayer
+                          key={`growth-xyz-${selectedPlotId}-${growthOverlayUrl}`}
+                          url={growthOverlayUrl}
+                          opacity={0.85}
+                          maxZoom={22}
+                          minZoom={1}
+                          tileSize={256}
+                          pane="ownerGrowthOverlay"
+                          zIndex={450}
+                        />
+                      ) : null}
+                    </Pane>
+                  )}
+                <Pane name="ownerPlotBorder" style={{ zIndex: 560 }}>
+                {selectedPlotId && plotCoordinates.length > 0 ? (
                   <Polygon
+                    key={`owner-plot-fill-${selectedPlotId}-${plotCoordinates.length}`}
                     positions={plotCoordinates}
                     pathOptions={getPlotBorderStyle()}
                   >
@@ -3111,24 +4398,50 @@ const OwnerFarmDash: React.FC = () => {
                         <p>
                           <strong>Plot:</strong> {selectedPlotId}
                         </p>
-                        {/* <p>
-                          <strong>Farmer:</strong> Ramesh Patil
-                        </p>
-                        <p>
-                          <strong>Representative:</strong> Sunil Joshi
-                        </p> */}
                         <p>
                           <strong>Status:</strong>{" "}
                           {metrics.growthStage ?? "Loading..."}
                         </p>
                         <p>
-                          <strong>Area:</strong> {metrics.area ?? "Loading..."}{" "}
-                          Ha
+                          <strong>Area:</strong>{" "}
+                          {metrics.area ?? "Loading..."} Ha
                         </p>
                       </div>
                     </LeafletTooltip>
                   </Polygon>
-                )}
+                ) : foMapPlots.length > 0 ? (
+                  foMapPlots.map((plot) => (
+                      <Polygon
+                        key={`fo-plot-${plot.plotId}-${plot.positions.length}`}
+                        positions={plot.positions}
+                        pathOptions={getFoPlotBorderStyle(plot.plotId)}
+                      >
+                        <LeafletTooltip
+                          direction="top"
+                          offset={[0, -10]}
+                          opacity={0.9}
+                          sticky
+                        >
+                          <div className="text-sm">
+                            <p>
+                              <strong>Plot:</strong> {plot.plotId}
+                            </p>
+                            <p>
+                              <strong>Status:</strong>{" "}
+                              {plot.status ?? displayCropStatus ?? "—"}
+                            </p>
+                            {plot.areaAcres != null && (
+                              <p>
+                                <strong>Area:</strong>{" "}
+                                {plot.areaAcres.toFixed(2)} acre
+                              </p>
+                            )}
+                          </div>
+                        </LeafletTooltip>
+                      </Polygon>
+                    ))
+                ) : null}
+                </Pane>
               </MapContainer>
             </div>
           </div>
@@ -3147,8 +4460,16 @@ const OwnerFarmDash: React.FC = () => {
                 style={{ height: GAUGE_CHART_HEIGHT }}
               >
                 <PieChartWithNeedle
-                  value={metrics.expectedYield || 0}
-                  max={metrics.sugarYieldMax || 400}
+                  value={displayExpectedYield || 0}
+                  max={
+                    useFoFactoryMetrics
+                      ? Math.max(
+                          Number(displayExpectedYieldMax) || 0,
+                          Number(displayExpectedYield) || 0,
+                          100,
+                        ) * 1.05
+                      : metrics.sugarYieldMax || 400
+                  }
                   title="Sugarcane Yield Forecast"
                   unit=" T/acre"
                   width={GAUGE_ARC_WIDTH}
@@ -3162,31 +4483,50 @@ const OwnerFarmDash: React.FC = () => {
                   <div className="flex items-center justify-center gap-1">
                     <div className="h-2 w-2 rounded bg-red-500" />
                     <span className="font-semibold text-red-700">
-                      min: {(metrics.sugarYieldMin || 0).toFixed(1)} T/acre
+                      min:{" "}
+                      {(
+                        displayExpectedYieldMin ??
+                        (useFoFactoryMetrics
+                          ? displayExpectedYield
+                          : metrics.sugarYieldMin) ??
+                        0
+                      ).toFixed(1)}{" "}
+                      T/acre
                     </span>
                   </div>
                   <div className="flex items-center justify-center gap-1">
                     <div className="h-2 w-2 rounded bg-purple-500" />
                     <span className="font-semibold text-purple-700">
-                      mean: {(metrics.expectedYield || 0).toFixed(1)} T/acre
+                      mean: {(displayExpectedYield || 0).toFixed(1)} T/acre
                     </span>
                   </div>
                   <div className="flex items-center justify-center gap-1">
                     <div className="h-2 w-2 rounded bg-green-500" />
                     <span className="font-semibold text-green-700">
-                      max: {(metrics.sugarYieldMax || 0).toFixed(1)} T/acre
+                      max:{" "}
+                      {(
+                        displayExpectedYieldMax ??
+                        (useFoFactoryMetrics
+                          ? displayExpectedYield
+                          : metrics.sugarYieldMax) ??
+                        0
+                      ).toFixed(1)}{" "}
+                      T/acre
                     </span>
                   </div>
                 </div>
                 <div className="mt-0.5 text-xs text-gray-500">
                   Performance:{" "}
-                  {metrics.sugarYieldMax
-                    ? (
-                        ((metrics.expectedYield || 0) / metrics.sugarYieldMax) *
-                        100
-                      ).toFixed(1)
-                    : "0.0"}
-                  % of optimal yield
+                  {useFoFactoryMetrics
+                    ? "FO factory rollup"
+                    : metrics.sugarYieldMax
+                      ? (
+                          ((metrics.expectedYield || 0) /
+                            metrics.sugarYieldMax) *
+                          100
+                        ).toFixed(1)
+                      : "0.0"}
+                  {useFoFactoryMetrics ? "" : "% of optimal yield"}
                 </div>
               </div>
             </div>
@@ -3199,6 +4539,15 @@ const OwnerFarmDash: React.FC = () => {
                 </h3>
               </div>
               <div style={{ height: GAUGE_CHART_HEIGHT }}>
+                {foCardsLoading ? (
+                  <div className="flex h-full items-center justify-center">
+                    <Loader2 className="w-6 h-6 animate-spin text-green-600" />
+                  </div>
+                ) : useFoFactoryMetrics && foBiomassAvg == null ? (
+                  <div className="flex h-full items-center justify-center">
+                    <p className="text-xs text-gray-500">No biomass data</p>
+                  </div>
+                ) : (
                 <ResponsiveContainer width="100%" height={GAUGE_CHART_HEIGHT}>
                   <PieChart>
                     <Pie
@@ -3235,7 +4584,9 @@ const OwnerFarmDash: React.FC = () => {
                     />
                   </PieChart>
                 </ResponsiveContainer>
+                )}
               </div>
+              {!(useFoFactoryMetrics && foBiomassAvg == null) && !foCardsLoading ? (
               <div className="mt-1 text-center">
                 <p className="mb-1 text-xs font-medium text-gray-600">
                   Biomass Distribution Chart
@@ -3255,6 +4606,7 @@ const OwnerFarmDash: React.FC = () => {
                   </div>
                 </div>
               </div>
+              ) : null}
             </div>
 
             {/* Recovery Rate Comparison */}
@@ -3268,18 +4620,34 @@ const OwnerFarmDash: React.FC = () => {
                 </div>
               </div>
               <div className="h-36 flex items-center justify-center">
+                {foCardsLoading ? (
+                  <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
+                ) : recoveryComparisonData.length === 0 ? (
+                  <p className="text-xs text-gray-500">
+                    No recovery comparison data
+                  </p>
+                ) : (
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart
                     data={recoveryComparisonData}
                     margin={{ top: 1, right: 5, left: -20, bottom: 5 }}
                   >
                     <CartesianGrid strokeDasharray="2 2" stroke="#e5e7eb" />
-                    <XAxis dataKey="name" tick={{ fontSize: 9 }} height={10} />
-                    <YAxis tick={{ fontSize: 8 }} domain={[0, 10]} />
+                    <XAxis
+                      dataKey="name"
+                      tick={{ fontSize: 9 }}
+                      height={18}
+                      interval={0}
+                    />
+                    <YAxis
+                      tick={{ fontSize: 8 }}
+                      domain={[0, Math.ceil(recoveryYMax * 1.15) || 10]}
+                    />
                     <Tooltip
-                      formatter={(value: number) => [
-                        `${value.toFixed(1)}%`,
-                        "Recovery Rate",
+                      formatter={(value: number, _name, item) => [
+                        `${Number(value).toFixed(1)}%`,
+                        (item?.payload as { label?: string })?.label ||
+                          "Recovery Rate",
                       ]}
                     />
                     <Bar dataKey="value" fill="#3b82f6" radius={[3, 3, 0, 0]}>
@@ -3289,16 +4657,50 @@ const OwnerFarmDash: React.FC = () => {
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
+                )}
               </div>
               <div className="mt-2 text-center text-xs text-gray-600">
-                <span className="font-semibold text-green-700">
-                  Your Farm: {(metrics.recovery || 0).toFixed(1)}%
-                </span>
-                {" vs "}
-                <span className="font-semibold text-blue-700">
-                  Regional Avg:{" "}
-                  {OTHER_FARMERS_RECOVERY.regional_average.toFixed(1)}%
-                </span>
+                {useFoFactoryMetrics ? (
+                  <>
+                    <span className="font-semibold text-blue-700">
+                      Regional:{" "}
+                      {factoryRecoveryPeers?.factoryAvg != null
+                        ? `${factoryRecoveryPeers.factoryAvg.toFixed(1)}%`
+                        : "—"}
+                    </span>
+                    {" · "}
+                    <span className="font-semibold text-green-700">
+                      Top 25:{" "}
+                      {factoryRecoveryPeers?.top25Avg != null
+                        ? `${factoryRecoveryPeers.top25Avg.toFixed(1)}%`
+                        : "—"}
+                    </span>
+                    {factoryRecoveryPeers?.similarPct != null ? (
+                      <>
+                        {" · "}
+                        <span className="font-semibold text-amber-700">
+                          Similar plots:{" "}
+                          {`${factoryRecoveryPeers.similarPct.toFixed(1)}%`}
+                          <span className="font-normal text-gray-500">
+                            {" "}
+                            (share within tolerance)
+                          </span>
+                        </span>
+                      </>
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    <span className="font-semibold text-green-700">
+                      Your Farm: {(metrics.recovery ?? 0).toFixed(1)}%
+                    </span>
+                    {" vs "}
+                    <span className="font-semibold text-blue-700">
+                      Regional Avg:{" "}
+                      {OTHER_FARMERS_RECOVERY.regional_average.toFixed(1)}%
+                    </span>
+                  </>
+                )}
               </div>
             </div>
           </div>

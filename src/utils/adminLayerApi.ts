@@ -1,13 +1,9 @@
 /**
- * Admin map-layer APIs (Growth / Water / Soil / Pest).
+ * SAR Index Mapping API — Growth / Water / Soil / Pest layers.
+ * Host: VITE_SAR_INDEX_API_URL (tiles only). Unset locally to skip.
  *
- * Why frontend tiles differed from backend:
- * - Growth/Soil timeline often lists e.g. 2026-07-17 (Admin 404)
- * - Backend uses a newer shared date (e.g. 2026-07-21 / 07-26) → Admin 200 + latest tiles
- * - Frontend fell back to 2026-06-28 → older/different map tiles
- *
- * Fix: try ribbon/UI date first, then all timeline dates (newest→oldest),
- * then this layer’s dates. Same Admin response as backend. Ribbon UI unchanged.
+ * Responses include stored PNG `tile_url` (S3) for ImageOverlay, plus pixel_summary.
+ * Try ribbon/UI date first, then newer→older timeline dates on 404.
  */
 import {
   candidateEndDatesForLayer,
@@ -28,8 +24,10 @@ import {
   storePlotImageEndDates,
   type StoredPlotImageEndDates,
 } from "./plotImageEndDates";
+import { getSarIndexBaseUrl, isSarMappingHostAvailable } from "./sarIndexHost";
 
-const ADMIN_BASE = "https://admin-cropeye.up.railway.app";
+export { getSarIndexBaseUrl } from "./sarIndexHost";
+
 const MAX_DATE_ATTEMPTS = 5;
 
 const ALL_LAYERS: MapAnalysisLayer[] = [
@@ -57,6 +55,7 @@ export function isAdminNoImageryError(message: string | undefined): boolean {
   if (!message) return false;
   const m = message.toLowerCase();
   return (
+    m.includes("growth_tiles_disabled") ||
     m.includes("no sentinel") ||
     m.includes("no images found") ||
     /\b404\b/.test(m)
@@ -185,11 +184,16 @@ export async function fetchAdminLayerWithDateFallback(options: {
   const today = new Date().toISOString().split("T")[0];
   let lastError: Error | null = null;
 
+  if (!(await isSarMappingHostAvailable())) {
+    throw new Error("GROWTH_TILES_DISABLED");
+  }
+
   for (const endDate of candidateDates) {
     if (!endDate) continue;
     if (isLayerEndDateFailed(plotName, layer, endDate)) continue;
 
-    const url = `${ADMIN_BASE}/${path}?plot_name=${encodeURIComponent(
+    const base = getSarIndexBaseUrl();
+    const url = `${base}/${path}?plot_name=${encodeURIComponent(
       apiPlotName,
     )}&end_date=${endDate}&days_back=${daysBack}`;
     const cacheKey = `layer:${slug}:${apiPlotName}:${endDate}`;
@@ -206,7 +210,10 @@ export async function fetchAdminLayerWithDateFallback(options: {
           mode: "cors",
           cache: "no-cache",
           credentials: "omit",
-          headers: { Accept: "application/json" },
+          headers: {
+            Accept: "application/json",
+            "ngrok-skip-browser-warning": "true",
+          },
         },
       });
       persistWorkingLayerEndDate(plotName, layer, endDate);
