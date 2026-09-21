@@ -131,7 +131,7 @@ function HourlyPointLabel(props: {
         fontWeight={700}
         dy={-8}
       >
-        {payload.remainKl.toFixed(1)} KL
+        {Math.abs(payload.remainKl).toFixed(1)} KL
       </text>
       <text
         textAnchor="middle"
@@ -719,7 +719,7 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
         hour,
         label: `${String(hour).padStart(2, "0")}:00`,
         requirementKl: Number(cumRequirement.toFixed(2)),
-        remainKl: Number((afterL / 1000).toFixed(2)),
+        remainKl: Number((Math.abs(afterL) / 1000).toFixed(2)),
         hourRequiredKl: Number(hourRequiredKl.toFixed(3)),
         hourEtoMm: Number((Number(step.etoMm) || 0).toFixed(3)),
         isLatest: false,
@@ -1031,7 +1031,9 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
                                     </div>
                                     <div>
                                       Water remain:{" "}
-                                      <b>{row.remainKl.toFixed(2)} KL</b>
+                                      <b>
+                                        {Math.abs(row.remainKl).toFixed(2)} KL
+                                      </b>
                                     </div>
                                     <div>
                                       ETo loss:{" "}
