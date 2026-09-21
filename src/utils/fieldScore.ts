@@ -6,10 +6,9 @@ import {
   normalizePlotKey,
   type PlotRef,
 } from './plotName';
+import { getFieldScoreBaseUrl } from './sarIndexHost';
 
 export { fieldScoreCacheKey };
-
-const FIELD_SCORE_API = 'https://sef-cropeye.up.railway.app/analyze';
 
 const pickLatestFieldRow = (rows: any[]): any | null => {
   if (!rows.length) return null;
@@ -31,6 +30,16 @@ function extractScore(fieldData: any): number | null {
   return Number(score);
 }
 
+/** SEF `/analyze` expects gat/plot names (`64/1`), not bare Django numeric ids. */
+function fieldScorePlotCandidates(
+  plotId: string,
+  plots?: PlotRef[] | null,
+): string[] {
+  const all = getPlotNameCandidates(plotId, plots);
+  const preferred = all.filter((c) => !/^\d+$/.test(c));
+  return preferred.length > 0 ? preferred : all;
+}
+
 async function fetchFieldScoreByPlotName(
   apiPlot: string,
   plotKeyNorm: string,
@@ -41,11 +50,14 @@ async function fetchFieldScoreByPlotName(
     .slice(0, 10);
 
   const formattedPlot = formatPlotNameForApi(apiPlot);
+  const base = getFieldScoreBaseUrl();
   const resp = await fetch(
-    `${FIELD_SCORE_API}?plot_name=${encodeURIComponent(formattedPlot)}&end_date=${endDate}&days_back=7`,
+    `${base}/analyze?plot_name=${encodeURIComponent(formattedPlot)}&end_date=${endDate}&days_back=7`,
     {
       method: 'GET',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        Accept: 'application/json',
+      },
     },
   );
   if (!resp.ok) return null;
@@ -80,10 +92,8 @@ export async function fetchFieldScoreForPlot(
       ? [matchedPlot, ...plots.filter((plot) => plot !== matchedPlot)]
       : plots;
 
-  const candidates = getPlotNameCandidates(plotId, plotList);
-  const plotKeyNorm = normalizePlotKey(
-    candidates[0] ?? plotId,
-  );
+  const candidates = fieldScorePlotCandidates(plotId, plotList);
+  const plotKeyNorm = normalizePlotKey(candidates[0] ?? plotId);
 
   for (const candidate of candidates) {
     try {

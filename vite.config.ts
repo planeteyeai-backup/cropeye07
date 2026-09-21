@@ -41,7 +41,6 @@ export default defineConfig(({ mode }) => {
       configure: (proxy: any) => {
         proxy.on("proxyReq", (proxyReq: any) => {
           proxyReq.setHeader("Accept", "application/json");
-          proxyReq.setHeader("ngrok-skip-browser-warning", "true");
         });
       },
     },
@@ -55,7 +54,6 @@ export default defineConfig(({ mode }) => {
       configure: (proxy: any) => {
         proxy.on("proxyReq", (proxyReq: any) => {
           proxyReq.setHeader("Accept", "application/json");
-          proxyReq.setHeader("ngrok-skip-browser-warning", "true");
           proxyReq.setTimeout(180_000);
         });
         proxy.on("proxyRes", (proxyRes: any) => {
@@ -83,7 +81,6 @@ export default defineConfig(({ mode }) => {
       configure: (proxy: any) => {
         proxy.on("proxyReq", (proxyReq: any) => {
           proxyReq.setHeader("Accept", "application/json");
-          proxyReq.setHeader("ngrok-skip-browser-warning", "true");
         });
         proxy.on("error", (err: any, _req: any, res: any) => {
           console.log("dev-plot (sar) proxy error", err);

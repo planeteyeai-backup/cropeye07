@@ -212,7 +212,6 @@ export async function fetchAdminLayerWithDateFallback(options: {
           credentials: "omit",
           headers: {
             Accept: "application/json",
-            "ngrok-skip-browser-warning": "true",
           },
         },
       });

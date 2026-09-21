@@ -1,6 +1,6 @@
 /**
  * SAR Index / map-tiles host (Growth, Water Uptake, Soil Moisture, Pest,
- * stored-tiles, water-stress).
+ * water-stress). Defaults to Admin Railway — never use ngrok tunnels.
  *
  * Env: VITE_SAR_INDEX_API_URL — Mapping/SAR Index API.
  * Dev uses Vite `/api/sar-index` → upstream (CORS).
@@ -8,11 +8,15 @@
 export const SAR_INDEX_HOST_DEFAULT =
   "https://admin-cropeye.up.railway.app";
 
-/** Field Score `/analyze` lives on SEF (not the floss tile host). */
+/** Field Score `/analyze` lives on SEF (not the tile host). */
 export const FIELD_SCORE_HOST_DEFAULT = "https://sef-cropeye.up.railway.app";
 
 const DEV_SAR_PROXY = "/api/sar-index";
 const DEV_SEF_PROXY = "/api/sef";
+
+function isUnreliableTunnelHost(url: string): boolean {
+  return /ngrok|trycloudflare\.com|loca\.lt|cloudflared/i.test(url);
+}
 
 function envSarUrl(): string {
   return String(import.meta.env.VITE_SAR_INDEX_API_URL ?? "")
@@ -20,10 +24,12 @@ function envSarUrl(): string {
     .replace(/\/$/, "");
 }
 
-/** Absolute upstream (no trailing slash). Env overrides default. */
+/** Absolute upstream (no trailing slash). Env overrides default; tunnels ignored. */
 export function sarIndexUpstream(): string {
   const fromEnv = envSarUrl();
-  if (/^https?:\/\//i.test(fromEnv)) return fromEnv;
+  if (/^https?:\/\//i.test(fromEnv) && !isUnreliableTunnelHost(fromEnv)) {
+    return fromEnv;
+  }
   return SAR_INDEX_HOST_DEFAULT;
 }
 

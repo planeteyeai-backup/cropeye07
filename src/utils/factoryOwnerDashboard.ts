@@ -17,7 +17,7 @@ function resolveFactoryDashBase(): string {
 function factoryDashBases(): string[] {
   const primary = resolveFactoryDashBase();
   const proxy = import.meta.env.DEV ? "/api/factory-owner-dashboard" : "";
-  // Dev: prefer Vite proxy first (avoids ngrok CORS / browser timeout).
+  // Dev: prefer Vite proxy first (avoids CORS / browser timeout).
   if (import.meta.env.DEV && proxy) {
     return Array.from(new Set([proxy, primary]));
   }
@@ -522,7 +522,6 @@ async function fetchJsonWithTimeout(
       method: "GET",
       headers: {
         Accept: "application/json",
-        "ngrok-skip-browser-warning": "true",
       },
       signal: controller.signal,
     });

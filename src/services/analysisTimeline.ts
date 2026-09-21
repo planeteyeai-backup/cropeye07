@@ -1,7 +1,6 @@
 /**
- * Analysis image dates for the map timeline ribbon (optional testing helper).
- * Endpoint: GET {VITE_SAR_INDEX_API_URL}/stored-tiles?plot_name=…
- * Not required for hosted Events/Django APIs — skipped when SAR URL is unset.
+ * Analysis image dates for the map timeline ribbon (optional).
+ * GET /stored-tiles is disabled — Growth layers use calendar date fallbacks.
  */
 import {
   getSarIndexBaseUrl,
@@ -237,7 +236,6 @@ async function fetchStoredTilesJson(
     method: "GET",
     headers: {
       Accept: "application/json",
-      "ngrok-skip-browser-warning": "true",
     },
   });
   if (!res.ok) return null;
@@ -246,7 +244,7 @@ async function fetchStoredTilesJson(
   return res.json();
 }
 
-/** In-flight / short cache so Map + ribbon + prefetch don't stampede ngrok. */
+/** In-flight / short cache for optional stored-tiles lookups. */
 const storedTilesInflight = new Map<
   string,
   Promise<AnalysisTimelineResponse | null>
@@ -326,16 +324,9 @@ export async function fetchAnalysisTimeline(
 ): Promise<AnalysisTimelineResponse | null> {
   const trimmed = plotName?.trim();
   if (!trimmed) return null;
-  if (!(await isSarMappingHostAvailable())) return null;
-
-  const candidates = plots?.length
-    ? getStoredTilesPlotCandidates(trimmed, plots)
-    : analysisTimelinePlotCandidates(trimmed);
-
-  for (const candidate of candidates) {
-    const data = await fetchStoredTilesOnce(candidate);
-    if (data?.timeline?.length) return data;
-  }
+  // stored-tiles is optional testing only — do not call (often 404 on Admin).
+  // Growth/Water/Soil/Pest use calendar / analyze_* date fallbacks instead.
+  void plots;
   return null;
 }
 

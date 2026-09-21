@@ -91,6 +91,7 @@ import api, {
   getFarmsByFarmerId,
   getFieldOfficerAgroStats,
   getOwnerFieldOfficersAgroStats,
+  getSinglePlotAgroStats,
   getTeamConnect,
   isAnalyzeSinglePlotPlantationDateError,
   parseFarmersByFieldOfficerResponse,
@@ -114,11 +115,15 @@ import {
   type FactoryTop25Farmer,
   type FoMapPlot,
 } from "../utils/factoryOwnerDashboard";
-import { agricultureAnalysisBaseUrl } from "../utils/agricultureAnalysisApi";
+import {
+  agricultureAnalysisBaseUrl,
+  agricultureAnalysisHttp,
+  agricultureAnalysisUrl,
+} from "../utils/agricultureAnalysisApi";
 import { resolveProgressOwnerId } from "./progressbar/useFactoryProgress";
 import { LatLngBounds } from "leaflet";
 
-// Comprehensive Agriculture Analysis API (Cloudflare tunnel + Vite proxy in DEV)
+// Comprehensive Agriculture Analysis API (Events Railway; Vite proxy in DEV)
 const BASE_URL = agricultureAnalysisBaseUrl();
 
 /** indices / stress / irrigation on this host are often slow; 10s caused AbortController + axios to cancel (Network shows "(canceled)" ~10s). */
@@ -1931,8 +1936,24 @@ const OwnerFarmDash: React.FC = () => {
   const fetchAllData = async (): Promise<void> => {
     if (!selectedPlotId) return;
     setPlotStatsError(null);
+    // Clear previous farmer/plot metrics so cards don't stay on stale "—" / FO rollup.
     setMetrics((prev) => ({
       ...prev,
+      brix: null,
+      brixMin: null,
+      brixMax: null,
+      recovery: null,
+      area: null,
+      biomass: null,
+      totalBiomass: null,
+      biomassMin: null,
+      biomassMax: null,
+      expectedYield: null,
+      daysToHarvest: null,
+      growthStage: null,
+      actualYield: null,
+      sugarYieldMax: null,
+      sugarYieldMin: null,
       cropConditionLabel: null,
       cropConditionValue: null,
       stressCount: null,
@@ -1980,9 +2001,11 @@ const OwnerFarmDash: React.FC = () => {
 
       const harvestPromise = harvestData
         ? Promise.resolve({ harvestStatus, harvestDate, isHarvested })
-        : axios
+        : agricultureAnalysisHttp
             .post(
-              `${BASE_URL}/sugarcane-harvest?plot_name=${selectedPlotId}&end_date=${endDate}`,
+              agricultureAnalysisUrl(
+                `/sugarcane-harvest?plot_name=${encodePlotIdForEventsUrl(selectedPlotId)}&end_date=${endDate}`,
+              ),
             )
             .then((harvestRes) => {
               const data = harvestRes.data;
@@ -2003,8 +2026,19 @@ const OwnerFarmDash: React.FC = () => {
       // Step 3: Fetch critical data (agroStats) with versioned caching
       // Optimization: prefer the faster single-plot endpoint (analyzeSinglePlot),
       // avoid downloading agroStats for ALL plots on owner dashboard load.
-      const singlePlotCacheKey = `agroSingle_v3_${selectedPlotId}_${yieldDataDate}`;
+      const singlePlotCacheKey = `agroSingle_v4_${selectedPlotId}_${yieldDataDate}`;
       let currentPlotData = getCache(singlePlotCacheKey);
+      // Reject empty/invalid cache hits (same issue Manager fixed with v2 keys).
+      if (
+        currentPlotData &&
+        typeof currentPlotData === "object" &&
+        !currentPlotData.area_acres &&
+        !currentPlotData.brix_sugar &&
+        !currentPlotData.Sugarcane_Status &&
+        !currentPlotData.sugarcane_status
+      ) {
+        currentPlotData = null;
+      }
 
       const applyPlotStatsToState = (plot: any) => {
         const toNumberOrNull = (v: any): number | null => {
@@ -2082,29 +2116,70 @@ const OwnerFarmDash: React.FC = () => {
         setLoadingSections((prev) => ({ ...prev, plotStats: false }));
       } else {
         const plotIdAtStart = selectedPlotId;
+        const farmerPlotsAtStart =
+          (selectedFarmerForUi as { plots?: unknown[] } | null)?.plots ??
+          farmersForSelectedOfficer.flatMap((f: any) =>
+            Array.isArray(f?.plots) ? f.plots : [],
+          );
         void (async () => {
           try {
             // Re-check cache (might be filled while this async started).
             let plotData = getCache(singlePlotCacheKey);
+            if (
+              plotData &&
+              typeof plotData === "object" &&
+              !plotData.area_acres &&
+              !plotData.brix_sugar &&
+              !plotData.Sugarcane_Status
+            ) {
+              plotData = null;
+            }
+
             if (!plotData) {
-              try {
-                const singleRes = await axios.get(
-                  `${BASE_URL}/plots/analyzeSinglePlot?plot_id=${encodePlotIdForEventsUrl(plotIdAtStart)}`,
-                );
-                plotData = singleRes?.data ?? null;
-                if (plotData) setCache(singlePlotCacheKey, plotData);
-              } catch (singleErr) {
-                if (isAnalyzeSinglePlotPlantationDateError(singleErr)) {
-                  if (selectedPlotIdRef.current === plotIdAtStart) {
-                    setPlotStatsError(PLANTATION_DATE_NOT_PROVIDED_MSG);
-                    setLoadingSections((prev) => ({
-                      ...prev,
-                      plotStats: false,
-                    }));
+              const candidates = getPlotNameCandidates(
+                plotIdAtStart,
+                farmerPlotsAtStart as any,
+              );
+              const tryIds =
+                candidates.length > 0 ? candidates : [plotIdAtStart];
+              let lastErr: unknown = null;
+
+              for (const tryId of tryIds) {
+                try {
+                  plotData = await getSinglePlotAgroStats(tryId, {
+                    timeout: OWNER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
+                    endDate: yieldDataDate,
+                  });
+                  if (plotData) {
+                    setCache(singlePlotCacheKey, plotData);
+                    break;
                   }
-                  return;
+                } catch (singleErr) {
+                  lastErr = singleErr;
+                  if (isAnalyzeSinglePlotPlantationDateError(singleErr)) {
+                    if (selectedPlotIdRef.current === plotIdAtStart) {
+                      setPlotStatsError(PLANTATION_DATE_NOT_PROVIDED_MSG);
+                      setLoadingSections((prev) => ({
+                        ...prev,
+                        plotStats: false,
+                      }));
+                    }
+                    return;
+                  }
+                  // 404 → try next plot-name candidate (slash vs underscore).
+                  const status = (singleErr as { response?: { status?: number } })
+                    ?.response?.status;
+                  if (status === 404) continue;
+                  throw singleErr;
                 }
-                throw singleErr;
+              }
+
+              if (!plotData && lastErr) {
+                console.warn(
+                  "[OwnerFarmDash] analyzeSinglePlot failed for",
+                  plotIdAtStart,
+                  lastErr,
+                );
               }
             }
 
@@ -2123,6 +2198,8 @@ const OwnerFarmDash: React.FC = () => {
                 console.log("[OwnerFarmDash] plot stats loaded:", {
                   plotId: plotIdAtStart,
                   expectedYield: plotData?.brix_sugar?.sugar_yield?.mean ?? null,
+                  area: plotData?.area_acres ?? null,
+                  status: plotData?.Sugarcane_Status ?? null,
                 });
               }
               applyPlotStatsToState(plotData);
@@ -2161,6 +2238,7 @@ const OwnerFarmDash: React.FC = () => {
 
       // Fetch indices first (chart), then fetch stress/field score in the background.
       // This reduces the perceived "dashboard load time".
+      const eventsPlotId = encodePlotIdForEventsUrl(selectedPlotId);
       if (cachedIndices) {
         // Cached indices are already in LineChartData[] format.
         setLineChartData(cachedIndices as LineChartData[]);
@@ -2169,7 +2247,7 @@ const OwnerFarmDash: React.FC = () => {
         // Don't block dashboard further on indices (chart can render later).
         setLineChartData([]);
         makeRequestWithRetry(
-          `${BASE_URL}/plots/${selectedPlotId}/indices`,
+          `${BASE_URL}/plots/${eventsPlotId}/indices`,
           1,
           OWNER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
         )
@@ -2219,7 +2297,7 @@ const OwnerFarmDash: React.FC = () => {
       // NDRE stress events — chart overlay only (not summary cards)
       if (!cachedStress) {
         makeRequestWithRetry(
-          `${BASE_URL}/plots/${selectedPlotId}/stress?index_type=NDRE&threshold=0.15`,
+          `${BASE_URL}/plots/${eventsPlotId}/stress?index_type=NDRE&threshold=0.15`,
           1,
           OWNER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS,
         )
@@ -4303,10 +4381,10 @@ const OwnerFarmDash: React.FC = () => {
                 loading={
                   useFoFactoryMetrics
                     ? foCardsLoading && !displayCropStatus
-                    : (loadingData || isFarmerDataLoading) &&
-                      !displayPlantationDate &&
-                      !displayPlantationType &&
-                      !metrics.growthStage
+                    : Boolean(
+                        (loadingData || isFarmerDataLoading) &&
+                          !metrics.growthStage,
+                      )
                 }
               />
 

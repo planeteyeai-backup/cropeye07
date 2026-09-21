@@ -14,7 +14,7 @@ import {
 export const SAR_API_BASE_URL = sarIndexUpstream();
 export const WATER_STRESS_TIMEOUT_MS = 180_000;
 
-/** Same floss SAR host as map tiles (Vite `/api/sar-index` in DEV). */
+/** Same Admin SAR host as map tiles (Vite `/api/sar-index` in DEV). */
 function waterStressBaseUrl(): string {
   return getSarIndexBaseUrl();
 }
@@ -188,7 +188,6 @@ async function fetchWaterStressOnce(
         credentials: 'omit',
         headers: {
           Accept: 'application/json',
-          'ngrok-skip-browser-warning': 'true',
         },
         signal: controller.signal,
       },

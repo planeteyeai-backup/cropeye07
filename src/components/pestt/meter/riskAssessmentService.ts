@@ -7,6 +7,7 @@ import {
   latestRebinDateForLayer,
 } from '../../../services/analysisTimeline';
 import { resolveApiPlotName } from '../../../utils/plotName';
+import { getSarIndexBaseUrl } from '../../../utils/sarIndexHost';
 
 /** Get farmer profile - uses cache first (from login prefetch) to avoid duplicate my-profile/ requests */
 async function getProfileData(): Promise<any> {
@@ -317,8 +318,16 @@ export async function fetchPestDetectionData(plotId?: string): Promise<PestDetec
       };
     }
     
-    // Always hosted Admin API (no localhost Vite proxy).
-    const baseUrl = 'https://admin-cropeye.up.railway.app';
+    // SAR Index host (same as map tiles). Skip when unset / unavailable.
+    const baseUrl = getSarIndexBaseUrl();
+    if (!baseUrl) {
+      return {
+        fungi_affected_pixel_percentage: 0,
+        chewing_affected_pixel_percentage: 0,
+        sucking_affected_pixel_percentage: 0,
+        SoilBorn_affected_pixel_percentage: 0,
+      };
+    }
     const url = `${baseUrl}/pest-detection?plot_name=${encodeURIComponent(plotName)}&end_date=${endDate}&days_back=15`;
     
     // Add timeout to prevent hanging on 503 errors
@@ -333,7 +342,7 @@ export async function fetchPestDetectionData(plotId?: string): Promise<PestDetec
         cache: "no-cache",
         credentials: "omit",
         headers: { 
-          "Accept": "application/json"
+          "Accept": "application/json",
         },
         signal: controller.signal
       });

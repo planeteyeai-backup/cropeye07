@@ -16,16 +16,33 @@ export const AGRICULTURE_ANALYSIS_API_DEFAULT =
 
 const DEV_PROXY = "/api/agriculture-analysis";
 
+function isUnreliableTunnelHost(url: string): boolean {
+  return /trycloudflare\.com|ngrok|loca\.lt|cloudflared/i.test(url);
+}
+
 /** Absolute upstream host (no trailing slash). */
 export function agricultureAnalysisUpstream(): string {
-  const fromEnv = String(
-    import.meta.env.VITE_AGRICULTURE_ANALYSIS_API_URL ??
-      import.meta.env.VITE_DEV_EVENTS_API_URL ??
-      "",
+  const preferred = String(
+    import.meta.env.VITE_AGRICULTURE_ANALYSIS_API_URL ?? "",
   )
     .trim()
     .replace(/\/$/, "");
-  if (/^https?:\/\//i.test(fromEnv)) return fromEnv;
+  if (/^https?:\/\//i.test(preferred) && !isUnreliableTunnelHost(preferred)) {
+    return preferred;
+  }
+
+  // VITE_DEV_EVENTS_API_URL is often a dead Cloudflare tunnel in Render env —
+  // never use tunnel hosts for plot stats (analyzeSinglePlot / indices).
+  const eventsAlias = String(import.meta.env.VITE_DEV_EVENTS_API_URL ?? "")
+    .trim()
+    .replace(/\/$/, "");
+  if (
+    /^https?:\/\//i.test(eventsAlias) &&
+    !isUnreliableTunnelHost(eventsAlias)
+  ) {
+    return eventsAlias;
+  }
+
   return AGRICULTURE_ANALYSIS_API_DEFAULT;
 }
 
@@ -52,6 +69,5 @@ export function agricultureAnalysisUrl(path: string): string {
 export const agricultureAnalysisHttp = axios.create({
   headers: {
     Accept: "application/json",
-    "ngrok-skip-browser-warning": "true",
   },
 });
