@@ -168,6 +168,8 @@ export type AdminLayerFetchResult = {
 export async function fetchAdminLayerWithDateFallback(options: {
   plotName: string;
   apiPlotName: string;
+  /** Try these plot_name forms (underscore first). Falls back to apiPlotName. */
+  apiPlotNames?: string[];
   layer: MapAnalysisLayer;
   candidateDates: string[];
   forceRefresh?: boolean;
@@ -176,6 +178,7 @@ export async function fetchAdminLayerWithDateFallback(options: {
   const {
     plotName,
     apiPlotName,
+    apiPlotNames,
     layer,
     candidateDates,
     forceRefresh = false,
@@ -191,48 +194,66 @@ export async function fetchAdminLayerWithDateFallback(options: {
     throw new Error("GROWTH_TILES_DISABLED");
   }
 
+  const plotNames = [
+    ...new Set(
+      [...(apiPlotNames ?? []), apiPlotName]
+        .map((n) => String(n ?? "").trim())
+        .filter(Boolean),
+    ),
+  ];
+
   for (const endDate of candidateDates) {
     if (!endDate) continue;
     if (isLayerEndDateFailed(plotName, layer, endDate)) continue;
 
-    const base = getSarIndexBaseUrl();
-    const url = `${base}/${path}?plot_name=${encodeURIComponent(
-      apiPlotName,
-    )}&end_date=${endDate}&days_back=${daysBack}`;
-    const cacheKey = `layer:${slug}:${apiPlotName}:${endDate}`;
-    const ttlMs = endDate === today ? 10 * 60 * 1000 : 30 * 60 * 1000;
+    let dateHadImageryMiss = false;
 
-    try {
-      const data = await getOrFetchJson({
-        key: cacheKey,
-        url,
-        ttlMs,
-        forceRefresh,
-        fetchInit: {
-          method: "POST",
-          mode: "cors",
-          cache: "no-cache",
-          credentials: "omit",
-          headers: {
-            Accept: "application/json",
+    for (const plotId of plotNames) {
+      const base = getSarIndexBaseUrl();
+      const url = `${base}/${path}?plot_name=${encodeURIComponent(
+        plotId,
+      )}&end_date=${endDate}&days_back=${daysBack}`;
+      const cacheKey = `layer:${slug}:${plotId}:${endDate}`;
+      const ttlMs = endDate === today ? 10 * 60 * 1000 : 30 * 60 * 1000;
+
+      try {
+        const data = await getOrFetchJson({
+          key: cacheKey,
+          url,
+          ttlMs,
+          forceRefresh,
+          fetchInit: {
+            method: "POST",
+            mode: "cors",
+            cache: "no-cache",
+            credentials: "omit",
+            headers: {
+              Accept: "application/json",
+            },
           },
-        },
-      });
-      persistWorkingLayerEndDate(plotName, layer, endDate);
-      return { data, endDate, cacheKey };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      lastError = err instanceof Error ? err : new Error(message);
-      // Empty/truncated JSON and 404s: try the next ribbon date instead of hard-failing.
-      if (isAdminNoImageryError(message)) {
-        markLayerEndDateFailed(plotName, layer, endDate);
+        });
+        persistWorkingLayerEndDate(plotName, layer, endDate);
+        return { data, endDate, cacheKey };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        lastError = err instanceof Error ? err : new Error(message);
         removeCache(cacheKey);
+        if (isAdminNoImageryError(message)) {
+          dateHadImageryMiss = true;
+          console.warn(
+            `[AdminLayer] ${layer} miss @ ${endDate} for ${plotId}; trying next…`,
+          );
+          continue;
+        }
         console.warn(
-          `[AdminLayer] ${layer} miss @ ${endDate} for ${apiPlotName}; trying next date…`,
+          `[AdminLayer] ${layer} error @ ${endDate} for ${plotId}: ${message}`,
         );
-        continue;
       }
-      throw lastError;
+    }
+
+    // Only blacklist the date after every plot_id form failed for it.
+    if (dateHadImageryMiss) {
+      markLayerEndDateFailed(plotName, layer, endDate);
     }
   }
 

@@ -23,6 +23,7 @@ import {
 } from "../utils/plotImageEndDates";
 import {
   fetchAdminLayerWithDateFallback,
+  buildAdminEndDateCandidates,
   isAdminNoImageryError,
 } from "../utils/adminLayerApi";
 import { getSinglePlotAgroStats, refreshApiEndpoints } from "../api";
@@ -726,6 +727,27 @@ function exactSelectedEndDate(endDate: string | null | undefined): string[] {
   return [day];
 }
 
+/** Selected date first, then timeline dates so empty/404 days can fall back. */
+function layerEndDateCandidates(
+  plotName: string,
+  layer: "Growth" | "Water Uptake" | "Soil Moisture" | "PEST",
+  requestedDate: string | null | undefined,
+  timeline: AnalysisTimelineResponse["timeline"] | undefined,
+): string[] {
+  const exact = exactSelectedEndDate(requestedDate);
+  const fromTimeline = buildAdminEndDateCandidates(
+    plotName,
+    layer,
+    timeline,
+    requestedDate || undefined,
+  );
+  const out: string[] = [];
+  for (const d of [...exact, ...fromTimeline]) {
+    if (d && !out.includes(d)) out.push(d);
+  }
+  return out;
+}
+
 const CropEyeMap: React.FC<MapProps> = ({
   onFieldAnalysisChange,
   onFieldAnalysisLoadingChange,
@@ -738,6 +760,15 @@ const CropEyeMap: React.FC<MapProps> = ({
     useAppContext();
   const plotNameForApi = (plotKey: string) =>
     resolveApiPlotName(plotKey, profile?.plots);
+  /** Admin SAR tiles key plots as `564_865` — slash form 404s. */
+  const plotNameForTiles = (plotKey: string) => {
+    const raw = String(plotKey ?? "").trim();
+    if (!raw) return raw;
+    const under = raw.replace(/\//g, "_");
+    const api = resolveApiPlotName(raw, profile?.plots);
+    const apiUnder = api ? api.replace(/\//g, "_") : "";
+    return apiUnder || under || raw;
+  };
   const mapWrapperRef = useRef<HTMLDivElement>(null);
   const initialFetchDoneRef = useRef<boolean>(false); // Track if initial fetch is done
   /** In-memory tile responses: key = `growth|plot|YYYY-MM-DD` etc. Avoids refetch when switching layer tab only. */
@@ -1341,12 +1372,16 @@ const CropEyeMap: React.FC<MapProps> = ({
     options?: { forceRefresh?: boolean; requestedDate?: string },
   ) => {
     if (!plotName) return;
-    const apiPlot = plotNameForApi(plotName);
+    const apiPlot = plotNameForTiles(plotName);
     const forceRefresh = Boolean(options?.forceRefresh);
     const requestedDate = options?.requestedDate ?? currentEndDate;
 
-    // Exact ribbon date only — no fallback to other timeline dates/tiles.
-    const candidateDates = exactSelectedEndDate(requestedDate);
+    const candidateDates = layerEndDateCandidates(
+      plotName,
+      "Growth",
+      requestedDate,
+      timelinePayload?.timeline,
+    );
     if (!candidateDates.length) return;
     const endDate = candidateDates[0];
 
@@ -1383,6 +1418,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       const { data, endDate: apiEndDate } = await fetchAdminLayerWithDateFallback({
         plotName,
         apiPlotName: apiPlot,
+        apiPlotNames: analyzePlotIdCandidates(plotName, profile?.plots),
         layer: "Growth",
         candidateDates,
         forceRefresh,
@@ -1429,10 +1465,15 @@ const CropEyeMap: React.FC<MapProps> = ({
     options?: { forceRefresh?: boolean; requestedDate?: string },
   ) => {
     if (!plotName) return;
-    const apiPlot = plotNameForApi(plotName);
+    const apiPlot = plotNameForTiles(plotName);
     const forceRefresh = Boolean(options?.forceRefresh);
     const requestedDate = options?.requestedDate ?? currentEndDate;
-    const candidateDates = exactSelectedEndDate(requestedDate);
+    const candidateDates = layerEndDateCandidates(
+      plotName,
+      "Water Uptake",
+      requestedDate,
+      timelinePayload?.timeline,
+    );
     if (!candidateDates.length) return;
     const endDate = candidateDates[0];
     const isStale = () => currentEndDateRef.current !== requestedDate;
@@ -1468,6 +1509,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       const { data, endDate: apiEndDate } = await fetchAdminLayerWithDateFallback({
         plotName,
         apiPlotName: apiPlot,
+        apiPlotNames: analyzePlotIdCandidates(plotName, profile?.plots),
         layer: "Water Uptake",
         candidateDates,
         forceRefresh,
@@ -1511,10 +1553,15 @@ const CropEyeMap: React.FC<MapProps> = ({
     options?: { forceRefresh?: boolean; requestedDate?: string },
   ) => {
     if (!plotName) return;
-    const apiPlot = plotNameForApi(plotName);
+    const apiPlot = plotNameForTiles(plotName);
     const forceRefresh = Boolean(options?.forceRefresh);
     const requestedDate = options?.requestedDate ?? currentEndDate;
-    const candidateDates = exactSelectedEndDate(requestedDate);
+    const candidateDates = layerEndDateCandidates(
+      plotName,
+      "Soil Moisture",
+      requestedDate,
+      timelinePayload?.timeline,
+    );
     if (!candidateDates.length) return;
     const endDate = candidateDates[0];
     const isStale = () => currentEndDateRef.current !== requestedDate;
@@ -1550,6 +1597,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       const { data, endDate: apiEndDate } = await fetchAdminLayerWithDateFallback({
         plotName,
         apiPlotName: apiPlot,
+        apiPlotNames: analyzePlotIdCandidates(plotName, profile?.plots),
         layer: "Soil Moisture",
         candidateDates,
         forceRefresh,
@@ -1592,8 +1640,13 @@ const CropEyeMap: React.FC<MapProps> = ({
     setLoading(true);
     setError(null);
 
-    const apiPlot = plotNameForApi(plotName);
-    const candidateDates = exactSelectedEndDate(currentEndDate);
+    const apiPlot = plotNameForTiles(plotName);
+    const candidateDates = layerEndDateCandidates(
+      plotName,
+      "Growth",
+      currentEndDate,
+      timelinePayload?.timeline,
+    );
     if (!candidateDates.length) {
       setLoading(false);
       return;
@@ -1603,6 +1656,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       const { data } = await fetchAdminLayerWithDateFallback({
         plotName,
         apiPlotName: apiPlot,
+        apiPlotNames: analyzePlotIdCandidates(plotName, profile?.plots),
         layer: "Growth",
         candidateDates,
       });
@@ -1729,9 +1783,14 @@ const CropEyeMap: React.FC<MapProps> = ({
       return;
     }
 
-    const apiPlot = plotNameForApi(plotName);
+    const apiPlot = plotNameForTiles(plotName);
     const requestedDate = options?.requestedDate ?? currentEndDate;
-    const candidateDates = exactSelectedEndDate(requestedDate);
+    const candidateDates = layerEndDateCandidates(
+      plotName,
+      "PEST",
+      requestedDate,
+      timelinePayload?.timeline,
+    );
     if (!candidateDates.length) return;
     const endDate = candidateDates[0];
     const isStale = () => currentEndDateRef.current !== requestedDate;
@@ -1796,6 +1855,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       const { data, endDate: apiEndDate } = await fetchAdminLayerWithDateFallback({
         plotName,
         apiPlotName: apiPlot,
+        apiPlotNames: analyzePlotIdCandidates(plotName, profile?.plots),
         layer: "PEST",
         candidateDates,
         forceRefresh,
