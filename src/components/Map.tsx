@@ -28,6 +28,7 @@ import {
 import { getSinglePlotAgroStats, refreshApiEndpoints } from "../api";
 import { useI18nLite } from "../i18nLite.ts";
 import { toSafeUserError } from "../utils/safeUserError";
+import { parseResponseJson } from "../utils/requestCache";
 import {
   isAnalysisGeometryStale,
   type GeoJsonPolygon,
@@ -65,10 +66,44 @@ function areaAcresFromApiRecord(record: unknown): number | null {
   if (!row) return null;
 
   const soil = row.soil as Record<string, unknown> | undefined;
+  const props = row.properties as Record<string, unknown> | undefined;
+  const soilProps = props?.soil as Record<string, unknown> | undefined;
 
   return (
-    parsePositiveArea(row.area_acres) ?? parsePositiveArea(soil?.area_acres)
+    parsePositiveArea(row.area_acres) ??
+    parsePositiveArea(soil?.area_acres) ??
+    parsePositiveArea(props?.area_acres) ??
+    parsePositiveArea(soilProps?.area_acres)
   );
+}
+
+/** analyzeSinglePlot body: top-level, GeoJSON feature, or nested plot dict. */
+function areaAcresFromAnalyzeResponse(data: unknown): number | null {
+  const direct = areaAcresFromApiRecord(data);
+  if (direct != null) return direct;
+
+  const row = data as Record<string, unknown> | null | undefined;
+  if (!row || typeof row !== "object") return null;
+
+  const features = row.features as unknown[] | undefined;
+  if (Array.isArray(features) && features[0]) {
+    const fromFeature = areaAcresFromApiRecord(
+      (features[0] as { properties?: unknown })?.properties ?? features[0],
+    );
+    if (fromFeature != null) return fromFeature;
+  }
+
+  for (const value of Object.values(row)) {
+    if (!value || typeof value !== "object") continue;
+    const nested = areaAcresFromApiRecord(value);
+    if (nested != null) return nested;
+    const nestedProps = areaAcresFromApiRecord(
+      (value as { properties?: unknown }).properties,
+    );
+    if (nestedProps != null) return nestedProps;
+  }
+
+  return null;
 }
 
 /** Profile/farm area_size is stored in hectares in Django — convert to acres. */
@@ -158,7 +193,7 @@ function areaAcresFromAgroStatsCache(plotName: string): number | null {
   return null;
 }
 
-/** Prefer API area_acres; fall back to farmer profile area when analyze API fails. */
+/** Prefer analyzeSinglePlot area_acres; fall back to feature / agroStats / profile. */
 function resolveDisplayAreaAcres(args: {
   plotBoundary: any;
   plotData: any;
@@ -166,6 +201,11 @@ function resolveDisplayAreaAcres(args: {
   apiAreaAcres: number | null;
   profile?: { plots?: unknown[] } | null;
 }): number | null {
+  // analyzeSinglePlot is the source of truth for the map acre label.
+  if (args.apiAreaAcres != null && args.apiAreaAcres > 0) {
+    return args.apiAreaAcres;
+  }
+
   const feature = args.plotBoundary ?? args.plotData?.features?.[0];
 
   const fromFeature = areaAcresFromFeature(feature);
@@ -173,10 +213,6 @@ function resolveDisplayAreaAcres(args: {
 
   const fromAgroStats = areaAcresFromAgroStatsCache(args.selectedPlotName);
   if (fromAgroStats != null) return fromAgroStats;
-
-  if (args.apiAreaAcres != null && args.apiAreaAcres > 0) {
-    return args.apiAreaAcres;
-  }
 
   const fromProfile = areaAcresFromFarmerProfile(
     args.profile,
@@ -1667,8 +1703,7 @@ const CropEyeMap: React.FC<MapProps> = ({
 
       if (!resp.ok) throw new Error(`Field analysis API failed: ${resp.status}`);
 
-      const data = await resp.json();
-      // console.log("Field analysis API response:", data);
+      const data = await parseResponseJson(resp);
 
       let fieldData: any = null;
 
@@ -2070,51 +2105,44 @@ const CropEyeMap: React.FC<MapProps> = ({
     ],
   );
 
-  // Only source left when the analysis feature has no area_acres: cached
-  // agroStats, then a single analyzeSinglePlot call for this plot.
+  // Always refresh acre from analyzeSinglePlot so stale agroStats (e.g. 1.56)
+  // cannot override the live API value (e.g. 1.41).
   useEffect(() => {
     if (!selectedPlotName?.trim()) {
       setApiFallbackAreaAcres(null);
       return;
     }
 
-    const fromAgroStats = areaAcresFromAgroStatsCache(selectedPlotName);
-    if (fromAgroStats != null) {
-      setApiFallbackAreaAcres(fromAgroStats);
-      return;
-    }
-
-    if (areaAcresFromFeature(plotBoundary ?? plotData?.features?.[0]) != null) {
-      return;
-    }
-
-    const cacheKey = `mapPlotAreaAcres_${selectedPlotName}`;
-    const cached = getCached(cacheKey) as { areaAcres?: number } | null;
-    if (cached?.areaAcres != null && cached.areaAcres > 0) {
-      setApiFallbackAreaAcres(cached.areaAcres);
-      return;
-    }
+    // Clear previous plot's analyze value until this plot's response arrives.
+    setApiFallbackAreaAcres(null);
 
     let cancelled = false;
     const apiPlot = plotNameForApi(selectedPlotName);
+    const cacheKey = `mapPlotAreaAcres_${selectedPlotName}`;
 
     void getSinglePlotAgroStats(apiPlot)
       .then((data) => {
         if (cancelled) return;
-        const acres = areaAcresFromApiRecord(data);
+        const acres = areaAcresFromAnalyzeResponse(data);
         if (acres != null) {
           setApiFallbackAreaAcres(acres);
           setCached(cacheKey, { areaAcres: acres });
         }
       })
       .catch(() => {
-        // analyzeSinglePlot may fail when plantation date is missing
+        // analyzeSinglePlot may fail when plantation date is missing —
+        // fall back to feature / agroStats / profile via resolveDisplayAreaAcres.
+        if (cancelled) return;
+        const cached = getCached(cacheKey) as { areaAcres?: number } | null;
+        if (cached?.areaAcres != null && cached.areaAcres > 0) {
+          setApiFallbackAreaAcres(cached.areaAcres);
+        }
       });
 
     return () => {
       cancelled = true;
     };
-  }, [selectedPlotName, plotBoundary, plotData, getCached, setCached]);
+  }, [selectedPlotName, getCached, setCached]);
 
   const legendData = useMemo(() => {
     if (activeLayer === "PEST") {

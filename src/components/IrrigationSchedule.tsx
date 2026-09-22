@@ -2,6 +2,8 @@ import React, { useEffect, useState } from "react";
 import "./Irrigation/Irrigation.css";
 import { useAppContext } from "../context/AppContext";
 import { useFarmerProfile } from "../hooks/useFarmerProfile";
+import { getSinglePlotAgroStats } from "../api";
+import { resolveApiPlotName } from "../utils/plotName";
 import {
   filterPastDays,
   formatIrrigationDateRange,
@@ -287,6 +289,44 @@ function parseAreaAcres(raw: unknown): number | null {
   if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) return raw;
   const n = Number(String(raw).replace(/[^\d.-]/g, ""));
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** Prefer analyzeSinglePlot `area_acres` (same as map label). */
+function areaAcresFromAnalyzeResponse(data: unknown): number | null {
+  const row = data as Record<string, unknown> | null | undefined;
+  if (!row || typeof row !== "object") return null;
+
+  const soil = row.soil as Record<string, unknown> | undefined;
+  const props = row.properties as Record<string, unknown> | undefined;
+  const soilProps = props?.soil as Record<string, unknown> | undefined;
+  const direct =
+    parseAreaAcres(row.area_acres) ??
+    parseAreaAcres(soil?.area_acres) ??
+    parseAreaAcres(props?.area_acres) ??
+    parseAreaAcres(soilProps?.area_acres);
+  if (direct != null) return Number(direct.toFixed(2));
+
+  const features = row.features as unknown[] | undefined;
+  if (Array.isArray(features) && features[0]) {
+    const feat = features[0] as { properties?: Record<string, unknown> };
+    const fromFeat =
+      parseAreaAcres(feat.properties?.area_acres) ??
+      parseAreaAcres((feat as Record<string, unknown>).area_acres);
+    if (fromFeat != null) return Number(fromFeat.toFixed(2));
+  }
+
+  for (const value of Object.values(row)) {
+    if (!value || typeof value !== "object") continue;
+    const nested = value as Record<string, unknown>;
+    const acres =
+      parseAreaAcres(nested.area_acres) ??
+      parseAreaAcres(
+        (nested.properties as Record<string, unknown> | undefined)?.area_acres,
+      );
+    if (acres != null) return Number(acres.toFixed(2));
+  }
+
+  return null;
 }
 
 /** Hours from applied/required liters using plot drip/flood system params. */
@@ -650,6 +690,22 @@ const IrrigationSchedule: React.FC = () => {
 
     setPlotAreaAcres(resolvePlotAreaAcresFromProfile(selectedPlot, firstFarm));
 
+    // Override with analyzeSinglePlot area_acres (same source as map label).
+    let cancelled = false;
+    const apiPlot =
+      resolveApiPlotName(plotId, profile?.plots) || plotId;
+    if (apiPlot) {
+      void getSinglePlotAgroStats(apiPlot)
+        .then((data) => {
+          if (cancelled) return;
+          const acres = areaAcresFromAnalyzeResponse(data);
+          if (acres != null) setPlotAreaAcres(acres);
+        })
+        .catch(() => {
+          /* keep profile/boundary acres */
+        });
+    }
+
     try {
       let latN: number | null = null;
       let lonN: number | null = null;
@@ -695,6 +751,10 @@ const IrrigationSchedule: React.FC = () => {
     } catch {
       setPlotCoords(null);
     }
+
+    return () => {
+      cancelled = true;
+    };
   }, [profile, profileLoading, selectedPlotName]);
 
   useEffect(() => {

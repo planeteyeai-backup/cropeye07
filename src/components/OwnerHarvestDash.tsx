@@ -26,6 +26,7 @@ import {
   extractFactoryLatLng,
   filterHarvestRows,
   hierarchyHasPlottableData,
+  countHierarchyPlots,
   mergeHarvestFilterOptions,
   normalizeRegionLabel,
   parseManagerFieldOfficersResponse,
@@ -1484,9 +1485,31 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
             };
           }
           if (enrichedRows.length === 0) {
-            setFetchError(
-              "No harvest plots found. Check team-connect has farmers with plots, or try again later.",
-            );
+            const hierarchyPlots = countHierarchyPlots(hierarchy);
+            const agroKeys = Object.keys(agroStats || {}).filter((k) => {
+              const v = (agroStats as Record<string, unknown>)[k];
+              return v != null && typeof v === "object";
+            }).length;
+            const farmCount = farmRows?.length ?? 0;
+            let msg =
+              "No harvest plots found. Check team-connect has farmers with plots, or try again later.";
+            if (hierarchyPlots === 0 && agroKeys === 0) {
+              msg =
+                "No harvest plots found. Team-connect/owner-hierarchy has no farmer plots, and FO agroStats returned empty. Total Area above still comes from district APIs (separate).";
+            } else if (agroKeys === 0 && hierarchyPlots > 0) {
+              msg = `No mappable harvest plots (${hierarchyPlots} in hierarchy, agroStats empty, ${farmCount} farms). Plots need lat/lng from agroStats or /farms/.`;
+            } else if (agroKeys > 0) {
+              msg = `agroStats returned ${agroKeys} plots but none could be mapped (missing coordinates). Check /farms/ boundaries (${farmCount} farms loaded).`;
+            }
+            if (import.meta.env.DEV) {
+              console.warn("[Harvest] empty rows", {
+                hierarchyPlots,
+                agroKeys,
+                farmCount,
+                foCount: hierarchy.fieldOfficers?.length ?? 0,
+              });
+            }
+            setFetchError(msg);
           } else {
             setFetchError(null);
           }

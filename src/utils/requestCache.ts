@@ -15,6 +15,19 @@ export type GetOrFetchJsonOptions = {
   forceRefresh?: boolean;
 };
 
+/** Parse fetch Response body as JSON; empty/truncated bodies get a clear Error. */
+export async function parseResponseJson(res: Response): Promise<Jsonish> {
+  const text = await res.text();
+  if (!text.trim()) {
+    throw new Error("Server returned an empty response. Please try again.");
+  }
+  try {
+    return JSON.parse(text) as Jsonish;
+  } catch {
+    throw new Error("Server returned invalid data. Please try again.");
+  }
+}
+
 /**
  * Shared request dedupe + cache.
  * - If cached (localStorage) and fresh → returns it
@@ -48,7 +61,7 @@ export async function getOrFetchJson({
           `HTTP ${res.status} ${res.statusText}${errorText ? ` - ${errorText.slice(0, 200)}` : ""}`,
         );
       }
-      const data = (await res.json()) as Jsonish;
+      const data = await parseResponseJson(res);
       if (ttlMs != null) setCache(key, data);
       return data;
     } finally {

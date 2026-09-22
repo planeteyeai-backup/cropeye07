@@ -1,16 +1,17 @@
 /**
- * Analysis image dates for the map timeline ribbon (optional).
- * GET /stored-tiles is disabled — Growth layers use calendar date fallbacks.
+ * Analysis image dates for the map timeline ribbon.
+ * Endpoint: GET https://cropeye-database-production.up.railway.app/analysis_timeline?plot_name=…
+ * Dev: Vite proxies `/api/analysis-timeline` → that host (CORS).
  */
 import {
   getSarIndexBaseUrl,
-  isSarMappingHostAvailable,
   sarIndexUpstream,
 } from "../utils/sarIndexHost";
 import {
   getStoredTilesPlotCandidates,
   type PlotRef,
 } from "../utils/plotName";
+import { parseResponseJson } from "../utils/requestCache";
 
 export interface TimelineBucket {
   growth_dates: string[];
@@ -35,19 +36,34 @@ const LAYER_TO_KEY: Record<MapAnalysisLayer, keyof TimelineBucket> = {
   PEST: "pest_detection_dates",
 };
 
-/** Absolute floss host for ribbon dates (same as tiles). */
+const TIMELINE_PATH = "/analysis_timeline";
+const TIMELINE_HOST_DEFAULT =
+  "https://cropeye-database-production.up.railway.app";
+
+/**
+ * Dev: `/api/analysis-timeline` (Vite proxy).
+ * Prod: cropeye-database host, or VITE_ANALYSIS_TIMELINE_BASE_URL override.
+ */
 export function getAnalysisTimelineBaseUrl(): string {
-  return sarIndexUpstream();
+  const fromEnv = String(
+    import.meta.env.VITE_ANALYSIS_TIMELINE_BASE_URL ?? "",
+  )
+    .trim()
+    .replace(/\/$/, "");
+  if (fromEnv) return fromEnv;
+  if (import.meta.env.DEV) return "/api/analysis-timeline";
+  return TIMELINE_HOST_DEFAULT;
 }
 
-/** Try slash form first — floss uses `8/1A`, not `8_1A`. */
+/**
+ * DB keys often use underscore (`564_865`); also try slash (`564/865`).
+ */
 export function analysisTimelinePlotCandidates(plotName: string): string[] {
   const raw = String(plotName ?? "").trim();
   if (!raw) return [];
-  const slash = raw.includes("_") && !raw.includes("/") ? raw.replace(/_/g, "/") : raw;
-  const out = [slash, raw].filter(Boolean);
-  // Never add underscore twin — breaks stored-tiles / tile lookups
-  return [...new Set(out)];
+  const underscore = raw.replace(/\//g, "_");
+  const slash = raw.replace(/_/g, "/");
+  return [...new Set([raw, underscore, slash].filter(Boolean))];
 }
 
 function asDateArray(raw: unknown): string[] {
@@ -241,7 +257,11 @@ async function fetchStoredTilesJson(
   if (!res.ok) return null;
   const ct = res.headers.get("content-type") || "";
   if (!ct.toLowerCase().includes("application/json")) return null;
-  return res.json();
+  try {
+    return await parseResponseJson(res);
+  } catch {
+    return null;
+  }
 }
 
 /** In-flight / short cache for optional stored-tiles lookups. */
@@ -266,14 +286,12 @@ async function fetchStoredTilesOnce(
   if (existing) return existing;
 
   const run = (async () => {
-    // Exact endpoint user specified (absolute floss — avoids Vite 502 hang-ups).
-    // GET /stored-tiles?plot_name=…
-    const absoluteBase = getAnalysisTimelineBaseUrl();
+    // Optional Admin SAR stored-tiles (often 404).
+    const absoluteBase = sarIndexUpstream();
     const proxyBase = getSarIndexBaseUrl();
     const qs = `plot_name=${encodeURIComponent(plotName)}`;
     const urls = [
       `${absoluteBase}/stored-tiles?${qs}`,
-      // Same-origin proxy fallback if browser blocks absolute CORS
       proxyBase && proxyBase !== absoluteBase
         ? `${proxyBase}/stored-tiles?${qs}`
         : "",
@@ -318,15 +336,55 @@ async function fetchStoredTilesOnce(
   }
 }
 
+async function fetchAnalysisTimelineOnce(
+  plotName: string,
+): Promise<AnalysisTimelineResponse | null> {
+  const url = `${getAnalysisTimelineBaseUrl()}${TIMELINE_PATH}?plot_name=${encodeURIComponent(plotName)}`;
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) return null;
+    const ct = res.headers.get("content-type") || "";
+    if (!ct.toLowerCase().includes("application/json")) return null;
+    const data = await parseResponseJson(res);
+    if (data?.timeline && Array.isArray(data.timeline) && data.timeline.length) {
+      return data as AnalysisTimelineResponse;
+    }
+    // Some hosts wrap the same shape; reuse stored-tiles normalizer as fallback.
+    return normalizeStoredTilesResponse(data, plotName);
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchAnalysisTimeline(
   plotName: string,
   plots?: PlotRef[] | null,
 ): Promise<AnalysisTimelineResponse | null> {
   const trimmed = plotName?.trim();
   if (!trimmed) return null;
-  // stored-tiles is optional testing only — do not call (often 404 on Admin).
-  // Growth/Water/Soil/Pest use calendar / analyze_* date fallbacks instead.
-  void plots;
+
+  const candidates = [
+    ...analysisTimelinePlotCandidates(trimmed),
+    ...(plots?.length ? getStoredTilesPlotCandidates(trimmed, plots) : []),
+  ];
+  const seen = new Set<string>();
+
+  for (const candidate of candidates) {
+    if (!candidate || seen.has(candidate)) continue;
+    seen.add(candidate);
+    const data = await fetchAnalysisTimelineOnce(candidate);
+    if (data?.timeline?.length) return data;
+  }
+
+  // Optional secondary: Admin stored-tiles (often 404 — best-effort only).
+  for (const candidate of candidates) {
+    const data = await fetchStoredTilesOnce(candidate);
+    if (data?.timeline?.length) return data;
+  }
+
   return null;
 }
 

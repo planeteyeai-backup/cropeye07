@@ -7,6 +7,7 @@ import {
   type PlotRef,
 } from './plotName';
 import { getFieldScoreBaseUrl } from './sarIndexHost';
+import { parseResponseJson } from './requestCache';
 
 export { fieldScoreCacheKey };
 
@@ -62,7 +63,7 @@ async function fetchFieldScoreByPlotName(
   );
   if (!resp.ok) return null;
 
-  const data = await resp.json();
+  const data = await parseResponseJson(resp);
   let fieldData: any = null;
 
   if (Array.isArray(data)) {

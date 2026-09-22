@@ -30,6 +30,8 @@ export interface TeamConnectHarvestRow {
   "Sugarcane Status": string;
   "Area (acre)": number;
   Days: number;
+  /** From agroStats `days_to_harvest` when present (used for ready/brix range charts). */
+  DaysToHarvest?: number | null;
   "Prediction Yield (T/acre)": number | null;
   "Prediction Yield (T/acer)"?: number | null;
   "Brix (Degree)": number | null;
@@ -1587,12 +1589,39 @@ function computeStage(days: number): string {
   return "Germination Stage";
 }
 
+/** Align harvest UI with agroStats `Sugarcane_Status` labels (no static chart buckets). */
+export function normalizeSugarcaneStatus(
+  status: string | null | undefined,
+): string {
+  if (status == null) return "";
+  const trimmed = String(status).trim();
+  if (!trimmed) return "";
+  const lower = trimmed.toLowerCase().replace(/\s+/g, " ");
+  if (lower === "harvested") return "Harvested";
+  if (lower === "growing") return "Growing";
+  if (
+    lower === "partially harvested" ||
+    lower === "partial harvest" ||
+    lower.includes("partially harvested")
+  ) {
+    return "Partially Harvested";
+  }
+  if (
+    lower === "ready to harvest" ||
+    lower === "ready for harvest" ||
+    lower.includes("ready to harvest")
+  ) {
+    return "Ready to Harvest";
+  }
+  return trimmed;
+}
+
 function computeStatus(days: number, agro?: any): string {
   const fromAgro =
     agro?.Sugarcane_Status ??
     agro?.harvest_status ??
     agro?.features?.[0]?.properties?.harvest_status;
-  if (fromAgro) return String(fromAgro);
+  if (fromAgro) return normalizeSugarcaneStatus(String(fromAgro));
 
   if (days > 300) return "Ready to Harvest";
   if (days > 270) return "Partially Harvested";
@@ -1667,6 +1696,56 @@ function extractBrix(agro: any): number | null {
     toFiniteNumber(typeof brix === "number" ? brix : null) ??
     null
   );
+}
+
+/** Days until harvest from agroStats (same field as owner / farmer dashboards). */
+export function extractDaysToHarvest(
+  agro: any,
+  daysSincePlantation?: number,
+): number | null {
+  if (!agro || typeof agro !== "object") {
+    if (
+      typeof daysSincePlantation === "number" &&
+      Number.isFinite(daysSincePlantation)
+    ) {
+      return null;
+    }
+    return null;
+  }
+  const direct =
+    toFiniteNumber(agro.days_to_harvest) ??
+    toFiniteNumber(agro?.brix_sugar?.days_to_harvest) ??
+    toFiniteNumber(agro?.harvest?.days_to_harvest);
+  if (direct != null) return direct;
+  return null;
+}
+
+export function harvestRowDaysToHarvest(
+  row: Pick<TeamConnectHarvestRow, "DaysToHarvest">,
+): number | null {
+  if (
+    typeof row.DaysToHarvest === "number" &&
+    Number.isFinite(row.DaysToHarvest)
+  ) {
+    return row.DaysToHarvest;
+  }
+  return null;
+}
+
+/** X-axis / grouping for brix & ready-to-harvest charts (agroStats only). */
+export function harvestRowChartDay(
+  row: Pick<TeamConnectHarvestRow, "DaysToHarvest">,
+): number | null {
+  return harvestRowDaysToHarvest(row);
+}
+
+export function harvestRowMatchesDayRange(
+  row: Pick<TeamConnectHarvestRow, "DaysToHarvest">,
+  range: [number, number],
+): boolean {
+  const day = harvestRowDaysToHarvest(row);
+  if (day == null) return false;
+  return day >= range[0] && day <= range[1];
 }
 
 function plotKeysForContext(plot: any, farm: any | null): string[] {
@@ -2444,6 +2523,7 @@ function buildRowFromContext(
     "Sugarcane Status": computeStatus(days, agro),
     "Area (acre)": area,
     Days: days,
+    DaysToHarvest: extractDaysToHarvest(agro, days),
     "Prediction Yield (T/acre)": yieldValue,
     "Prediction Yield (T/acer)": yieldValue,
     "Brix (Degree)": brixValue,
@@ -2697,6 +2777,7 @@ function buildRowFromAgroOnly(
     "Sugarcane Status": computeStatus(days, agro),
     "Area (acre)": area,
     Days: days,
+    DaysToHarvest: extractDaysToHarvest(agro, days),
     "Prediction Yield (T/acre)": extractSugarYield(agro),
     "Brix (Degree)": extractBrix(agro),
     "Recovery (Degree)": extractRecovery(agro),

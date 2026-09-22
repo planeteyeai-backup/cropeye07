@@ -28,10 +28,14 @@ export default defineConfig(({ mode }) => {
     env.VITE_SAR_INDEX_API_URL ||
     "https://admin-cropeye.up.railway.app"
   ).replace(/\/$/, "");
+  const analysisTimelineTarget = (
+    env.VITE_ANALYSIS_TIMELINE_BASE_URL ||
+    "https://cropeye-database-production.up.railway.app"
+  ).replace(/\/$/, "");
 
   const sarProxy: Record<string, object> = {
     "/api/analysis-timeline": {
-      target: sarIndexTarget,
+      target: analysisTimelineTarget,
       changeOrigin: true,
       secure: false,
       timeout: 120_000,
