@@ -1900,17 +1900,31 @@ const CropEyeMap: React.FC<MapProps> = ({
     const extractTileUrl = (data: any): string | null => {
       if (!data || typeof data !== 'object') return null;
 
-      // Common paths
-      const candidates = [
-        data?.features?.[0]?.properties?.tile_url,
-        data?.features?.[0]?.properties?.tileURL,
-        data?.features?.[0]?.properties?.tileServerUrl,
-        data?.features?.[0]?.properties?.tiles,
-        data?.properties?.tile_url,
-        data?.tile_url,
-        data?.tileURL,
-        data?.tileServerUrl,
+      const getCandidates = (obj: any) => [
+        obj?.features?.[0]?.properties?.tile_url,
+        obj?.features?.[0]?.properties?.tileURL,
+        obj?.features?.[0]?.properties?.tileServerUrl,
+        obj?.features?.[0]?.properties?.tiles,
+        obj?.properties?.tile_url,
+        obj?.tile_url,
+        obj?.tileURL,
+        obj?.tileServerUrl,
       ].filter(Boolean);
+
+      let candidates = getCandidates(data);
+
+      // If no url at top-level, check if it's nested under a plot key (e.g. { "564_865": { tile_url: ... } })
+      if (!candidates.length) {
+        for (const val of Object.values(data)) {
+          if (val && typeof val === 'object') {
+            const nestedCandidates = getCandidates(val);
+            if (nestedCandidates.length) {
+              candidates = nestedCandidates;
+              break;
+            }
+          }
+        }
+      }
 
       // If tiles is an array, pick first
       for (const c of candidates) {
