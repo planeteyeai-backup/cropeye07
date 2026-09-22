@@ -9,6 +9,7 @@ import {
   getUserRole,
   getFastApiToken,
   setFastApiToken,
+  getUserData,
 } from "./utils/auth";
 import { checkAndRefreshToken, isTokenExpired } from "./utils/tokenManager";
 import {
@@ -17,6 +18,11 @@ import {
   type OwnerFactoryBoundaryPlot,
 } from "./utils/teamConnectHarvest";
 import { getCache, setCache, removeCache } from "./utils/cache";
+import {
+  agricultureAnalysisHttp,
+  agricultureAnalysisUrl,
+  agricultureAnalysisUpstream,
+} from "./utils/agricultureAnalysisApi";
 
 // Set base URL for backend (use .env VITE_API_BASE_URL or new Render backend)
 const DEFAULT_API_BASE_URL = "https://cropeye-backendd.up.railway.app/api";
@@ -49,6 +55,14 @@ let farmsAllInFlight: Promise<any[]> | null = null;
 let farmsAllFetchGeneration = 0;
 
 export const MANAGER_FIELD_OFFICERS_CACHE_KEY = "managerFieldOfficers_v1";
+
+/** Scope FO list cache per logged-in manager so districts don't share one list. */
+export function managerFieldOfficersCacheKeyForUser(
+  userId?: string | number | null,
+): string {
+  const id = String(userId ?? "").trim();
+  return id ? `managerFieldOfficers_v1_u${id}` : MANAGER_FIELD_OFFICERS_CACHE_KEY;
+}
 export const FARMS_ALL_CACHE_KEY = "farmsWithFarmerDetails_all_v2";
 
 export function ownerAgroStatsCacheKey(endDate?: string): string {
@@ -1248,6 +1262,12 @@ export function clearFarmerMyProfileInFlight(): void {
   farmerMyProfileInFlight = null;
 }
 
+/** Drop in-memory my-field-officers cache (Mandya vs Vijayapura manager switch). */
+export function clearMyFieldOfficersCache(): void {
+  myFieldOfficersCache = null;
+  myFieldOfficersInFlight = null;
+}
+
 export const getFarmerMyProfile = (options?: {
   force?: boolean;
   farmId?: number | string;
@@ -1940,6 +1960,7 @@ export const refreshApiEndpoints = async (opts?: {
     "https://admin-cropeye.up.railway.app/refresh-from-django",
     "https://main-cropeye.up.railway.app/refresh-from-django",
     "https://events-cropeye.up.railway.app/refresh-from-django",
+    `${agricultureAnalysisUpstream()}/refresh-from-django`,
     "https://sef-cropeye.up.railway.app/refresh-from-django",
     "https://cropeye-database-production.up.railway.app/refresh-from-django",
     "https://incredible-magic-production-bd49.up.railway.app/trigger-new-plot",
@@ -2022,9 +2043,6 @@ export const getSinglePlotAgroStats = async (
   plotId: string | number,
   config?: { signal?: AbortSignal; timeout?: number; endDate?: string },
 ) => {
-  const eventsBase =
-    String(import.meta.env.VITE_DEV_EVENTS_API_URL ?? "").trim().replace(/\/$/, "") ||
-    "https://events-cropeye.up.railway.app";
   const params = new URLSearchParams();
   params.set("plot_id", formatPlotIdForEventsApi(String(plotId)));
   const endDate = config?.endDate?.trim().split("T")[0];
@@ -2032,10 +2050,22 @@ export const getSinglePlotAgroStats = async (
     params.set("end_date", endDate);
   }
   const { endDate: _omit, ...axiosConfig } = config ?? {};
-  const url = `${eventsBase}/plots/analyzeSinglePlot?${params.toString()}`;
-  const response = await eventsApi.get(url, axiosConfig);
+  // Must NOT use eventsApi baseURL with a relative /api/... path — that would
+  // incorrectly nest under Railway. Prefer agricultureAnalysisUrl() which now
+  // defaults to Events Railway (Cloudflare tunnel was 502ing).
+  const url = agricultureAnalysisUrl(
+    `/plots/analyzeSinglePlot?${params.toString()}`,
+  );
+  const response = await agricultureAnalysisHttp.get(url, axiosConfig);
   return response.data;
 };
+
+/** FO agroStats: Cloudflare store is often empty/slow; fall back to Events Railway. */
+const FO_AGRO_STATS_TIMEOUT_MS = 25_000;
+const EVENTS_AGRO_STATS_FALLBACK = String(
+  import.meta.env.VITE_DEV_EVENTS_API_URL ||
+    "https://events-cropeye.up.railway.app",
+).replace(/\/$/, "");
 
 // New agro stats endpoint for field officer dashboard (all plots under officer)
 export const getFieldOfficerAgroStats = async (
@@ -2056,12 +2086,35 @@ export const getFieldOfficerAgroStats = async (
   }
 
   const dateParam = endDate ? `?end_date=${endDate}` : "";
-  const url = `https://events-cropeye.up.railway.app/field-officers/${fieldOfficerId}/agroStats${dateParam}`;
+  const path = `/field-officers/${fieldOfficerId}/agroStats${dateParam}`;
+  const primaryUrl = agricultureAnalysisUrl(path);
+  const fallbackUrl = `${EVENTS_AGRO_STATS_FALLBACK}${path}`;
 
   const pending = (async () => {
     try {
-      const response = await eventsApi.get(url);
-      const data = response.data;
+      const tryUrl = async (url: string) => {
+        const response = await agricultureAnalysisHttp.get(url, {
+          timeout: FO_AGRO_STATS_TIMEOUT_MS,
+          validateStatus: (s) => (s >= 200 && s < 300) || s === 404,
+        });
+        if (response.status === 404) return null;
+        return response.data ?? null;
+      };
+
+      let data: unknown = null;
+      try {
+        data = await tryUrl(primaryUrl);
+      } catch {
+        data = null;
+      }
+      // Cloudflare store miss / timeout / 5xx → Events host that still has FO data.
+      if (data == null && fallbackUrl !== primaryUrl) {
+        try {
+          data = await tryUrl(fallbackUrl);
+        } catch {
+          data = null;
+        }
+      }
       if (data != null) setCache(cacheKey, data);
       return data;
     } finally {
@@ -2250,6 +2303,62 @@ export const fetchDistrictTotalPlotArea = async (
   }
 };
 
+/** Canonical Events districts used for owner Harvest Total Area sum. */
+export const OWNER_HARVEST_DISTRICT_SLUGS = [
+  "mandya",
+  "kalburgi",
+  "bagalkot",
+  "vijaypura",
+] as const;
+
+export type OwnerDistrictsTotalPlotAreaSum = {
+  total_area_acres: number;
+  total_area_hectares: number;
+  plot_count: number;
+  districts: DistrictTotalPlotAreaResponse[];
+};
+
+/**
+ * Owner Harvest: sum GET /districts/{district}/total-plot-area across all 4 districts.
+ * Partial failures are skipped; at least one success is required.
+ */
+export const fetchOwnerDistrictsTotalPlotAreaSum =
+  async (): Promise<OwnerDistrictsTotalPlotAreaSum> => {
+    const results = await Promise.allSettled(
+      OWNER_HARVEST_DISTRICT_SLUGS.map((slug) =>
+        fetchDistrictTotalPlotArea(slug),
+      ),
+    );
+
+    const districts: DistrictTotalPlotAreaResponse[] = [];
+    let total_area_acres = 0;
+    let total_area_hectares = 0;
+    let plot_count = 0;
+
+    for (const settled of results) {
+      if (settled.status !== "fulfilled" || !settled.value) continue;
+      const row = settled.value;
+      districts.push(row);
+      const acres = Number(row.total_area_acres);
+      const hectares = Number(row.total_area_hectares);
+      const plots = Number(row.plot_count);
+      if (Number.isFinite(acres)) total_area_acres += acres;
+      if (Number.isFinite(hectares)) total_area_hectares += hectares;
+      if (Number.isFinite(plots)) plot_count += plots;
+    }
+
+    if (!districts.length) {
+      throw new Error("No district total-plot-area responses");
+    }
+
+    return {
+      total_area_acres: Math.round(total_area_acres * 100) / 100,
+      total_area_hectares: Math.round(total_area_hectares * 100) / 100,
+      plot_count,
+      districts,
+    };
+  };
+
 /** Field officers assigned to the current manager (or owner).
  *  Cached + single-flight — Harvest + getManagerFieldOfficersAgroStats share one HTTP call. */
 export const getMyFieldOfficers = () => {
@@ -2271,7 +2380,8 @@ export const getMyFieldOfficers = () => {
         : Array.isArray(res?.data)
           ? res.data
           : [];
-      setCache(MANAGER_FIELD_OFFICERS_CACHE_KEY, { field_officers });
+      const uid = getUserData()?.id;
+      setCache(managerFieldOfficersCacheKeyForUser(uid), { field_officers });
       return res;
     })
     .finally(() => {
@@ -2288,7 +2398,14 @@ export function mergeAgroStatsPlotData(
   const merged: Record<string, unknown> = {};
   for (const source of sources) {
     if (!source || typeof source !== "object") continue;
-    Object.assign(merged, source);
+    const nested =
+      (source.plots && typeof source.plots === "object"
+        ? (source.plots as Record<string, unknown>)
+        : null) ||
+      (source.data && typeof source.data === "object" && !Array.isArray(source.data)
+        ? (source.data as Record<string, unknown>)
+        : null);
+    Object.assign(merged, nested ?? source);
   }
   return merged;
 }
@@ -2523,7 +2640,25 @@ const fetchOwnerFieldOfficersAgroStats = async (
   const results = await Promise.all(
     officers.map(async (officer) => {
       try {
-        const stats = await getFieldOfficerAgroStats(officer.id, endDate);
+        const officerId = officer?.id ?? officer?.user_id;
+        if (officerId == null || officerId === "") return null;
+        const statsRaw = await getFieldOfficerAgroStats(officerId, endDate);
+        const stats =
+          statsRaw && typeof statsRaw === "object"
+            ? (() => {
+                const root = statsRaw as Record<string, unknown>;
+                const nested =
+                  (root.plots && typeof root.plots === "object"
+                    ? (root.plots as Record<string, unknown>)
+                    : null) ||
+                  (root.data &&
+                  typeof root.data === "object" &&
+                  !Array.isArray(root.data)
+                    ? (root.data as Record<string, unknown>)
+                    : null);
+                return nested ?? root;
+              })()
+            : null;
         if (stats) {
           const createdByRaw = officer?.created_by;
           const createdByUsername =

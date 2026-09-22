@@ -7,10 +7,12 @@ import api, {
   getAllFarmsWithFarmerDetails,
   getIndustries,
   fetchDistrictTotalPlotArea,
+  fetchOwnerDistrictsTotalPlotAreaSum,
   normalizeDistrictForEventsApi,
   resolveManagerDistrictForEventsApi,
   fetchAllOwnerFactoryBoundaryPlots,
   type DistrictTotalPlotAreaResponse,
+  type OwnerDistrictsTotalPlotAreaSum,
   FARMS_ALL_CACHE_KEY,
 } from "../api";
 import { removeCache } from "../utils/cache";
@@ -828,6 +830,11 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
   const [managerUserId, setManagerUserId] = useState("");
   const [districtAreaData, setDistrictAreaData] = useState<DistrictTotalPlotAreaResponse | null>(null);
   const [districtAreaLoading, setDistrictAreaLoading] = useState(false);
+  /** Owner: sum of 4 district total-plot-area responses. */
+  const [ownerDistrictsAreaSum, setOwnerDistrictsAreaSum] =
+    useState<OwnerDistrictsTotalPlotAreaSum | null>(null);
+  const [ownerDistrictsAreaLoading, setOwnerDistrictsAreaLoading] =
+    useState(false);
 
   const [rawData, setRawData] = useState<TeamConnectHarvestRow[]>([]);
   const [hierarchyMeta, setHierarchyMeta] = useState<TeamConnectHierarchy>({
@@ -944,6 +951,32 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
     // Region filter only narrows table rows — district total area stays district-wide.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isManagerMode, managerUserId, managerDistrict]);
+
+  // Owner Harvest: sum total_area_acres from all 4 district endpoints.
+  useEffect(() => {
+    if (isManagerMode) {
+      setOwnerDistrictsAreaSum(null);
+      return;
+    }
+    let cancelled = false;
+    setOwnerDistrictsAreaLoading(true);
+    fetchOwnerDistrictsTotalPlotAreaSum()
+      .then((sum) => {
+        if (!cancelled) setOwnerDistrictsAreaSum(sum);
+      })
+      .catch((err) => {
+        if (import.meta.env.DEV) {
+          console.warn("[Harvest] owner 4-district area sum failed:", err);
+        }
+        if (!cancelled) setOwnerDistrictsAreaSum(null);
+      })
+      .finally(() => {
+        if (!cancelled) setOwnerDistrictsAreaLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isManagerMode]);
 
   // If profile did not yield a district slug, infer Mandya/etc. from loaded plot regions.
   useEffect(() => {
@@ -1950,11 +1983,15 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
           : fallbackArea > 0
             ? fallbackArea.toFixed(2)
             : "-"
-      : summedArea > 0
-        ? summedArea.toFixed(2)
-        : filteredData.length > 0
-          ? "0.00"
-          : "-";
+      : ownerDistrictsAreaLoading && !ownerDistrictsAreaSum
+        ? "..."
+        : ownerDistrictsAreaSum
+          ? ownerDistrictsAreaSum.total_area_acres.toFixed(2)
+          : summedArea > 0
+            ? summedArea.toFixed(2)
+            : filteredData.length > 0
+              ? "0.00"
+              : "-";
     // Average only values present in agroStats (including API 0). Never invent static numbers.
     const yields = filteredData
       .map((item) => item["Prediction Yield (T/acre)"])
@@ -1981,7 +2018,9 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
             ? `${districtAreaData.plot_count} plots · ${districtAreaData.district}`
             : isManagerMode && fallbackArea > 0 && !districtAreaData
               ? `${rawData.length} assigned plots`
-              : undefined,
+              : !isManagerMode && ownerDistrictsAreaSum
+                ? `${ownerDistrictsAreaSum.plot_count} plots · ${ownerDistrictsAreaSum.districts.length} districts`
+                : undefined,
       },
       {
         label: "Avg. Distance (KM)",
@@ -2017,6 +2056,8 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
     isManagerMode,
     districtAreaData,
     districtAreaLoading,
+    ownerDistrictsAreaSum,
+    ownerDistrictsAreaLoading,
     managerAgroStats,
   ]);
 
@@ -2424,26 +2465,26 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                 </div>
               </div>
 
-              <div className="lg:col-span-1 bg-white rounded-xl p-5 shadow-sm border border-gray-100 flex flex-col min-h-[280px]">
-                <h3 className="text-lg font-semibold text-gray-900 mb-3">
+              <div className="lg:col-span-1 bg-white rounded-xl p-4 shadow-sm border border-gray-100 flex flex-col">
+                <h3 className="text-base font-semibold text-gray-900 mb-2">
                   Sugarcane Status
                 </h3>
 
                 {plotStatusData.length === 0 ? (
-                  <div className="flex flex-1 items-center justify-center text-sm text-gray-500">
+                  <div className="flex flex-1 items-center justify-center text-sm text-gray-500 py-6">
                     No status data for the current filters.
                   </div>
                 ) : (
-                <div className="flex items-center gap-3">
-                  <div className="relative h-40 w-40 shrink-0">
+                <div className="flex flex-col items-center gap-3">
+                  <div className="relative h-36 w-36 shrink-0">
                     <ResponsiveContainer width="100%" height="100%">
                       <RechartsPieChart>
                         <Pie
                           data={plotStatusData}
                           cx="50%"
                           cy="50%"
-                          innerRadius="52%"
-                          outerRadius="78%"
+                          innerRadius="54%"
+                          outerRadius="80%"
                           paddingAngle={3}
                           dataKey="value"
                           stroke="none"
@@ -2487,17 +2528,17 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                                 >
                                   <tspan
                                     x={cx}
-                                    dy="-0.55em"
+                                    dy="-0.5em"
                                     className="fill-gray-500"
-                                    style={{ fontSize: 11 }}
+                                    style={{ fontSize: 10 }}
                                   >
                                     Total Area
                                   </tspan>
                                   <tspan
                                     x={cx}
-                                    dy="1.35em"
+                                    dy="1.3em"
                                     className="fill-gray-900"
-                                    style={{ fontSize: 15, fontWeight: 700 }}
+                                    style={{ fontSize: 13, fontWeight: 700 }}
                                   >
                                     {totalLabel} acre
                                   </tspan>
@@ -2518,33 +2559,31 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                     </ResponsiveContainer>
                   </div>
 
-                  <div className="flex-1 min-w-0 space-y-2">
+                  <div className="w-full space-y-2">
                     {plotStatusData.map((item, index) => (
                       <div
                         key={item.name}
-                        className="flex items-start justify-between gap-2"
+                        className="flex items-center gap-2 rounded-lg bg-gray-50 px-2.5 py-1.5"
                       >
-                        <div className="flex items-start gap-2 min-w-0">
-                          <div
-                            className="w-2.5 h-2.5 rounded-full mt-1.5 shrink-0"
-                            style={{
-                              backgroundColor:
-                                item.color ||
-                                STATUS_COLOR_PALETTE[
-                                  index % STATUS_COLOR_PALETTE.length
-                                ],
-                            }}
-                          />
-                          <div className="min-w-0">
-                            <div className="text-xs font-medium text-gray-800 truncate">
-                              {item.name}
-                            </div>
-                            <div className="text-[11px] text-gray-500">
-                              {item.value.toLocaleString(undefined, {
-                                maximumFractionDigits: 2,
-                              })}{" "}
-                              acre · {item.pct.toFixed(1)}%
-                            </div>
+                        <div
+                          className="w-2.5 h-2.5 rounded-full shrink-0"
+                          style={{
+                            backgroundColor:
+                              item.color ||
+                              STATUS_COLOR_PALETTE[
+                                index % STATUS_COLOR_PALETTE.length
+                              ],
+                          }}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-semibold text-gray-800 truncate">
+                            {item.name}
+                          </div>
+                          <div className="text-[11px] text-gray-500 tabular-nums">
+                            {item.value.toLocaleString(undefined, {
+                              maximumFractionDigits: 2,
+                            })}{" "}
+                            acre · {item.pct.toFixed(1)}%
                           </div>
                         </div>
                       </div>
