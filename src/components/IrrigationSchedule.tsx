@@ -9,6 +9,7 @@ import {
   todayIsoInTz,
   type WaterRemainDay,
 } from "../utils/waterRemainApi";
+import { calculateAreaMetricsFromGeometry } from "../utils/plotGeometry";
 import { CloudRain, Sun } from "lucide-react";
 
 /** Normalize gat/plot so `8_1A` and `8/1A` match the shared Soil Moisture series. */
@@ -81,8 +82,85 @@ function etoLossKl(etoLossLiters: number): number {
 
 function toFiniteNumber(v: unknown): number | null {
   if (v == null || v === "") return null;
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const n = Number(v.replace(/[^\d.-]/g, ""));
+    return Number.isFinite(n) ? n : null;
+  }
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Motor Horsepower (HP) from farm irrigation profile.
+ * Accepts API variants: motor_horsepower, motor_Horsepower, etc.
+ * Walks irrigations[] arrays and nested farm/plot objects.
+ */
+function resolveMotorHorsepower(
+  ...sources: Array<Record<string, unknown> | null | undefined | any>
+): number | null {
+  const keys = [
+    "motor_horsepower",
+    "motor_Horsepower",
+    "Motor_Horsepower",
+    "motorHorsepower",
+    "horsepower",
+    "motor_hp",
+    "hp",
+  ];
+
+  const readHp = (obj: any): number | null => {
+    if (!obj || typeof obj !== "object") return null;
+    for (const key of keys) {
+      const n = toFiniteNumber(obj[key]);
+      if (n != null && n > 0) return n;
+    }
+    return null;
+  };
+
+  for (const src of sources) {
+    if (!src) continue;
+    const direct = readHp(src);
+    if (direct != null) return direct;
+
+    // Single irrigation object
+    const oneIrr = readHp(src.irrigation);
+    if (oneIrr != null) return oneIrr;
+
+    // irrigations: [...]
+    const irrList = Array.isArray(src.irrigations)
+      ? src.irrigations
+      : Array.isArray(src.irrigation)
+        ? src.irrigation
+        : [];
+    for (const irr of irrList) {
+      const fromIrr = readHp(irr);
+      if (fromIrr != null) return fromIrr;
+    }
+
+    // farms: [...]
+    const farmList = Array.isArray(src.farms)
+      ? src.farms
+      : src.farm
+        ? Array.isArray(src.farm)
+          ? src.farm
+          : [src.farm]
+        : [];
+    for (const farm of farmList) {
+      const fromFarm = readHp(farm);
+      if (fromFarm != null) return fromFarm;
+      const farmIrr = readHp(farm?.irrigation);
+      if (farmIrr != null) return farmIrr;
+      const farmIrrList = Array.isArray(farm?.irrigations)
+        ? farm.irrigations
+        : [];
+      for (const irr of farmIrrList) {
+        const fromIrr = readHp(irr);
+        if (fromIrr != null) return fromIrr;
+      }
+    }
+  }
+  return null;
 }
 
 /** Liters applied vs previous remain after subtracting rainfall contribution. */
@@ -104,11 +182,11 @@ function irrigatedLitersFromBalance(
 /**
  * Pump runtime from Need (KL) shown in the table:
  *   water_liters = Need_KL × 1000
- *   hours = water_liters ÷ (HP × 7000 × area)
- * Example: 677 KL → 677000 L; 677000 ÷ (7.5 × 7000 × 12.36) ≈ 1.043 h
+ *   Time (minutes) = (Water (liters) / ((Motor_HP × 7000) × Area)) × 60
+ * HP must be farm Motor Horsepower (not a guessed default when available).
  */
 const LITERS_PER_HOUR_PER_HP = 7000;
-/** Fallback when farm profile has no motor HP (matches common default in API mappers). */
+/** Last resort only when Motor Horsepower is missing on the farm profile. */
 const DEFAULT_MOTOR_HP = 7.5;
 
 function calcPumpDurationMinutes(
@@ -120,22 +198,21 @@ function calcPumpDurationMinutes(
   const hp =
     motorHp != null && motorHp > 0 ? motorHp : DEFAULT_MOTOR_HP;
   const area = areaAcres != null && areaAcres > 0 ? areaAcres : 1;
-  // Water for the formula = Need (KL) from the table, in liters
+  // Water in liters; Motor Horsepower × 7000 × Area in denominator
   const waterLiters = needKl * 1000;
   const denom = hp * LITERS_PER_HOUR_PER_HP * area;
   if (!(denom > 0)) return null;
-  const hours = waterLiters / denom;
-  return hours * 60;
+  return (waterLiters / denom) * 60;
 }
 
 function formatPumpHours(minutes: number | null): string {
   if (minutes == null) return "—";
   if (!(minutes > 0)) return "0 h";
   const hours = minutes / 60;
-  if (hours >= 10) return `${hours.toFixed(1)} h`;
   if (hours >= 1) {
     const h = Math.floor(hours);
     const m = Math.round((hours - h) * 60);
+    if (m >= 60) return `${h + 1}h`;
     return m > 0 ? `${h}h ${m}m` : `${h}h`;
   }
   const m = Math.floor(minutes);
@@ -155,6 +232,53 @@ function resolveAreaAcres(
     const acres = oneMm / 4046.8564224;
     return acres > 0 ? acres : null;
   }
+  return null;
+}
+
+/**
+ * Same acre value as map label (e.g. 1.41 acre):
+ * 1) area_acres fields
+ * 2) polygon/boundary calculated acres
+ * 3) area_size as acres (app stores acres, not hectares)
+ */
+function resolvePlotAreaAcresFromProfile(
+  selectedPlot: any,
+  firstFarm: any,
+): number | null {
+  const acresDirect = parseAreaAcres(
+    selectedPlot?.area_acres ??
+      selectedPlot?.soil?.area_acres ??
+      firstFarm?.area_acres ??
+      firstFarm?.soil?.area_acres,
+  );
+  if (acresDirect != null) return Number(acresDirect.toFixed(2));
+
+  const ring =
+    selectedPlot?.coordinates?.boundary?.coordinates?.[0] ||
+    selectedPlot?.boundary?.coordinates?.[0] ||
+    firstFarm?.boundary?.coordinates?.[0] ||
+    firstFarm?.coordinates?.boundary?.coordinates?.[0];
+  if (Array.isArray(ring) && ring.length >= 3) {
+    const metrics = calculateAreaMetricsFromGeometry({
+      type: "Polygon",
+      coordinates: [ring],
+    });
+    if (metrics?.acres != null && metrics.acres > 0) {
+      return Number(metrics.acres.toFixed(2));
+    }
+  }
+
+  // In this app area_size is typically acres (see farm list / fertilizer UI).
+  const sizeAsAcres = parseAreaAcres(
+    selectedPlot?.area_size_numeric ??
+      selectedPlot?.area_size ??
+      firstFarm?.area_size_numeric ??
+      firstFarm?.area_size ??
+      selectedPlot?.area ??
+      firstFarm?.area,
+  );
+  if (sizeAsAcres != null) return Number(sizeAsAcres.toFixed(2));
+
   return null;
 }
 
@@ -457,16 +581,21 @@ const IrrigationSchedule: React.FC = () => {
       "";
     setPlotName(plotId);
 
-    const firstFarm =
-      selectedPlot?.farms?.[0] ??
+    // Collect irrigation from plot farms + top-level profile farms for this plot.
+    const plotFarmsRaw =
+      selectedPlot?.farms ??
       (Array.isArray((selectedPlot as any)?.farm)
-        ? (selectedPlot as any).farm[0]
-        : (selectedPlot as any)?.farm) ??
-      null;
+        ? (selectedPlot as any).farm
+        : (selectedPlot as any)?.farm
+          ? [(selectedPlot as any).farm]
+          : []);
+    const firstFarm =
+      (Array.isArray(plotFarmsRaw) ? plotFarmsRaw[0] : plotFarmsRaw) ?? null;
     const firstIrrigation =
       firstFarm?.irrigations?.[0] ??
       firstFarm?.irrigation ??
       (selectedPlot as any)?.irrigations?.[0] ??
+      (selectedPlot as any)?.irrigation ??
       null;
     const irrigationCode = String(
       firstIrrigation?.irrigation_type_code ??
@@ -477,6 +606,22 @@ const IrrigationSchedule: React.FC = () => {
     )
       .trim()
       .toLowerCase();
+    const resolvedMotorHp = resolveMotorHorsepower(
+      firstIrrigation,
+      firstFarm,
+      selectedPlot,
+      profile,
+      ...(Array.isArray(plotFarmsRaw) ? plotFarmsRaw : []),
+      ...(Array.isArray(profile?.farms) ? profile.farms : []),
+      ...(Array.isArray(profile?.plots) ? profile.plots : []),
+    );
+    if (import.meta.env.DEV) {
+      console.debug("[IrrigationSchedule] Motor HP for hours:", resolvedMotorHp, {
+        plot: plotId,
+        fromIrrigation: firstIrrigation?.motor_horsepower ?? firstIrrigation?.motor_Horsepower,
+        fromFarm: firstFarm?.motor_horsepower ?? firstFarm?.motor_Horsepower,
+      });
+    }
     setIrrigationSystem({
       irrigationTypeCode: irrigationCode.includes("drip") ? "drip" : "flood",
       flowRateLph: toFiniteNumber(
@@ -493,9 +638,7 @@ const IrrigationSchedule: React.FC = () => {
       totalPlants: toFiniteNumber(firstFarm?.plants_in_field) ?? 0,
       spacingA: toFiniteNumber(firstFarm?.spacing_a) ?? 0,
       spacingB: toFiniteNumber(firstFarm?.spacing_b) ?? 0,
-      motorHp: toFiniteNumber(
-        firstIrrigation?.motor_horsepower ?? firstFarm?.motor_horsepower,
-      ),
+      motorHp: resolvedMotorHp,
       pipeWidthInches: toFiniteNumber(
         firstIrrigation?.pipe_width_inches ?? firstFarm?.pipe_width_inches,
       ),
@@ -505,23 +648,7 @@ const IrrigationSchedule: React.FC = () => {
       ),
     });
 
-    setPlotAreaAcres(
-      (() => {
-        const acresDirect = parseAreaAcres(
-          (selectedPlot as any)?.area_acres ??
-            (selectedPlot as any)?.soil?.area_acres ??
-            firstFarm?.area_acres,
-        );
-        if (acresDirect != null) return acresDirect;
-        const hectares = parseAreaAcres(
-          (selectedPlot as any)?.area_size_numeric ??
-            (selectedPlot as any)?.area_size ??
-            firstFarm?.area_size_numeric ??
-            firstFarm?.area_size,
-        );
-        return hectares != null ? hectares * 2.47105 : null;
-      })(),
-    );
+    setPlotAreaAcres(resolvePlotAreaAcresFromProfile(selectedPlot, firstFarm));
 
     try {
       let latN: number | null = null;
@@ -779,11 +906,15 @@ const IrrigationSchedule: React.FC = () => {
         irrigationHours = 0;
       }
 
-      // Hours from the same Need (KL) shown in the table
+      // Hours: Motor HP × profile/map acres (do NOT use one_mm area — that was ~1.56 vs map 1.41)
+      const areaForHours =
+        plotAreaAcres != null && plotAreaAcres > 0
+          ? plotAreaAcres
+          : resolveAreaAcres(null, hist.oneMmLiters);
       const pumpMinutes = calcPumpDurationMinutes(
         irrigKl,
         irrigationSystem.motorHp,
-        resolveAreaAcres(plotAreaAcres, hist.oneMmLiters),
+        areaForHours,
       );
 
       scheduleData.push({
@@ -889,7 +1020,7 @@ const IrrigationSchedule: React.FC = () => {
           <div className="irrigation-status-detail">{needKl.toFixed(1)}</div>
         ) : (
           <div className="irrigation-status-detail irrigation-status-detail--secondary">
-            No water required
+            {/* No water required */}
           </div>
         )}
       </div>
@@ -993,7 +1124,16 @@ const IrrigationSchedule: React.FC = () => {
                     !day.isToday
                       ? "Hours shown for today only"
                       : day.pumpMinutes != null && day.pumpMinutes > 0
-                        ? `Need ${Number(day.irrigationNeedKl || 0).toFixed(1)} KL → ${(Number(day.pumpMinutes) / 60).toFixed(3)} h · (Need×1000) ÷ (HP×7000×area)`
+                        ? `Need ${Number(day.irrigationNeedKl || 0).toFixed(1)} KL → ${(Number(day.pumpMinutes) / 60).toFixed(3)} h · Motor HP ${
+                            irrigationSystem.motorHp != null &&
+                            irrigationSystem.motorHp > 0
+                              ? irrigationSystem.motorHp
+                              : `${DEFAULT_MOTOR_HP} (default)`
+                          } · Area ${
+                            plotAreaAcres != null && plotAreaAcres > 0
+                              ? plotAreaAcres
+                              : "?"
+                          } acre · (Water L / ((MotorHP×7000)×Area))×60`
                         : "No irrigation needed"
                   }
                 >
@@ -1003,7 +1143,9 @@ const IrrigationSchedule: React.FC = () => {
                     <div className="loading-spinner-small" />
                   ) : (
                     formatPumpHours(
-                      day.pumpMinutes == null ? null : Number(day.pumpMinutes),
+                      day.pumpMinutes == null
+                        ? null
+                        : Number(day.pumpMinutes),
                     )
                   )}
                 </div>
