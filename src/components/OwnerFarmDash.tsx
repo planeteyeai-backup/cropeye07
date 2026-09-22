@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+﻿import React, { useState, useEffect, useRef } from "react";
 import {
   Line,
   XAxis,
@@ -6,8 +6,6 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  PieChart,
-  Pie,
   Cell,
   ReferenceLine,
   ReferenceArea,
@@ -435,7 +433,7 @@ function parseCreatedByUsername(createdBy: unknown): string | null {
   return match ? match[1].toLowerCase() : null;
 }
 
-/** Candidate industry/factory ids from a manager row (may be owner_id — validate later). */
+/** Candidate industry/factory ids from a manager row (may be owner_id � validate later). */
 function factoryIdCandidatesFromManager(manager: any): string[] {
   const raw = [
     manager?.industry_id,
@@ -467,7 +465,7 @@ function nestedOfficerIdsFromManager(manager: any): string[] {
 }
 
 /**
- * Map manager/industry → Events factory id for GET /factories/{id}/dashboard.
+ * Map manager/industry ? Events factory id for GET /factories/{id}/dashboard.
  * Never use Django owner_id / manager user id (those 404 on the Events API).
  */
 async function resolveFactoryIdForManagerSelection(
@@ -738,7 +736,7 @@ async function loadPlotsFromFieldOfficerApi(
   return { farmer, plots };
 }
 
-/** Events/FastAPI plot key — `{gat_number}_{plot_number}`, not username or farm_uid. */
+/** Events/FastAPI plot key � `{gat_number}_{plot_number}`, not username or farm_uid. */
 function resolveEventsPlotId(farm: any, _farmerCtx?: any): string | null {
   const fromFarm = buildGatPlotName(farm);
   if (fromFarm) return fromFarm;
@@ -888,7 +886,7 @@ function applyLeafletCoords(
   if (coords.length === 0) return false;
   setPlotCoordinates(coords);
   setMapCenter(calculateCenterFromCoords(coords));
-  // Do not remount MapContainer here — causes "Map container is already initialized".
+  // Do not remount MapContainer here � causes "Map container is already initialized".
   // Center/polygon updates via MapAutoCenter + children instead.
   return true;
 }
@@ -1193,7 +1191,7 @@ const OwnerFarmDash: React.FC = () => {
   useEffect(() => {
     if (!selectedManagerId) {
       setFieldOfficers([]);
-      // Do not reset FO/farmer on every hierarchy refresh — that re-fires factory fetch
+      // Do not reset FO/farmer on every hierarchy refresh � that re-fires factory fetch
       // and can drop owner totals while the slow dashboard request is in flight.
       if (selectedFieldOfficerId) {
         setSelectedFieldOfficerId("");
@@ -1238,11 +1236,11 @@ const OwnerFarmDash: React.FC = () => {
     setSelectedPlotId("");
   }, [selectedManagerId, teamFieldOfficersRaw, managers]); // eslint-disable-line react-hooks/exhaustive-deps -- intentional: avoid FO clear loop
 
-  // KPI cards: factory dashboard only (do NOT wait on agroStats — that was
+  // KPI cards: factory dashboard only (do NOT wait on agroStats � that was
   // keeping spinners forever while FO agroStats 404/hang on Cloudflare).
-  // 1) No manager → GET /factories/dashboard (detailed aggregate)
-  // 2) Manager → GET /factories/{industry_id}/dashboard
-  // 3) Farmer selected → skip factory cards
+  // 1) No manager ? GET /factories/dashboard (detailed aggregate)
+  // 2) Manager ? GET /factories/{industry_id}/dashboard
+  // 3) Farmer selected ? skip factory cards
   useEffect(() => {
     const foId = selectedFieldOfficerId
       ? String(selectedFieldOfficerId).trim()
@@ -1258,7 +1256,7 @@ const OwnerFarmDash: React.FC = () => {
       return;
     }
 
-    // Manager picked but hierarchy not loaded yet — wait (don't cancel later).
+    // Manager picked but hierarchy not loaded yet � wait (don't cancel later).
     if (managerId && managerDashKey === "wait") {
       setLoadingFactoryDash(true);
       return;
@@ -1314,7 +1312,7 @@ const OwnerFarmDash: React.FC = () => {
           if (requestId !== factoryDashRequestIdRef.current) return;
 
           // List /factories/dashboard rows are metric-empty shells. Biomass +
-          // recovery live only on GET /factories/{id}/dashboard — never fall
+          // recovery live only on GET /factories/{id}/dashboard � never fall
           // back to the shell or owner-root rollup for a single district.
           if (factoryId) {
             factory = await fetchFactoryOwnerDashboardById(
@@ -1369,7 +1367,7 @@ const OwnerFarmDash: React.FC = () => {
     teamFieldOfficersRaw,
   ]); // eslint-disable-line react-hooks/exhaustive-deps -- owner resolved inside
 
-  // Map polygons — all owner industries when no manager; filter when manager/FO selected.
+  // Map polygons � all owner industries when no manager; filter when manager/FO selected.
   useEffect(() => {
     const foId = selectedFieldOfficerId
       ? String(selectedFieldOfficerId).trim()
@@ -1444,7 +1442,7 @@ const OwnerFarmDash: React.FC = () => {
         const fromAgro = buildFoMapPlotsFromAgroStats(agroStats);
         mapPlots = mergeFoMapPlots(mapPlots, fromAgro);
 
-        // Manager selected → keep that factory/industry plots when ids match.
+        // Manager selected ? keep that factory/industry plots when ids match.
         if (managerId && !foId) {
           const factoryId =
             selectedManagerForDash?.industry_id ??
@@ -1688,7 +1686,7 @@ const OwnerFarmDash: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- load dashboard once per plot id
   }, [selectedPlotId]);
 
-  // Backend Growth tile fill — only when Mapping host is configured (optional testing).
+  // Backend Growth tile fill � only when Mapping host is configured (optional testing).
   const plotCoordsKey =
     selectedPlotId && plotCoordinates.length >= 3
       ? `${selectedPlotId}|${plotCoordinates
@@ -1936,7 +1934,7 @@ const OwnerFarmDash: React.FC = () => {
   const fetchAllData = async (): Promise<void> => {
     if (!selectedPlotId) return;
     setPlotStatsError(null);
-    // Clear previous farmer/plot metrics so cards don't stay on stale "—" / FO rollup.
+    // Clear previous farmer/plot metrics so cards don't stay on stale "�" / FO rollup.
     setMetrics((prev) => ({
       ...prev,
       brix: null,
@@ -2166,7 +2164,7 @@ const OwnerFarmDash: React.FC = () => {
                     }
                     return;
                   }
-                  // 404 → try next plot-name candidate (slash vs underscore).
+                  // 404 ? try next plot-name candidate (slash vs underscore).
                   const status = (singleErr as { response?: { status?: number } })
                     ?.response?.status;
                   if (status === 404) continue;
@@ -2183,7 +2181,7 @@ const OwnerFarmDash: React.FC = () => {
               }
             }
 
-            // Fallback: FO / plot agroStats path — never call removed /plots/agroStats bulk.
+            // Fallback: FO / plot agroStats path � never call removed /plots/agroStats bulk.
             if (!plotData) {
               console.warn(
                 "[OwnerFarmDash] analyzeSinglePlot empty; skipping removed /plots/agroStats bulk endpoint",
@@ -2269,7 +2267,7 @@ const OwnerFarmDash: React.FC = () => {
           });
       }
 
-      // Water stress (SAR API) — crop condition indices + stress event cards
+      // Water stress (SAR API) � crop condition indices + stress event cards
       const plotForWaterStress = findPlotInSelection(selectedPlotId);
       const plantationForWaterStress =
         plotForWaterStress?.plantation_date ??
@@ -2294,7 +2292,7 @@ const OwnerFarmDash: React.FC = () => {
           setLoadingSections((prev) => ({ ...prev, waterStress: false }));
         });
 
-      // NDRE stress events — chart overlay only (not summary cards)
+      // NDRE stress events � chart overlay only (not summary cards)
       if (!cachedStress) {
         makeRequestWithRetry(
           `${BASE_URL}/plots/${eventsPlotId}/stress?index_type=NDRE&threshold=0.15`,
@@ -2538,7 +2536,7 @@ const OwnerFarmDash: React.FC = () => {
           });
         }
       }
-      } // end incomplete hierarchy → team-connect merge
+      } // end incomplete hierarchy ? team-connect merge
 
       // If team-connect gives managers but no flat field-officers array,
       // try deriving field officers from nested manager objects.
@@ -2717,7 +2715,7 @@ const OwnerFarmDash: React.FC = () => {
       findPlotInSelection(plotId) ??
       (farmerId ? findPlotRef(farmerPlotsCache[farmerId] ?? [], plotId) : null);
 
-    // Always re-fetch Django /farms/?farmer_id= — FO/Events polygons stay stale after KML edit.
+    // Always re-fetch Django /farms/?farmer_id= � FO/Events polygons stay stale after KML edit.
     if (farmerId) {
       try {
         const farmsRes = await getFarmsByFarmerId(farmerId);
@@ -3085,7 +3083,7 @@ const OwnerFarmDash: React.FC = () => {
             maxZoom,
             animate: false,
           });
-          // Statewide / multi-district bounds zoom too far out — plots become dots.
+          // Statewide / multi-district bounds zoom too far out � plots become dots.
           if (minZoom != null && map.getZoom() < minZoom) {
             map.setView(bounds.getCenter(), minZoom, { animate: false });
           }
@@ -3098,8 +3096,8 @@ const OwnerFarmDash: React.FC = () => {
   }
 
   /** Owner FO / industry plot cloud.
-   * One factory → keep a readable mid zoom.
-   * All districts → fit full bounds (do NOT force zoom-in; that hid most plots).
+   * One factory ? keep a readable mid zoom.
+   * All districts ? fit full bounds (do NOT force zoom-in; that hid most plots).
    */
   function FitFoMapPlots({ plots }: { plots: FoMapPlot[] }) {
     const coords = plots.flatMap((p) => p.positions);
@@ -3118,7 +3116,7 @@ const OwnerFarmDash: React.FC = () => {
     }
     const latSpan = Number.isFinite(minLat) ? maxLat - minLat : 0;
     const lngSpan = Number.isFinite(minLng) ? maxLng - minLng : 0;
-    // ~0.35° ≈ 35–40 km — wider than one factory / district cluster
+    // ~0.35� � 35�40 km � wider than one factory / district cluster
     const multiDistrict = latSpan > 0.35 || lngSpan > 0.35;
 
     return (
@@ -3140,7 +3138,7 @@ const OwnerFarmDash: React.FC = () => {
     fillOpacity: 0.45,
   });
 
-  /** FO / district overview — green fill on every plot so map is not hollow outlines. */
+  /** FO / district overview � green fill on every plot so map is not hollow outlines. */
   const getFoPlotBorderStyle = (plotId: string) => {
     const sel = String(selectedPlotId || "")
       .replace(/^"|"$/g, "")
@@ -3163,7 +3161,7 @@ const OwnerFarmDash: React.FC = () => {
     };
   };
 
-  // 1–2) No farmer → factory dashboard cards. 3) Farmer selected → plot/farmer metrics.
+  // 1�2) No farmer ? factory dashboard cards. 3) Farmer selected ? plot/farmer metrics.
   const useFoFactoryMetrics =
     !selectedFarmerId && (Boolean(factoryRollup) || loadingFactoryDash);
   const foCropStatusLabel = formatFactoryCropStatusLabel(factoryRollup);
@@ -3243,19 +3241,6 @@ const OwnerFarmDash: React.FC = () => {
       ? foBiomassAvg * 0.12
       : 0
     : metrics.biomass ?? 0;
-
-  const biomassData = [
-    {
-      name: "Total Biomass",
-      value: totalBiomass,
-      fill: "#3b82f6",
-    },
-    {
-      name: "Underground Biomass",
-      value: currentBiomass,
-      fill: "#10b981",
-    },
-  ];
 
   // Recovery Rate Comparison (factory mode = Regional + Top 25 recovery %)
   const recoveryComparisonData = useFoFactoryMetrics
@@ -3481,6 +3466,31 @@ const OwnerFarmDash: React.FC = () => {
     );
   };
 
+  // Shared metric-card layout: equal height in grid row, footer pinned to bottom.
+  const metricCardShell =
+    "bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-3 border hover:shadow-xl transition-all duration-300 flex flex-col gap-1.5 h-full w-full [&>*:last-child]:mt-auto";
+
+  const MetricListRow = ({
+    label,
+    value,
+    tone,
+  }: {
+    label: string;
+    value: React.ReactNode;
+    tone: string;
+  }) => (
+    <div className="flex items-center justify-between gap-2 text-xs leading-4 w-full">
+      <span className="text-gray-700 text-left whitespace-nowrap shrink-0">
+        {label}
+      </span>
+      <span
+        className={`font-medium tabular-nums whitespace-nowrap shrink-0 ${tone}`}
+      >
+        {value}
+      </span>
+    </div>
+  );
+
   // IMPORTANT: Do not block the whole UI on hierarchy loading.
   // Dropdowns will show "Loading..." until data arrives.
   // This avoids long full-screen spinners for Owner dashboard.
@@ -3509,8 +3519,8 @@ const OwnerFarmDash: React.FC = () => {
                     endpoint: `${import.meta.env.VITE_API_BASE_URL || "https://cropeye-backendd.up.railway.app/api"}/farms/?farmer_id={id}`,
                     method: "GET",
                     bearerToken: localStorage.getItem("token")
-                      ? "✅ Present"
-                      : "❌ Missing",
+                      ? "? Present"
+                      : "? Missing",
                     tokenPreview:
                       localStorage.getItem("token")?.substring(0, 30) + "...",
                     // totalFarmers: farmers.length,
@@ -3532,7 +3542,7 @@ const OwnerFarmDash: React.FC = () => {
               </pre>
             </div>
             <p className="text-xs text-gray-400 mt-2">
-              💡 Check the browser console for detailed API request/response
+              ?? Check the browser console for detailed API request/response
               logs
             </p>
           </div>
@@ -3569,7 +3579,7 @@ const OwnerFarmDash: React.FC = () => {
                             {manager.first_name} {manager.last_name} (
                             {manager.field_officers_count ??
                               manager.field_officers?.length ??
-                              (manager.field_officers_count === 0 ? 0 : "—")}{" "}
+                              (manager.field_officers_count === 0 ? 0 : "�")}{" "}
                             FOs)
                           </option>
                         ))}
@@ -3737,222 +3747,212 @@ const OwnerFarmDash: React.FC = () => {
           </div>
         )}
         {/* Top Priority Metrics - 4 Key Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-green-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2">
-              <MapPin className="w-6 h-6 text-green-600" />
-              <div className="text-right">
-                <div className="text-2xl font-bold text-gray-800">
-                  {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : displayArea != null ? (
-                    Number(displayArea).toFixed(2)
-                  ) : (
-                    "-"
-                  )}
-                </div>
-                <div className="text-sm font-semibold text-green-600">acre</div>
-              </div>
-            </div>
-            <p className="text-xs text-gray-600 font-medium">Field Area</p>
-          </div>
-
-          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-emerald-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2 gap-2">
-              <Leaf className="w-6 h-6 text-emerald-600 shrink-0" />
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 items-stretch">
+          <div className={`${metricCardShell} border-green-200`}>
+            <div className="flex items-start justify-between gap-2">
+              <MapPin className="w-6 h-6 text-green-600 shrink-0 mt-0.5" />
               <div className="text-right min-w-0 flex-1">
-                <div className="text-xs sm:text-sm font-bold text-gray-800 leading-snug break-words">
-                  {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
-                    <Loader2 className="w-5 h-5 animate-spin ml-auto" />
-                  ) : useFoFactoryMetrics && factoryRollup?.crop_status?.counts ? (
-                    <div className="space-y-0.5">
-                      <div>
-                        Harvest Maturity:{" "}
-                        {Number(
-                          factoryRollup.crop_status.counts.harvest_maturity ?? 0,
-                        )}{" "}
-                        <span className="font-semibold text-emerald-600">
-                          plots/h
-                        </span>
-                      </div>
-                      <div>
-                        Grand Growth:{" "}
-                        {Number(
-                          factoryRollup.crop_status.counts.grand_growth ?? 0,
-                        )}{" "}
-                        <span className="font-semibold text-emerald-600">
-                          plots/h
-                        </span>
-                      </div>
-                      <div>
-                        Tillering:{" "}
-                        {Number(factoryRollup.crop_status.counts.tillering ?? 0)}{" "}
-                        <span className="font-semibold text-emerald-600">
-                          plots/h
-                        </span>
-                      </div>
-                      {Number(
-                        factoryRollup.crop_status.counts.other_or_unknown ?? 0,
-                      ) > 0 ? (
-                        <div>
-                          Other:{" "}
-                          {Number(
-                            factoryRollup.crop_status.counts.other_or_unknown ??
-                              0,
-                          )}{" "}
-                          <span className="font-semibold text-emerald-600">
-                            plots/h
-                          </span>
-                        </div>
-                      ) : null}
+                {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
+                  <Loader2 className="w-5 h-5 animate-spin ml-auto" />
+                ) : (
+                  <>
+                    <div className="text-2xl font-bold text-gray-800 tabular-nums">
+                      {displayArea != null ? Number(displayArea).toFixed(2) : "-"}
                     </div>
-                  ) : (
-                    displayCropStatus || "-"
-                  )}
-                </div>
+                    <div className="text-sm font-medium text-green-600">acre</div>
+                  </>
+                )}
               </div>
             </div>
-            <p className="text-xs text-gray-600 font-medium mt-3">
-              Crop Status
+            <p className="text-xs text-gray-800 font-bold">
+              Field Area
             </p>
           </div>
 
-          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-orange-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2 gap-2">
-              <Calendar className="w-6 h-6 text-orange-600 shrink-0" />
-              <div className="text-right min-w-0 flex-1">
+          <div className={`${metricCardShell} border-emerald-200`}>
+            {useFoFactoryMetrics && factoryRollup?.crop_status?.counts ? (
+              <>
+                <div className="flex items-center gap-2">
+                  <Leaf className="w-5 h-5 text-emerald-600 shrink-0" />
+                </div>
+                {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                ) : (
+                  <div className="space-y-1 w-full">
+                    <MetricListRow
+                      label="Harvest Maturity"
+                      value={`${Number(factoryRollup.crop_status.counts.harvest_maturity ?? 0)} plots`}
+                      tone="text-emerald-600"
+                    />
+                    <MetricListRow
+                      label="Grand Growth"
+                      value={`${Number(factoryRollup.crop_status.counts.grand_growth ?? 0)} plots`}
+                      tone="text-emerald-600"
+                    />
+                    <MetricListRow
+                      label="Tillering"
+                      value={`${Number(factoryRollup.crop_status.counts.tillering ?? 0)} plots`}
+                      tone="text-emerald-600"
+                    />
+                    {Number(factoryRollup.crop_status.counts.other_or_unknown ?? 0) >
+                    0 ? (
+                      <MetricListRow
+                        label="Other"
+                        value={`${Number(factoryRollup.crop_status.counts.other_or_unknown ?? 0)} plots`}
+                        tone="text-emerald-600"
+                      />
+                    ) : null}
+                  </div>
+                )}
+                <p className="text-xs text-gray-800 font-bold">Crop Status</p>
+              </>
+            ) : (
+              <>
+                <div className="flex items-start justify-between gap-2">
+                  <Leaf className="w-6 h-6 text-emerald-600 shrink-0 mt-0.5" />
+                  <div className="text-right min-w-0">
+                    {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
+                      <Loader2 className="w-5 h-5 animate-spin ml-auto" />
+                    ) : (
+                      <div className="text-2xl font-bold text-gray-800">
+                        {displayCropStatus || "-"}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <p className="text-xs text-gray-800 font-bold">Crop Status</p>
+              </>
+            )}
+          </div>
+
+          <div className={`${metricCardShell} border-orange-200`}>
+            {useFoFactoryMetrics && factoryRollup?.days_to_harvest ? (
+              <>
+                <div className="flex items-center gap-2">
+                  <Calendar className="w-5 h-5 text-orange-600 shrink-0" />
+                </div>
                 {foCardsLoading ||
                 (useFoFactoryMetrics && loadingFactoryDash) ||
                 (!useFoFactoryMetrics && loadingData) ? (
-                  <Loader2 className="w-5 h-5 animate-spin ml-auto" />
-                ) : useFoFactoryMetrics && factoryRollup?.days_to_harvest ? (
-                  <div className="text-[11px] sm:text-xs font-bold text-gray-800 leading-snug space-y-0.5">
-                    <div>
-                      ≤15 days:{" "}
-                      {Number(
-                        factoryRollup.days_to_harvest.within_15_days ?? 0,
-                      )}{" "}
-                      <span className="font-semibold text-orange-600">
-                        plots/h
-                      </span>
-                    </div>
-                    <div>
-                      ≤1 month:{" "}
-                      {Number(
-                        factoryRollup.days_to_harvest.within_1_month ?? 0,
-                      )}{" "}
-                      <span className="font-semibold text-orange-600">
-                        plots/h
-                      </span>
-                    </div>
-                    <div>
-                      ≤45 days:{" "}
-                      {Number(
-                        factoryRollup.days_to_harvest.within_45_days ?? 0,
-                      )}{" "}
-                      <span className="font-semibold text-orange-600">
-                        plots/h
-                      </span>
-                    </div>
-                    <div>
-                      ≤90 days:{" "}
-                      {Number(
-                        factoryRollup.days_to_harvest.within_90_days ?? 0,
-                      )}{" "}
-                      <span className="font-semibold text-orange-600">
-                        plots/h
-                      </span>
-                    </div>
-                    <div>
-                      ≤120 days:{" "}
-                      {Number(
-                        factoryRollup.days_to_harvest.within_120_days ?? 0,
-                      )}{" "}
-                      <span className="font-semibold text-orange-600">
-                        plots/h
-                      </span>
-                    </div>
-                  </div>
+                  <Loader2 className="w-5 h-5 animate-spin" />
                 ) : (
-                  <div className="text-right">
-                    <div className="text-2xl font-bold text-gray-800">
-                      {metrics.growthStage
-                        ?.toLowerCase()
-                        .includes("harvested")
-                        ? 0
-                        : metrics.daysToHarvest !== null
-                          ? metrics.daysToHarvest
-                          : "-"}
-                    </div>
-                    <div className="text-sm font-semibold text-orange-600">
-                      Days
-                    </div>
+                  <div className="space-y-1 w-full">
+                    <MetricListRow
+                      label="<=15 days"
+                      value={`${Number(factoryRollup.days_to_harvest.within_15_days ?? 0)} plots`}
+                      tone="text-orange-600"
+                    />
+                    <MetricListRow
+                      label="<=1 month"
+                      value={`${Number(factoryRollup.days_to_harvest.within_1_month ?? 0)} plots`}
+                      tone="text-orange-600"
+                    />
+                    <MetricListRow
+                      label="<=45 days"
+                      value={`${Number(factoryRollup.days_to_harvest.within_45_days ?? 0)} plots`}
+                      tone="text-orange-600"
+                    />
+                    <MetricListRow
+                      label="<=90 days"
+                      value={`${Number(factoryRollup.days_to_harvest.within_90_days ?? 0)} plots`}
+                      tone="text-orange-600"
+                    />
+                    <MetricListRow
+                      label="<=120 days"
+                      value={`${Number(factoryRollup.days_to_harvest.within_120_days ?? 0)} plots`}
+                      tone="text-orange-600"
+                    />
+                  </div>
+                )}
+                <p className="text-xs text-gray-800 font-bold">
+                  Days to Harvest
+                  {factoryRollup.days_to_harvest.plots_with_days_to_harvest !=
+                  null ? (
+                    <span className="text-gray-400 font-normal">
+                      {" "}
+                      -{" "}
+                      {Number(
+                        factoryRollup.days_to_harvest.plots_with_days_to_harvest,
+                      )}{" "}
+                      plots
+                    </span>
+                  ) : null}
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="flex items-start justify-between gap-2">
+                  <Calendar className="w-6 h-6 text-orange-600 shrink-0 mt-0.5" />
+                  <div className="text-right min-w-0">
+                    {foCardsLoading ||
+                    (useFoFactoryMetrics && loadingFactoryDash) ||
+                    (!useFoFactoryMetrics && loadingData) ? (
+                      <Loader2 className="w-5 h-5 animate-spin ml-auto" />
+                    ) : (
+                      <>
+                        <div className="text-2xl font-bold text-gray-800 tabular-nums">
+                          {metrics.growthStage?.toLowerCase().includes("harvested")
+                            ? 0
+                            : metrics.daysToHarvest !== null
+                              ? metrics.daysToHarvest
+                              : "-"}
+                        </div>
+                        <div className="text-sm font-medium text-orange-600">
+                          Days
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <p className="text-xs text-gray-800 font-bold">
+                  Days to Harvest
+                </p>
+              </>
+            )}
+          </div>
+
+          <div className={`${metricCardShell} border-blue-200`}>
+            <div className="flex items-start justify-between gap-2">
+              <Beaker className="w-6 h-6 text-blue-600 shrink-0 mt-0.5" />
+              <div className="text-right min-w-0">
+                {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
+                  <Loader2 className="w-5 h-5 animate-spin ml-auto" />
+                ) : (
+                  <div className="text-2xl font-bold text-gray-800 flex items-baseline gap-1 justify-end tabular-nums">
+                    {displayBrix != null ? Number(displayBrix).toFixed(2) : "-"}
+                    <span className="text-sm font-medium text-blue-600">
+                      Brix(Avg)
+                    </span>
                   </div>
                 )}
               </div>
             </div>
-            <p className="text-xs text-gray-600 font-medium">
-              Days to Harvest
-              {useFoFactoryMetrics &&
-              factoryRollup?.days_to_harvest?.plots_with_days_to_harvest !=
-                null ? (
-                <span className="text-gray-400 font-normal">
-                  {" "}
-                  ·{" "}
-                  {Number(
-                    factoryRollup.days_to_harvest.plots_with_days_to_harvest,
-                  )}{" "}
-                  plots tracked
-                </span>
-              ) : null}
-            </p>
-          </div>
-
-          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-blue-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2">
-              <Beaker className="w-6 h-6 text-blue-600" />
-              <div className="text-right">
-                <div className="text-xl font-bold text-gray-800">
-                  {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : (
-                    <>
-                      {displayBrix != null ? Number(displayBrix).toFixed(2) : "-"}
-                      <span className="text-xl font-bold text-blue-600">
-                        {"\u00B0"}Brix(Avg)
-                      </span>
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between text-xl text-gray-600">
-              <p className="text-xs text-gray-600 font-medium">Sugar Content</p>
-              <div className="flex gap-4">
-                <div className="text-center">
-                  <div className="font-semibold text-red-600">
-                    {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : displayBrixMax != null ? (
-                      Number(displayBrixMax).toFixed(2)
-                    ) : (
-                      "-"
-                    )}
+            <div className="flex items-center justify-between gap-2 text-xs text-gray-600">
+              <p className="font-bold shrink-0 text-gray-800">Sugar Content</p>
+              <div className="flex items-center gap-3">
+                <div className="text-right">
+                  <div className="text-sm font-semibold text-red-600 tabular-nums leading-tight">
+                    {foCardsLoading || (!useFoFactoryMetrics && loadingData)
+                      ? "-"
+                      : displayBrixMax != null
+                        ? Number(displayBrixMax).toFixed(2)
+                        : "-"}
                   </div>
-                  <div className="text-gray-500">Max</div>
-                </div>
-                <div className="text-center">
-                  <div className="font-semibold text-green-600">
-                    {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : displayBrixMin != null ? (
-                      Number(displayBrixMin).toFixed(2)
-                    ) : (
-                      "-"
-                    )}
+                  <div className="text-[10px] text-gray-500 uppercase tracking-wide leading-tight">
+                    Max
                   </div>
-                  <div className="text-gray-500">Min</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-sm font-semibold text-green-600 tabular-nums leading-tight">
+                    {foCardsLoading || (!useFoFactoryMetrics && loadingData)
+                      ? "-"
+                      : displayBrixMin != null
+                        ? Number(displayBrixMin).toFixed(2)
+                        : "-"}
+                  </div>
+                  <div className="text-[10px] text-gray-500 uppercase tracking-wide leading-tight">
+                    Min
+                  </div>
                 </div>
               </div>
             </div>
@@ -3960,231 +3960,248 @@ const OwnerFarmDash: React.FC = () => {
         </div>
 
         {/* Additional Metrics Cards */}
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
-          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-purple-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2">
-              <Target className="w-6 h-6 text-purple-600" />
-              <div className="text-right">
-                <div className="text-2xl font-bold text-gray-800">
-                  {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : displayRecovery != null ? (
-                    Number(displayRecovery).toFixed(1)
-                  ) : (
-                    "-"
-                  )}
-                </div>
-                <div className="text-sm font-semibold text-purple-600">%</div>
-              </div>
-            </div>
-            <p className="text-xs text-gray-600 font-medium">Recovery Rate</p>
-          </div>
-
-          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-emerald-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2 gap-2">
-              <Gauge className="w-6 h-6 text-emerald-600 shrink-0" />
-              <div className="text-right min-w-0 flex-1">
-                {useFoFactoryMetrics ? (
-                  foCardsLoading ? (
-                    <Loader2 className="w-5 h-5 animate-spin ml-auto" />
-                  ) : factoryRollup?.field_score_distribution ? (
-                    <div className="text-[11px] sm:text-xs font-bold text-gray-800 leading-snug space-y-0.5">
-                      <div>
-                        &gt;80%:{" "}
-                        {Number(
-                          factoryRollup.field_score_distribution.above_80 ?? 0,
-                        )}{" "}
-                        <span className="font-semibold text-emerald-600">
-                          plots/h
-                        </span>
-                      </div>
-                      <div>
-                        60–80%:{" "}
-                        {Number(
-                          factoryRollup.field_score_distribution
-                            .between_60_80 ?? 0,
-                        )}{" "}
-                        <span className="font-semibold text-emerald-600">
-                          plots/h
-                        </span>
-                      </div>
-                      <div>
-                        40–60%:{" "}
-                        {Number(
-                          factoryRollup.field_score_distribution
-                            .between_40_60 ?? 0,
-                        )}{" "}
-                        <span className="font-semibold text-emerald-600">
-                          plots/h
-                        </span>
-                      </div>
-                      <div>
-                        &lt;40%:{" "}
-                        {Number(
-                          factoryRollup.field_score_distribution.below_40 ?? 0,
-                        )}{" "}
-                        <span className="font-semibold text-emerald-600">
-                          plots/h
-                        </span>
-                      </div>
-                    </div>
-                  ) : displayFieldScore != null ? (
-                    <>
-                      <div className="text-2xl font-bold text-gray-800">
-                        {Number(displayFieldScore).toFixed(1)}
-                      </div>
-                      <div className="text-sm font-semibold text-emerald-600">
-                        %
-                      </div>
-                    </>
-                  ) : (
-                    "-"
-                  )
-                ) : !selectedPlotId ? (
-                  "0"
-                ) : loadingData ||
-                  (metrics.fieldScore === null &&
-                    loadingSections.irrigation) ? (
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                ) : (
-                  <>
-                    <div className="text-2xl font-bold text-gray-800">
-                      {(metrics.fieldScore ?? 0).toFixed(1)}
-                    </div>
-                    <div className="text-sm font-semibold text-emerald-600">
-                      %
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
-            <p className="text-xs text-gray-600 font-medium">
-              Field Score
-              {useFoFactoryMetrics &&
-              factoryRollup?.field_score_distribution
-                ?.plots_with_field_score != null ? (
-                <span className="text-gray-400 font-normal">
-                  {" "}
-                  ·{" "}
-                  {Number(
-                    factoryRollup.field_score_distribution
-                      .plots_with_field_score,
-                  )}{" "}
-                  plots tracked
-                </span>
-              ) : null}
-            </p>
-          </div>
-
-          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-indigo-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2 gap-2">
-              <BarChart3 className="w-6 h-6 text-indigo-600 shrink-0" />
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4 items-stretch">
+          <div className={`${metricCardShell} border-purple-200`}>
+            <div className="flex items-start justify-between gap-2">
+              <Target className="w-6 h-6 text-purple-600 shrink-0 mt-0.5" />
               <div className="text-right min-w-0 flex-1">
                 {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
                   <Loader2 className="w-5 h-5 animate-spin ml-auto" />
-                ) : useFoFactoryMetrics &&
-                  factoryRollup?.expected_yield_distribution ? (
-                  <div className="text-[11px] sm:text-xs font-bold text-gray-800 leading-snug space-y-0.5">
-                    <div>
-                      &gt;100 T/h:{" "}
-                      {Number(
-                        factoryRollup.expected_yield_distribution.above_100 ??
-                          0,
-                      )}{" "}
-                      <span className="font-semibold text-indigo-600">
-                        plots/h
-                      </span>
-                    </div>
-                    <div>
-                      75–100 T/h:{" "}
-                      {Number(
-                        factoryRollup.expected_yield_distribution
-                          .between_75_100 ?? 0,
-                      )}{" "}
-                      <span className="font-semibold text-indigo-600">
-                        plots/h
-                      </span>
-                    </div>
-                    <div>
-                      50–75 T/h:{" "}
-                      {Number(
-                        factoryRollup.expected_yield_distribution
-                          .between_50_75 ?? 0,
-                      )}{" "}
-                      <span className="font-semibold text-indigo-600">
-                        plots/h
-                      </span>
-                    </div>
-                    <div>
-                      &lt;50 T/h:{" "}
-                      {Number(
-                        factoryRollup.expected_yield_distribution.below_50 ?? 0,
-                      )}{" "}
-                      <span className="font-semibold text-indigo-600">
-                        plots/h
-                      </span>
-                    </div>
-                  </div>
                 ) : (
                   <>
-                    <div className="text-2xl font-bold text-gray-800">
-                      {displayExpectedYield != null
-                        ? Number(displayExpectedYield).toFixed(1)
+                    <div className="text-2xl font-bold text-gray-800 tabular-nums">
+                      {displayRecovery != null
+                        ? Number(displayRecovery).toFixed(1)
                         : "-"}
                     </div>
-                    <div className="text-sm font-semibold text-indigo-600">
-                      {useFoFactoryMetrics ? "T/hectare" : "T/acre"}
-                    </div>
+                    <div className="text-sm font-medium text-purple-600">%</div>
                   </>
                 )}
               </div>
             </div>
+            <p className="text-xs text-gray-800 font-bold">
+              Recovery Rate
+            </p>
+          </div>
+
+          <div className={`${metricCardShell} border-emerald-200`}>
+            {useFoFactoryMetrics && factoryRollup?.field_score_distribution ? (
+              <>
+                <div className="flex items-center justify-between gap-2">
+                  <Gauge className="w-5 h-5 text-emerald-600 shrink-0" />
+                  <span className="text-[10px] text-emerald-600 font-medium uppercase tracking-wide">
+                    Score
+                  </span>
+                </div>
+                {foCardsLoading ? (
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                ) : (
+                  <div className="space-y-1 w-full">
+                    <MetricListRow
+                      label=">80%"
+                      value={Number(
+                        factoryRollup.field_score_distribution.above_80 ?? 0,
+                      )}
+                      tone="text-emerald-600"
+                    />
+                    <MetricListRow
+                      label="60-80%"
+                      value={Number(
+                        factoryRollup.field_score_distribution.between_60_80 ??
+                          0,
+                      )}
+                      tone="text-emerald-600"
+                    />
+                    <MetricListRow
+                      label="40-60%"
+                      value={Number(
+                        factoryRollup.field_score_distribution.between_40_60 ??
+                          0,
+                      )}
+                      tone="text-emerald-600"
+                    />
+                    <MetricListRow
+                      label="<40%"
+                      value={Number(
+                        factoryRollup.field_score_distribution.below_40 ?? 0,
+                      )}
+                      tone="text-emerald-600"
+                    />
+                  </div>
+                )}
+                <p className="text-xs text-gray-800 font-bold">
+                  Field Score
+                  {factoryRollup.field_score_distribution
+                    ?.plots_with_field_score != null ? (
+                    <span className="text-gray-400 font-normal">
+                      {" "}
+                      -{" "}
+                      {Number(
+                        factoryRollup.field_score_distribution
+                          .plots_with_field_score,
+                      )}{" "}
+                      plots
+                    </span>
+                  ) : null}
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="flex items-start justify-between gap-2">
+                  <Gauge className="w-6 h-6 text-emerald-600 shrink-0 mt-0.5" />
+                  <div className="text-right min-w-0">
+                    {useFoFactoryMetrics ? (
+                      foCardsLoading ? (
+                        <Loader2 className="w-5 h-5 animate-spin ml-auto" />
+                      ) : displayFieldScore != null ? (
+                        <>
+                          <div className="text-2xl font-bold text-gray-800 tabular-nums">
+                            {Number(displayFieldScore).toFixed(1)}
+                          </div>
+                          <div className="text-sm font-medium text-emerald-600">
+                            %
+                          </div>
+                        </>
+                      ) : (
+                        "-"
+                      )
+                    ) : !selectedPlotId ? (
+                      <div className="text-2xl font-bold text-gray-800">0</div>
+                    ) : loadingData ||
+                      (metrics.fieldScore === null &&
+                        loadingSections.irrigation) ? (
+                      <Loader2 className="w-5 h-5 animate-spin ml-auto" />
+                    ) : (
+                      <>
+                        <div className="text-2xl font-bold text-gray-800 tabular-nums">
+                          {(metrics.fieldScore ?? 0).toFixed(1)}
+                        </div>
+                        <div className="text-sm font-medium text-emerald-600">
+                          %
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <p className="text-xs text-gray-800 font-bold">Field Score</p>
+              </>
+            )}
+          </div>
+
+          <div className={`${metricCardShell} border-indigo-200`}>
             {useFoFactoryMetrics &&
             factoryRollup?.expected_yield_distribution ? (
-              <p className="text-xs text-gray-600 font-medium">
-                Expected Yield
-                {factoryRollup.expected_yield_distribution.plots_with_yield !=
-                null ? (
-                  <span className="text-gray-400 font-normal">
-                    {" "}
-                    ·{" "}
-                    {Number(
-                      factoryRollup.expected_yield_distribution.plots_with_yield,
-                    )}{" "}
-                    plots tracked
+              <>
+                <div className="flex items-center justify-between gap-2">
+                  <BarChart3 className="w-5 h-5 text-indigo-600 shrink-0" />
+                  <span className="text-[10px] text-indigo-600 font-medium uppercase tracking-wide">
+                    T/h
                   </span>
-                ) : null}
-              </p>
-            ) : (
-              <div className="flex items-center justify-between text-xs text-gray-600">
-                <p className="text-xs font-medium">Expected Yield</p>
-                <div className="flex gap-4">
-                  <div className="text-center">
-                    <div className="font-semibold text-red-600 text-sm">
-                      {foCardsLoading || (!useFoFactoryMetrics && loadingData)
-                        ? "-"
-                        : displayExpectedYieldMax != null
-                          ? Number(displayExpectedYieldMax).toFixed(1)
-                          : "-"}
-                    </div>
-                    <div className="text-[10px] text-gray-500 uppercase tracking-wide">
-                      Max
-                    </div>
+                </div>
+                {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                ) : (
+                  <div className="space-y-1 w-full">
+                    <MetricListRow
+                      label=">100"
+                      value={Number(
+                        factoryRollup.expected_yield_distribution.above_100 ??
+                          0,
+                      )}
+                      tone="text-indigo-600"
+                    />
+                    <MetricListRow
+                      label="75-100"
+                      value={Number(
+                        factoryRollup.expected_yield_distribution
+                          .between_75_100 ?? 0,
+                      )}
+                      tone="text-indigo-600"
+                    />
+                    <MetricListRow
+                      label="50-75"
+                      value={Number(
+                        factoryRollup.expected_yield_distribution
+                          .between_50_75 ?? 0,
+                      )}
+                      tone="text-indigo-600"
+                    />
+                    <MetricListRow
+                      label="<50"
+                      value={Number(
+                        factoryRollup.expected_yield_distribution.below_50 ?? 0,
+                      )}
+                      tone="text-indigo-600"
+                    />
                   </div>
-                  <div className="text-center">
-                    <div className="font-semibold text-green-600 text-sm">
-                      {foCardsLoading || (!useFoFactoryMetrics && loadingData)
-                        ? "-"
-                        : displayExpectedYieldMin != null
-                          ? Number(displayExpectedYieldMin).toFixed(1)
-                          : "-"}
+                )}
+                <p className="text-xs text-gray-800 font-bold">
+                  Expected Yield
+                  {factoryRollup.expected_yield_distribution.plots_with_yield !=
+                  null ? (
+                    <span className="text-gray-400 font-normal">
+                      {" "}
+                      -{" "}
+                      {Number(
+                        factoryRollup.expected_yield_distribution
+                          .plots_with_yield,
+                      )}{" "}
+                      plots
+                    </span>
+                  ) : null}
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="flex items-start justify-between gap-2">
+                  <BarChart3 className="w-6 h-6 text-indigo-600 shrink-0 mt-0.5" />
+                  <div className="text-right min-w-0">
+                    {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
+                      <Loader2 className="w-5 h-5 animate-spin ml-auto" />
+                    ) : (
+                      <>
+                        <div className="text-2xl font-bold text-gray-800 tabular-nums">
+                          {displayExpectedYield != null
+                            ? Number(displayExpectedYield).toFixed(1)
+                            : "-"}
+                        </div>
+                        <div className="text-sm font-medium text-indigo-600">
+                          {useFoFactoryMetrics ? "T/hectare" : "T/acre"}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center justify-between gap-2 text-xs text-gray-600">
+                  <p className="font-bold shrink-0 text-gray-800">Expected Yield</p>
+                  <div className="flex items-center gap-3">
+                    <div className="text-right">
+                      <div className="font-semibold text-red-600 text-sm tabular-nums leading-tight">
+                        {foCardsLoading || (!useFoFactoryMetrics && loadingData)
+                          ? "-"
+                          : displayExpectedYieldMax != null
+                            ? Number(displayExpectedYieldMax).toFixed(1)
+                            : "-"}
+                      </div>
+                      <div className="text-[10px] text-gray-500 uppercase tracking-wide leading-tight">
+                        Max
+                      </div>
                     </div>
-                    <div className="text-[10px] text-gray-500 uppercase tracking-wide">
-                      Min
+                    <div className="text-right">
+                      <div className="font-semibold text-green-600 text-sm tabular-nums leading-tight">
+                        {foCardsLoading || (!useFoFactoryMetrics && loadingData)
+                          ? "-"
+                          : displayExpectedYieldMin != null
+                            ? Number(displayExpectedYieldMin).toFixed(1)
+                            : "-"}
+                      </div>
+                      <div className="text-[10px] text-gray-500 uppercase tracking-wide leading-tight">
+                        Min
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
+              </>
             )}
           </div>
 
@@ -4201,19 +4218,19 @@ const OwnerFarmDash: React.FC = () => {
               metrics.cropConditionValue != null;
 
             return (
-              <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-emerald-200 hover:shadow-xl transition-all duration-300">
-                <div className="flex items-center justify-between mb-2">
-                  <Sprout className="w-6 h-6 shrink-0 text-emerald-600" />
-                  <div className="text-right min-w-0">
-                    <div className="text-2xl font-bold text-gray-800">
+              <div className={`${metricCardShell} border-emerald-200`}>
+                <div className="flex items-start justify-between gap-2">
+                  <Sprout className="w-6 h-6 shrink-0 text-emerald-600 mt-0.5" />
+                  <div className="text-right min-w-0 flex-1">
+                    <div className="text-2xl font-bold text-gray-800 tabular-nums">
                       {selectedPlotId ? (
                         loadingSections.waterStress ? (
-                          <Loader2 className="w-5 h-5 animate-spin inline-block" />
+                          <Loader2 className="w-5 h-5 animate-spin ml-auto" />
                         ) : (
                           (metrics.cropConditionValue ?? 0).toFixed(1)
                         )
                       ) : foCardsLoading ? (
-                        <Loader2 className="w-5 h-5 animate-spin inline-block" />
+                        <Loader2 className="w-5 h-5 animate-spin ml-auto" />
                       ) : factoryCci != null ? (
                         Number(factoryCci).toFixed(1)
                       ) : (
@@ -4221,7 +4238,7 @@ const OwnerFarmDash: React.FC = () => {
                       )}
                     </div>
                     <div
-                      className="text-xs font-semibold leading-tight max-w-[7.5rem] ml-auto truncate"
+                      className="text-sm font-medium leading-tight max-w-[7.5rem] ml-auto truncate"
                       style={{
                         color: showPlotCci
                           ? (cciStyle?.textColor ?? "#6b7280")
@@ -4245,84 +4262,83 @@ const OwnerFarmDash: React.FC = () => {
                     </div>
                   </div>
                 </div>
-                <p className="text-xs text-gray-600 font-medium">
+                <p className="text-xs text-gray-800 font-bold">
                   Crop Condition Index
                   {!selectedPlotId && factoryCci != null ? (
-                    <span className="text-gray-400 font-normal"> · 0–100</span>
+                    <span className="text-gray-400 font-normal"> - 0-100</span>
                   ) : null}
                 </p>
               </div>
             );
           })()}
 
-          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-red-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-2">
-              <Activity className="w-5 h-5 text-red-600 shrink-0" />
-              <div className="text-right">
-                <div className="text-lg font-bold text-gray-800">
+          <div className={`${metricCardShell} border-red-200`}>
+            <div className="flex items-start justify-between gap-2">
+              <Activity className="w-6 h-6 text-red-600 shrink-0 mt-0.5" />
+              <div className="text-right min-w-0 flex-1">
+                <div className="text-2xl font-bold text-gray-800 tabular-nums">
                   {!selectedPlotId ? (
                     "0"
                   ) : loadingSections.waterStress ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
+                    <Loader2 className="w-5 h-5 animate-spin ml-auto" />
                   ) : (
-                    (metrics.stressCount ?? 0)
+                    metrics.stressCount ?? 0
                   )}
                 </div>
-                <div className="text-xs font-semibold text-red-600">
+                <div className="text-sm font-medium text-red-600">
                   {!selectedPlotId || loadingSections.waterStress
                     ? "Total days"
                     : `${metrics.stressTotalDays ?? 0} days`}
                 </div>
               </div>
             </div>
-            <p className="text-xs text-gray-600">Stress Events</p>
+            <p className="text-xs text-gray-800 font-bold">
+              Stress Events
+            </p>
           </div>
 
-          <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-4 border border-pink-200 hover:shadow-xl transition-all duration-300">
-            <div className="flex items-center justify-between mb-3">
-              <Activity className="w-6 h-6 text-pink-600" />
-              <div className="text-right">
-                <div className="text-2xl font-bold text-gray-800 flex items-center gap-1 justify-end">
-                  {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : displayBiomassAvg !== null ? (
-                    Number(displayBiomassAvg).toFixed(1)
-                  ) : (
-                    "-"
-                  )}
-                  {!foCardsLoading &&
-                    (useFoFactoryMetrics || !loadingData) && (
-                    <span className="text-sm font-semibold text-pink-600">
+          <div className={`${metricCardShell} border-pink-200`}>
+            <div className="flex items-start justify-between gap-2">
+              <Activity className="w-6 h-6 text-pink-600 shrink-0 mt-0.5" />
+              <div className="text-right min-w-0">
+                {foCardsLoading || (!useFoFactoryMetrics && loadingData) ? (
+                  <Loader2 className="w-5 h-5 animate-spin ml-auto" />
+                ) : (
+                  <div className="text-2xl font-bold text-gray-800 flex items-baseline gap-1 justify-end tabular-nums">
+                    {displayBiomassAvg !== null
+                      ? Number(displayBiomassAvg).toFixed(1)
+                      : "-"}
+                    <span className="text-sm font-medium text-pink-600">
                       T/acre
                     </span>
-                  )}
-                </div>
+                  </div>
+                )}
               </div>
             </div>
-            <div className="flex items-center justify-between text-xs text-gray-600">
-              <p className="text-xs font-medium">Avg Biomass</p>
-              <div className="flex gap-4">
-                <div className="text-center">
-                  <div className="font-semibold text-red-600 text-sm">
+            <div className="flex items-center justify-between gap-2 text-xs text-gray-600">
+              <p className="font-bold shrink-0 text-gray-800">Avg Biomass</p>
+              <div className="flex items-center gap-3">
+                <div className="text-right">
+                  <div className="font-semibold text-red-600 text-sm tabular-nums leading-tight">
                     {foCardsLoading || (!useFoFactoryMetrics && loadingData)
                       ? "-"
                       : displayBiomassMax != null
                         ? Number(displayBiomassMax).toFixed(1)
                         : "-"}
                   </div>
-                  <div className="text-[10px] text-gray-500 uppercase tracking-wide">
+                  <div className="text-[10px] text-gray-500 uppercase tracking-wide leading-tight">
                     Max
                   </div>
                 </div>
-                <div className="text-center">
-                  <div className="font-semibold text-green-600 text-sm">
+                <div className="text-right">
+                  <div className="font-semibold text-green-600 text-sm tabular-nums leading-tight">
                     {foCardsLoading || (!useFoFactoryMetrics && loadingData)
                       ? "-"
                       : displayBiomassMin != null
                         ? Number(displayBiomassMin).toFixed(1)
                         : "-"}
                   </div>
-                  <div className="text-[10px] text-gray-500 uppercase tracking-wide">
+                  <div className="text-[10px] text-gray-500 uppercase tracking-wide leading-tight">
                     Min
                   </div>
                 </div>
@@ -4417,7 +4433,7 @@ const OwnerFarmDash: React.FC = () => {
                 )}
                 <TileLayer
                   url="http://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
-                  attribution="© Google"
+                  attribution="� Google"
                   maxZoom={20}
                   maxNativeZoom={18}
                   minZoom={8}
@@ -4506,7 +4522,7 @@ const OwnerFarmDash: React.FC = () => {
                             </p>
                             <p>
                               <strong>Status:</strong>{" "}
-                              {plot.status ?? displayCropStatus ?? "—"}
+                              {plot.status ?? displayCropStatus ?? "�"}
                             </p>
                             {plot.areaAcres != null && (
                               <p>
@@ -4611,12 +4627,15 @@ const OwnerFarmDash: React.FC = () => {
 
             <div className="bg-white/90 backdrop-blur-sm rounded-xl shadow-lg p-3">
               <div className="flex items-center gap-2 mb-1.5">
-                <Activity className="w-5 h-5 shrink-0 text-green-600" />
+                <Activity className="w-4 h-4 shrink-0 text-green-600" />
                 <h3 className="text-sm font-semibold text-gray-800">
                   Biomass Performance
                 </h3>
               </div>
-              <div style={{ height: GAUGE_CHART_HEIGHT }}>
+              <div
+                className="flex items-center justify-center"
+                style={{ height: GAUGE_CHART_HEIGHT }}
+              >
                 {foCardsLoading ? (
                   <div className="flex h-full items-center justify-center">
                     <Loader2 className="w-6 h-6 animate-spin text-green-600" />
@@ -4626,64 +4645,58 @@ const OwnerFarmDash: React.FC = () => {
                     <p className="text-xs text-gray-500">No biomass data</p>
                   </div>
                 ) : (
-                <ResponsiveContainer width="100%" height={GAUGE_CHART_HEIGHT}>
-                  <PieChart>
-                    <Pie
-                      data={biomassData}
-                      cx="50%"
-                      cy="82%"
-                      startAngle={180}
-                      endAngle={0}
-                      outerRadius={72}
-                      innerRadius={46}
-                      dataKey="value"
-                      labelLine={false}
-                    >
-                      {biomassData.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={entry.fill} />
-                      ))}
-                    </Pie>
-                    <text
-                      x="50%"
-                      y="70%"
-                      textAnchor="middle"
-                      dominantBaseline="middle"
-                      className="fill-blue-600 text-base font-semibold"
-                    >
-                      {totalBiomass.toFixed(1)} T/acre
-                    </text>
-                    <Tooltip
-                      wrapperStyle={{ zIndex: 50 }}
-                      contentStyle={{ fontSize: "12px" }}
-                      formatter={(value: number, name: string) => [
-                        `${value.toFixed(1)} T/acre`,
-                        name,
-                      ]}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
+                  <PieChartWithNeedle
+                    value={totalBiomass || 0}
+                    max={Math.max(
+                      totalBiomass || 0,
+                      currentBiomass || 0,
+                      100,
+                    ) * 1.05}
+                    title="Biomass Forecast"
+                    unit=" T/acre"
+                    width={GAUGE_ARC_WIDTH}
+                  />
                 )}
               </div>
-              {!(useFoFactoryMetrics && foBiomassAvg == null) && !foCardsLoading ? (
-              <div className="mt-1 text-center">
-                <p className="mb-1 text-xs font-medium text-gray-600">
-                  Biomass Distribution Chart
-                </p>
-                <div className="flex flex-wrap items-center justify-center gap-2 text-xs">
-                  <div className="flex items-center gap-1">
-                    <div className="h-2 w-2 rounded bg-blue-500" />
-                    <span className="font-semibold text-blue-700">
-                      Total: {totalBiomass.toFixed(1)} T/acre
-                    </span>
+              {!(useFoFactoryMetrics && foBiomassAvg == null) &&
+              !foCardsLoading ? (
+                <div className="mt-1 text-center">
+                  <p className="mb-1 text-xs font-medium text-gray-600">
+                    Biomass Forecast
+                  </p>
+                  <div className="grid grid-cols-1 gap-y-0.5 text-xs sm:grid-cols-3 sm:gap-x-2">
+                    <div className="flex items-center justify-center gap-1">
+                      <div className="h-2 w-2 rounded bg-blue-500" />
+                      <span className="font-semibold text-blue-700">
+                        Total: {(totalBiomass || 0).toFixed(1)} T/acre
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-center gap-1">
+                      <div className="h-2 w-2 rounded bg-purple-500" />
+                      <span className="font-semibold text-purple-700">
+                        mean: {(totalBiomass || 0).toFixed(1)} T/acre
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-center gap-1">
+                      <div className="h-2 w-2 rounded bg-green-500" />
+                      <span className="font-semibold text-green-700">
+                        Underground: {(currentBiomass || 0).toFixed(1)} T/acre
+                      </span>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-1">
-                    <div className="h-2 w-2 rounded bg-green-500" />
-                    <span className="font-semibold text-green-700">
-                      Underground: {currentBiomass.toFixed(1)} T/acre
-                    </span>
+                  <div className="mt-0.5 text-xs text-gray-500">
+                    Performance:{" "}
+                    {useFoFactoryMetrics
+                      ? "FO factory rollup"
+                      : totalBiomass > 0
+                        ? (
+                            (currentBiomass / totalBiomass) *
+                            100
+                          ).toFixed(1)
+                        : "0.0"}
+                    {useFoFactoryMetrics ? "" : "% underground"}
                   </div>
                 </div>
-              </div>
               ) : null}
             </div>
 
@@ -4744,18 +4757,18 @@ const OwnerFarmDash: React.FC = () => {
                       Regional:{" "}
                       {factoryRecoveryPeers?.factoryAvg != null
                         ? `${factoryRecoveryPeers.factoryAvg.toFixed(1)}%`
-                        : "—"}
+                        : "�"}
                     </span>
-                    {" · "}
+                    {" � "}
                     <span className="font-semibold text-green-700">
                       Top 25:{" "}
                       {factoryRecoveryPeers?.top25Avg != null
                         ? `${factoryRecoveryPeers.top25Avg.toFixed(1)}%`
-                        : "—"}
+                        : "�"}
                     </span>
                     {factoryRecoveryPeers?.similarPct != null ? (
                       <>
-                        {" · "}
+                        {" � "}
                         <span className="font-semibold text-amber-700">
                           Similar plots:{" "}
                           {`${factoryRecoveryPeers.similarPct.toFixed(1)}%`}

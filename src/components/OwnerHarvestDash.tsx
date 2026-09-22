@@ -39,11 +39,23 @@ import {
   sumHarvestAreaFromRows,
   patchHarvestRowsWithBoundaryEvent,
   applySavedBoundariesToHarvestRows,
+  normalizeSugarcaneStatus,
+  harvestRowChartDay,
+  harvestRowMatchesDayRange,
   type TeamConnectHarvestRow,
   type TeamConnectHierarchy,
   type OwnerFactoryBoundaryPlot,
 } from "../utils/teamConnectHarvest";
-import React, { useState, useRef, useEffect, useMemo, Component, type ReactNode } from "react";
+import React, {
+  useState,
+  useRef,
+  useEffect,
+  useMemo,
+  useLayoutEffect,
+  Component,
+  type ReactNode,
+} from "react";
+import { createPortal } from "react-dom";
 //import axios from "axios";
 import {
   MapPin,
@@ -55,6 +67,7 @@ import {
  // PieChart,
   Activity,
   Maximize2,
+  RotateCcw,
 } from "lucide-react";
 import {
   PieChart as RechartsPieChart,
@@ -70,6 +83,7 @@ import {
   BarChart,
   Bar,
   LabelList,
+  Label,
   ComposedChart,
   Area,
 } from "recharts";
@@ -152,6 +166,7 @@ interface HarvestData {
   "Sugarcane Status": string;
   "Area (acre)": number;
   Days: number;
+  DaysToHarvest?: number | null;
   /** Legacy typo key (kept for safety). */
   "Prediction Yield (T/acer)"?: number | null;
   "Prediction Yield (T/acre)"?: number | null;
@@ -190,6 +205,7 @@ interface FilterDropdownProps {
   options: FilterOption[];
   onChange: (value: string) => void;
   isLoading?: boolean;
+  compact?: boolean;
 }
 
 /** Custom dropdown so the open list overlays filters below (native <select> made Region look nested under Manager). */
@@ -199,16 +215,54 @@ const FilterDropdown: React.FC<FilterDropdownProps> = ({
   options,
   onChange,
   isLoading,
+  compact = false,
 }) => {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLUListElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const [menuRect, setMenuRect] = useState<{
+    top: number;
+    left: number;
+    width: number;
+  } | null>(null);
+
+  const updateMenuRect = () => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    setMenuRect({
+      top: rect.bottom + 4,
+      left: rect.left,
+      width: rect.width,
+    });
+  };
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setMenuRect(null);
+      return;
+    }
+    updateMenuRect();
+    window.addEventListener("resize", updateMenuRect);
+    window.addEventListener("scroll", updateMenuRect, true);
+    return () => {
+      window.removeEventListener("resize", updateMenuRect);
+      window.removeEventListener("scroll", updateMenuRect, true);
+    };
+  }, [open, options.length]);
 
   useEffect(() => {
     if (!open) return;
     const onDocClick = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) {
-        setOpen(false);
+      const target = event.target as Node;
+      if (
+        rootRef.current?.contains(target) ||
+        menuRef.current?.contains(target)
+      ) {
+        return;
       }
+      setOpen(false);
     };
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") setOpen(false);
@@ -232,8 +286,8 @@ const FilterDropdown: React.FC<FilterDropdownProps> = ({
     : selected?.label || value || "All";
 
   return (
-    <div className="mb-6" ref={rootRef}>
-      <div className="flex items-center gap-2 mb-2">
+    <div className={compact ? "min-w-0 flex-1" : "mb-6"} ref={rootRef}>
+      <div className={`flex items-center gap-2 ${compact ? "mb-1" : "mb-2"}`}>
         <label className="block text-sm font-medium text-gray-700">
           {label}
         </label>
@@ -243,6 +297,7 @@ const FilterDropdown: React.FC<FilterDropdownProps> = ({
       </div>
       <div className="relative box-border">
         <button
+          ref={triggerRef}
           type="button"
           disabled={isLoading}
           aria-haspopup="listbox"
@@ -267,36 +322,48 @@ const FilterDropdown: React.FC<FilterDropdownProps> = ({
             }`}
           />
         )}
-        {open && !isLoading && (
-          <ul
-            role="listbox"
-            className="absolute left-0 right-0 top-full z-50 mt-1 max-h-56 overflow-auto rounded-lg border border-gray-200 bg-white py-1 shadow-lg"
-          >
-            {options.map((option) => {
-              const isActive = option.value === value;
-              return (
-                <li key={`${label}-${option.value}`}>
-                  <button
-                    type="button"
-                    role="option"
-                    aria-selected={isActive}
-                    className={`w-full px-3 py-2 text-left text-sm hover:bg-blue-50 ${
-                      isActive
-                        ? "bg-blue-100 font-medium text-blue-800"
-                        : "text-gray-800"
-                    }`}
-                    onClick={() => {
-                      onChange(option.value);
-                      setOpen(false);
-                    }}
-                  >
-                    {option.label}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        )}
+        {open &&
+          !isLoading &&
+          menuRect &&
+          createPortal(
+            <ul
+              ref={menuRef}
+              role="listbox"
+              style={{
+                position: "fixed",
+                top: menuRect.top,
+                left: menuRect.left,
+                width: menuRect.width,
+                zIndex: 10000,
+              }}
+              className="max-h-56 overflow-auto rounded-lg border border-gray-200 bg-white py-1 shadow-lg"
+            >
+              {options.map((option) => {
+                const isActive = option.value === value;
+                return (
+                  <li key={`${label}-${option.value}`}>
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={isActive}
+                      className={`w-full px-3 py-2 text-left text-sm hover:bg-blue-50 ${
+                        isActive
+                          ? "bg-blue-100 font-medium text-blue-800"
+                          : "text-gray-800"
+                      }`}
+                      onClick={() => {
+                        onChange(option.value);
+                        setOpen(false);
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>,
+            document.body,
+          )}
       </div>
     </div>
   );
@@ -340,6 +407,40 @@ const STATUS_COLOR_PALETTE = [
   "#888",
 ];
 
+const CANONICAL_SUGARCANE_STATUS_ORDER = [
+  "Harvested",
+  "Growing",
+  "Partially Harvested",
+  "Ready to Harvest",
+] as const;
+
+function extractHarvestRowArea(item: HarvestData | any): number {
+  if (!item) return 0;
+  const val =
+    item["Area (acre)"] ??
+    item["Area (acer)"] ??
+    item.area_acres ??
+    item.area_size ??
+    item.area ??
+    item.acreage ??
+    item.raw?.area_acres ??
+    item.raw?.area_size ??
+    item.raw?.area ??
+    item.raw?.farm?.area_acres ??
+    item.raw?.farm?.area_size ??
+    item.raw?.farm?.area ??
+    item.raw?.plot?.area_acres ??
+    item.raw?.plot?.area_size ??
+    item.raw?.plot?.area ??
+    0;
+  if (typeof val === "number" && Number.isFinite(val)) return val > 0 ? val : 0;
+  if (typeof val === "string") {
+    const parsed = parseFloat(val.replace(/[^\d.-]/g, ""));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  }
+  return 0;
+}
+
 function useDebouncedValue<T>(value: T, delay: number): T {
   const [debounced, setDebounced] = useState<T>(value);
   useEffect(() => {
@@ -349,7 +450,17 @@ function useDebouncedValue<T>(value: T, delay: number): T {
   return debounced;
 }
 
-// Combined Chart Component
+const DAY_RANGE_PRESETS = [
+  { id: "15", label: "Within 15 days", range: [0, 15] as [number, number] },
+  { id: "30", label: "1 month", range: [0, 30] as [number, number] },
+  { id: "45", label: "45 days", range: [0, 45] as [number, number] },
+  { id: "90", label: "90 days", range: [0, 90] as [number, number] },
+  { id: "120", label: "120 days", range: [0, 120] as [number, number] },
+] as const;
+
+type DayRangePresetId = (typeof DAY_RANGE_PRESETS)[number]["id"];
+
+// Combined Chart Component — 3 insight cards (Plot wise / Brix / Ready to harvest)
 const CombinedChart: React.FC<CombinedChartProps> = ({
   brixData,
   harvestData,
@@ -391,6 +502,13 @@ const CombinedChart: React.FC<CombinedChartProps> = ({
     };
   }, []);
 
+  const activePresetId: DayRangePresetId | "custom" = (() => {
+    const hit = DAY_RANGE_PRESETS.find(
+      (p) => p.range[0] === harvestRange[0] && p.range[1] === harvestRange[1],
+    );
+    return hit?.id ?? "custom";
+  })();
+
   const BrixTooltip: React.FC<BrixTooltipProps> = ({
     active,
     payload,
@@ -402,7 +520,7 @@ const CombinedChart: React.FC<CombinedChartProps> = ({
       for (const item of filteredData) {
         const v = item["Brix (Degree)"];
         if (
-          item.Days === day &&
+          harvestRowChartDay(item) === day &&
           typeof v === "number" &&
           Number.isFinite(v)
         ) {
@@ -415,7 +533,7 @@ const CombinedChart: React.FC<CombinedChartProps> = ({
       return (
         <div className="bg-white border border-gray-200 rounded-lg p-3 shadow-lg">
           <div className="text-sm">
-            <strong>Days:</strong> {day}
+            <strong>Days to harvest:</strong> {day}
           </div>
           <div className="text-sm">
             <strong>Avg. Brix Value:</strong> {avgBrix}
@@ -435,7 +553,7 @@ const CombinedChart: React.FC<CombinedChartProps> = ({
       return (
         <div className="bg-white border border-gray-200 rounded-lg p-3 shadow-lg">
           <div className="text-sm">
-            <strong>Days:</strong> {entry.day}
+            <strong>Days to harvest:</strong> {entry.day}
           </div>
           <div className="text-sm">
             <strong>Avg Yield (T/acre):</strong> {entry.area?.toFixed(2)}
@@ -452,11 +570,26 @@ const CombinedChart: React.FC<CombinedChartProps> = ({
     return null;
   };
 
-  const chartButtons = [
-    { id: CHART_TYPES.BRIX, label: "Brix Value Prediction" },
-    { id: CHART_TYPES.PLANTATION, label: "Plot wise Sugarcane Plantation" },
-    { id: CHART_TYPES.HARVEST, label: "Ready To Harvest" },
+  const insightCards = [
+    {
+      id: CHART_TYPES.PLANTATION,
+      label: "Plot wise Sugarcane plantation",
+      hint: "",
+    },
+    {
+      id: CHART_TYPES.BRIX,
+      label: "Brix value prediction",
+      hint: "",
+    },
+    {
+      id: CHART_TYPES.HARVEST,
+      label: "Ready to harvest",
+      hint: "",
+    },
   ];
+
+  const showDayRange =
+    activeChart === CHART_TYPES.HARVEST || activeChart === CHART_TYPES.BRIX;
 
   const renderChart = () => {
     switch (activeChart) {
@@ -470,7 +603,7 @@ const CombinedChart: React.FC<CombinedChartProps> = ({
                 tick={{ fontSize: 12 }}
                 axisLine={{ stroke: "#e5e7eb" }}
                 label={{
-                  value: "Days",
+                  value: "Days to harvest",
                   position: "insideBottom",
                   offset: -1,
                 }}
@@ -500,7 +633,7 @@ const CombinedChart: React.FC<CombinedChartProps> = ({
                 tick={{ fontSize: 12 }}
                 axisLine={{ stroke: "#e5e7eb" }}
                 label={{
-                  value: "Days",
+                  value: "Days to harvest",
                   position: "insideBottom",
                   offset: -1,
                 }}
@@ -576,6 +709,8 @@ const CombinedChart: React.FC<CombinedChartProps> = ({
                 allowDecimals={false}
               />
               <Tooltip
+                formatter={(value: number) => [`${value} plots`, "Count"]}
+                labelFormatter={(label) => String(label)}
                 contentStyle={{
                   backgroundColor: "#f9fafb",
                   border: "1px solid #e5e7eb",
@@ -597,47 +732,66 @@ const CombinedChart: React.FC<CombinedChartProps> = ({
   };
 
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-100 h-[500px] flex flex-col">
-      <div className="flex justify-between items-center border-b border-gray-200 p-4">
-        <div className="flex bg-gray-100 rounded-lg p-1">
-          {chartButtons.map((button) => (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {insightCards.map((card) => {
+          const active = activeChart === card.id;
+          return (
             <button
-              key={button.id}
-              onClick={() => setActiveChart(button.id)}
-              className={`px-4 py-2 text-sm font-medium rounded-md transition-all duration-200 ${
-                activeChart === button.id
-                  ? "bg-white text-blue-600 shadow-sm"
-                  : "text-gray-600 hover:text-gray-900"
+              key={card.id}
+              type="button"
+              onClick={() => setActiveChart(card.id)}
+              className={`text-left rounded-xl border p-4 transition-all duration-200 ${
+                active
+                  ? "bg-blue-50 border-blue-300 shadow-sm ring-1 ring-blue-200"
+                  : "bg-white border-gray-100 hover:border-gray-200 hover:shadow-sm"
               }`}
             >
-              {button.label}
+              <div
+                className={`text-sm font-semibold ${
+                  active ? "text-blue-700" : "text-gray-900"
+                }`}
+              >
+                {card.label}
+              </div>
+              <div className="text-xs text-gray-500 mt-1">{card.hint}</div>
             </button>
-          ))}
-        </div>
-        {activeChart === CHART_TYPES.HARVEST && (
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-2">
-            <div className="flex items-center gap-2 mb-1">
-              <span className="text-xs font-medium text-gray-600">
-                Days Range
+          );
+        })}
+      </div>
+
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 h-[500px] flex flex-col">
+        {showDayRange && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 px-4 py-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-medium text-gray-600 mr-1">
+                Range
               </span>
-              <span className="text-xs text-gray-500">
-                ({harvestRange[0]} - {harvestRange[1]})
-              </span>
+              {DAY_RANGE_PRESETS.map((preset) => {
+                const on = activePresetId === preset.id;
+                return (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => setHarvestRange(preset.range)}
+                    className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+                      on
+                        ? "bg-emerald-600 text-white border-emerald-600"
+                        : "bg-white text-gray-700 border-gray-200 hover:border-emerald-300"
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                );
+              })}
             </div>
-            <input
-              type="range"
-              min="-50"
-              max="200"
-              value={harvestRange[1]}
-              onChange={(e) =>
-                setHarvestRange([harvestRange[0], parseInt(e.target.value)])
-              }
-              className="w-32 h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer slider-thumb"
-            />
+            <div className="text-xs text-gray-500">
+              Days to harvest {harvestRange[0]} – {harvestRange[1]} (from API)
+            </div>
           </div>
         )}
+        <div className="flex-1 p-4 min-h-0">{renderChart()}</div>
       </div>
-      <div className="flex-1 p-4">{renderChart()}</div>
     </div>
   );
 };
@@ -653,7 +807,9 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
 }) => {
   const isManagerMode = mode === "manager";
   const mapWrapperRef = useRef<HTMLDivElement>(null);
-  const [activeChart, setActiveChart] = useState<ChartType>(CHART_TYPES.BRIX);
+  const [activeChart, setActiveChart] = useState<ChartType>(
+    CHART_TYPES.PLANTATION,
+  );
   const [filters, setFilters] = useState<Filters>({
     managerId: "All",
     fieldOfficerId: "All",
@@ -661,9 +817,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
     sugarcaneType: "All",
     variety: "All",
   });
-  const [harvestRange, setHarvestRange] = useState<[number, number]>([
-    -50, 100,
-  ]);
+  const [harvestRange, setHarvestRange] = useState<[number, number]>([0, 15]);
   const [loading, setLoading] = useState<boolean>(true);
   const [dropdownsLoading, setDropdownsLoading] = useState<boolean>(true);
   const [loadElapsedSec, setLoadElapsedSec] = useState(0);
@@ -709,7 +863,10 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
         farmRows: any[],
         me: any,
         industries: any[],
-        opts?: { resetFilters?: boolean },
+        opts?: {
+          resetFilters?: boolean;
+          ownerFactoryPlots?: OwnerFactoryBoundaryPlot[];
+        },
       ) => TeamConnectHarvestRow[])
     | null
   >(null);
@@ -1619,55 +1776,73 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
     ],
   );
 
-  const FIXED_STATUS_LABELS = [
-    "Harvested",
-    "Growing",
-    "Partially Harvested",
-    "Ready to Harvest",
-  ];
+  const plotStatusData = useMemo(() => {
+    const countByStatus: { [key: string]: number } = {};
+    const areaByStatus: { [key: string]: number } = {};
 
-  const statusCounts = useMemo(
-    () =>
-      filteredData.reduce((acc: { [key: string]: number }, item) => {
-        const status = item["Sugarcane Status"];
-        acc[status] = (acc[status] || 0) + 1;
-        return acc;
-      }, {}),
-    [filteredData],
-  );
+    for (const item of filteredData) {
+      const status = normalizeSugarcaneStatus(item["Sugarcane Status"]);
+      if (!status) continue;
+      countByStatus[status] = (countByStatus[status] || 0) + 1;
+      areaByStatus[status] =
+        (areaByStatus[status] || 0) + extractHarvestRowArea(item);
+    }
+
+    const labels = Object.keys(areaByStatus).sort((a, b) => {
+      const orderA = CANONICAL_SUGARCANE_STATUS_ORDER.indexOf(
+        a as (typeof CANONICAL_SUGARCANE_STATUS_ORDER)[number],
+      );
+      const orderB = CANONICAL_SUGARCANE_STATUS_ORDER.indexOf(
+        b as (typeof CANONICAL_SUGARCANE_STATUS_ORDER)[number],
+      );
+      if (orderA >= 0 && orderB >= 0) return orderA - orderB;
+      if (orderA >= 0) return -1;
+      if (orderB >= 0) return 1;
+      return (areaByStatus[b] || 0) - (areaByStatus[a] || 0);
+    });
+
+    const totalArea = labels.reduce(
+      (sum, label) => sum + (areaByStatus[label] || 0),
+      0,
+    );
+
+    return labels.map((label, index) => {
+      const area = areaByStatus[label] || 0;
+      const pct = totalArea > 0 ? (area / totalArea) * 100 : 0;
+      return {
+        name: label,
+        value: Number(area.toFixed(2)),
+        count: countByStatus[label] || 0,
+        pct,
+        color: STATUS_COLOR_PALETTE[index % STATUS_COLOR_PALETTE.length],
+      };
+    });
+  }, [filteredData]);
 
   const statusColorMap = useMemo(() => {
     const map: { [key: string]: string } = {};
-    FIXED_STATUS_LABELS.forEach((label, i) => {
-      map[label] = STATUS_COLOR_PALETTE[i % STATUS_COLOR_PALETTE.length];
+    plotStatusData.forEach((row) => {
+      map[row.name] = row.color;
     });
     return map;
-  }, []);
+  }, [plotStatusData]);
 
-  const plotStatusData = useMemo(
-    () =>
-      FIXED_STATUS_LABELS.map((label) => ({
-        name: label,
-        value: statusCounts[label] || 0,
-        color: statusColorMap[label],
-      })),
-    [statusCounts, statusColorMap],
+  const sugarcaneStatusTotalArea = useMemo(
+    () => plotStatusData.reduce((sum, row) => sum + row.value, 0),
+    [plotStatusData],
   );
 
   const plotPoints = useMemo(() => {
     let dataToUse = filteredData;
     if (activeChart === CHART_TYPES.HARVEST) {
-      dataToUse = filteredData.filter((item) => {
-        if (typeof item.Days === "number") {
-          return item.Days >= harvestRange[0] && item.Days <= harvestRange[1];
-        }
-        return false;
-      });
+      dataToUse = filteredData.filter((item) =>
+        harvestRowMatchesDayRange(item, harvestRange),
+      );
     }
     return dataToUse.map((item, idx) => ({
       id: item.id || idx,
       position: [item.Latitude, item.Longitude] as [number, number],
-      status: item["Sugarcane Status"],
+      status: normalizeSugarcaneStatus(item["Sugarcane Status"]),
       plotNo: item["Plot No"] || `P${idx + 1}`,
       area: `${Number(item["Area (acre)"] || 0).toFixed(2)} acre`,
       raw: item,
@@ -1676,39 +1851,37 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
   }, [filteredData, activeChart, harvestRange]);
 
   const brixData = useMemo(() => {
+    const rangeFiltered = filteredData.filter((item) =>
+      harvestRowMatchesDayRange(item, harvestRange),
+    );
     const brixAreaByDay: { [key: number]: number } = {};
-    filteredData.forEach((item) => {
-      if (
-        typeof item.Days === "number" &&
-        typeof item["Area (acre)"] === "number"
-      ) {
-        brixAreaByDay[item.Days] =
-          (brixAreaByDay[item.Days] || 0) + item["Area (acre)"];
-      }
+    rangeFiltered.forEach((item) => {
+      const chartDay = harvestRowChartDay(item);
+      if (chartDay == null) return;
+      brixAreaByDay[chartDay] =
+        (brixAreaByDay[chartDay] || 0) + extractHarvestRowArea(item);
     });
     return Object.entries(brixAreaByDay)
       .map(([day, area]) => ({ day: Number(day), value: area }))
       .sort((a, b) => a.day - b.day);
-  }, [filteredData]);
+  }, [filteredData, harvestRange]);
 
   const harvestData = useMemo(() => {
-    const rangeFilteredData = filteredData.filter((item) => {
-      if (typeof item.Days === "number") {
-        return item.Days >= harvestRange[0] && item.Days <= harvestRange[1];
-      }
-      return false;
-    });
+    const rangeFilteredData = filteredData.filter((item) =>
+      harvestRowMatchesDayRange(item, harvestRange),
+    );
 
     const dayGroups = rangeFilteredData.reduce(
       (acc: { [key: number]: number[] }, item) => {
+        const chartDay = harvestRowChartDay(item);
         if (
-          typeof item.Days === "number" &&
+          chartDay != null &&
           typeof item["Prediction Yield (T/acre)"] === "number"
         ) {
-          if (!acc[item.Days]) {
-            acc[item.Days] = [];
+          if (!acc[chartDay]) {
+            acc[chartDay] = [];
           }
-          acc[item.Days].push(item["Prediction Yield (T/acre)"]);
+          acc[chartDay].push(item["Prediction Yield (T/acre)"]);
         }
         return acc;
       },
@@ -1760,36 +1933,9 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
     }));
   }, [filteredData]);
 
-  const extractRowArea = (item: any): number => {
-    if (!item) return 0;
-    const val =
-      item["Area (acre)"] ??
-      item["Area (acer)"] ??
-      item.area_acres ??
-      item.area_size ??
-      item.area ??
-      item.acreage ??
-      item.raw?.area_acres ??
-      item.raw?.area_size ??
-      item.raw?.area ??
-      item.raw?.farm?.area_acres ??
-      item.raw?.farm?.area_size ??
-      item.raw?.farm?.area ??
-      item.raw?.plot?.area_acres ??
-      item.raw?.plot?.area_size ??
-      item.raw?.plot?.area ??
-      0;
-    if (typeof val === "number" && Number.isFinite(val)) return val > 0 ? val : 0;
-    if (typeof val === "string") {
-      const parsed = parseFloat(val.replace(/[^\d.-]/g, ""));
-      return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-    }
-    return 0;
-  };
-
   const keyMetrics = useMemo(() => {
     const summedArea = filteredData.reduce(
-      (sum, item) => sum + extractRowArea(item),
+      (sum, item) => sum + extractHarvestRowArea(item),
       0,
     );
     const allManagerPlotArea = sumHarvestAreaFromRows(rawData);
@@ -1899,7 +2045,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
   const getPlotColor = useMemo(
     () =>
       (item: HarvestData): string => {
-        const status = item["Sugarcane Status"];
+        const status = normalizeSugarcaneStatus(item["Sugarcane Status"]);
         return statusColorMap[status] || STATUS_COLOR_PALETTE[0];
       },
     [statusColorMap],
@@ -1949,7 +2095,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 lg:gap-6 mb-8">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 lg:gap-6 mb-6">
               {Array.from({ length: 4 }).map((_, i) => (
                 <div
                   key={i}
@@ -1963,32 +2109,27 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                 </div>
               ))}
             </div>
-          </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-            <div className="lg:col-span-3 space-y-3">
-              <div className="bg-white rounded-xl p-4 border border-gray-100">
-                <SkeletonBlock className="h-5 w-24 mb-2" />
-                <SkeletonBlock className="h-10 w-full" />
-              </div>
-              <div className="bg-white rounded-xl p-4 border border-gray-100">
-                <SkeletonBlock className="h-5 w-24 mb-2" />
-                <SkeletonBlock className="h-10 w-full" />
-              </div>
-              <div className="bg-white rounded-xl p-4 border border-gray-100">
-                <SkeletonBlock className="h-5 w-24 mb-2" />
-                <SkeletonBlock className="h-10 w-full" />
+            <div className="bg-white rounded-xl p-4 border border-gray-100 shadow-sm mb-6">
+              <SkeletonBlock className="h-5 w-20 mb-3" />
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <SkeletonBlock key={i} className="h-10 w-full" />
+                ))}
               </div>
             </div>
 
-            <div className="lg:col-span-9">
-              <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
-                <div className="p-4 border-b border-gray-100 flex items-center justify-between">
-                  <SkeletonBlock className="h-6 w-40" />
-                  <SkeletonBlock className="h-9 w-28 rounded-lg" />
-                </div>
-                <div className="p-4">
-                  <SkeletonBlock className="h-[420px] w-full" />
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-2 bg-white rounded-xl border border-gray-100 overflow-hidden">
+                <SkeletonBlock className="h-[420px] w-full rounded-none" />
+              </div>
+              <div className="lg:col-span-1 bg-white rounded-xl p-4 border border-gray-100">
+                <SkeletonBlock className="h-5 w-40 mb-4" />
+                <SkeletonBlock className="h-48 w-full mb-4" />
+                <div className="grid grid-cols-2 gap-2">
+                  {Array.from({ length: 4 }).map((_, i) => (
+                    <SkeletonBlock key={i} className="h-16 w-full" />
+                  ))}
                 </div>
               </div>
             </div>
@@ -2022,7 +2163,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
             </div>
           </div> */}
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 lg:gap-6 mb-8">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 lg:gap-6 mb-6">
             {keyMetrics.map((metric, index) => {
               const IconComponent = metric.icon;
               return (
@@ -2045,16 +2186,12 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
             })}
           </div>
 
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <div className="lg:col-span-3 space-y-2">
-            <div className="bg-white rounded-xl p-3 border border-gray-100 shadow-sm overflow-visible">
-              {/* Filter panel header */}
-              <div className="flex items-center gap-2 mb-4 pb-3 border-b border-gray-100">
+          <div className="relative z-[500] bg-white rounded-xl p-4 border border-gray-100 shadow-sm mb-6 overflow-visible">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-3 pb-3 border-b border-gray-100">
+              <div className="flex items-center gap-2">
                 <span className="text-sm font-semibold text-gray-700">Filters</span>
                 {dropdownsLoading && (
-                  <span className="flex flex-col items-end gap-0.5 text-xs text-blue-500">
+                  <span className="flex flex-col items-end gap-0.5 text-xs text-blue-500 sm:items-start">
                     <span className="flex items-center gap-1">
                       <Loader2 className="w-3 h-3 animate-spin" />
                       {harvestLoadingLabel}
@@ -2065,16 +2202,34 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                   </span>
                 )}
               </div>
+              <button
+                type="button"
+                onClick={() =>
+                  setFilters({
+                    managerId: "All",
+                    fieldOfficerId: "All",
+                    region: "All",
+                    sugarcaneType: "All",
+                    variety: "All",
+                  })
+                }
+                className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-semibold text-gray-700 hover:border-gray-300 hover:bg-gray-50 transition-colors"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                Reset Filters
+              </button>
+            </div>
 
-              {/* Error banner */}
-              {fetchError && (
-                <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-600">
-                  ⚠️ {fetchError}
-                </div>
-              )}
+            {fetchError && (
+              <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-600">
+                ⚠️ {fetchError}
+              </div>
+            )}
 
+            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap lg:flex-nowrap">
               {!isManagerMode && (
                 <FilterDropdown
+                  compact
                   label="Manager"
                   value={filters.managerId}
                   options={managerOptions}
@@ -2092,6 +2247,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                 />
               )}
               <FilterDropdown
+                compact
                 label="Region"
                 value={filters.region}
                 options={regionOptions}
@@ -2107,6 +2263,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                 }
               />
               <FilterDropdown
+                compact
                 label="Representative"
                 value={filters.fieldOfficerId}
                 options={representativeOptions}
@@ -2121,6 +2278,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                 }
               />
               <FilterDropdown
+                compact
                 label="Sugarcane Type"
                 value={filters.sugarcaneType}
                 options={sugarcaneTypeOptions}
@@ -2134,6 +2292,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                 }
               />
               <FilterDropdown
+                compact
                 label="Variety"
                 value={filters.variety}
                 options={varietyOptions}
@@ -2144,10 +2303,10 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
               />
             </div>
           </div>
+        </div>
 
-          <div className="lg:col-span-9 space-y-6">
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              <div className="lg:col-span-2 bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+        <div className="relative z-0 grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2 bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden isolate">
                 <div className="relative w-full h-[400px]">
                   <div
                     className="absolute top-4 right-4 z-20 bg-white text-gray-700 border border-gray-200 shadow-md p-2 rounded cursor-pointer hover:bg-gray-100 transition"
@@ -2191,56 +2350,67 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                           tileSize={256}
                           zoomOffset={0}
                         />
-                        {plotPoints.map((plot) => (
-                          <React.Fragment
-                            key={`${plot.id}-${plot.boundaryCoordinates?.length ?? 0}-${plot.position[0]}-${plot.position[1]}`}
-                          >
-                            {/* Plot Boundary Polygon */}
-                            {plot.boundaryCoordinates &&
-                              plot.boundaryCoordinates.length > 0 && (
+                        {plotPoints.map((plot) => {
+                          const hasBoundary =
+                            !!plot.boundaryCoordinates &&
+                            plot.boundaryCoordinates.length > 0;
+                          const plotPopup = (
+                            <Popup>
+                              <div className="text-sm">
+                                <div className="font-semibold text-gray-900 mb-1">
+                                  Plot {plot.plotNo}
+                                </div>
+                                <div className="text-gray-600 mb-1">
+                                  Status:{" "}
+                                  <span className="font-medium">
+                                    {plot.status}
+                                  </span>
+                                </div>
+                                <div className="text-gray-600">
+                                  Area:{" "}
+                                  <span className="font-medium">
+                                    {plot.area}
+                                  </span>
+                                </div>
+                              </div>
+                            </Popup>
+                          );
+                          return (
+                            <React.Fragment
+                              key={`${plot.id}-${plot.boundaryCoordinates?.length ?? 0}-${plot.position[0]}-${plot.position[1]}`}
+                            >
+                              {/* Status-colored fill + white border (match Sugarcane Status pie colors). */}
+                              {hasBoundary ? (
                                 <Polygon
-                                  positions={plot.boundaryCoordinates}
+                                  positions={plot.boundaryCoordinates!}
+                                  pathOptions={{
+                                    color: "#ffffff",
+                                    fillColor: getPlotColor(plot.raw),
+                                    fillOpacity: 0,
+                                    fill: true,
+                                    weight: 1.5,
+                                    opacity: 1,
+                                  }}
+                                >
+                                  {plotPopup}
+                                </Polygon>
+                              ) : (
+                                <CircleMarker
+                                  center={plot.position}
+                                  radius={8}
                                   pathOptions={{
                                     color: getPlotColor(plot.raw),
                                     fillColor: getPlotColor(plot.raw),
-                                    fillOpacity: 0.2,
+                                    fillOpacity: 0.45,
                                     weight: 2,
                                   }}
-                                />
+                                >
+                                  {plotPopup}
+                                </CircleMarker>
                               )}
-                            {/* Plot Center Point */}
-                            <CircleMarker
-                              center={plot.position}
-                              radius={8}
-                              pathOptions={{
-                                color: getPlotColor(plot.raw),
-                                fillColor: getPlotColor(plot.raw),
-                                fillOpacity: 0.8,
-                                weight: 2,
-                              }}
-                            >
-                              <Popup>
-                                <div className="text-sm">
-                                  <div className="font-semibold text-gray-900 mb-1">
-                                    Plot {plot.plotNo}
-                                  </div>
-                                  <div className="text-gray-600 mb-1">
-                                    Status:{" "}
-                                    <span className="font-medium">
-                                      {plot.status}
-                                    </span>
-                                  </div>
-                                  <div className="text-gray-600">
-                                    Area:{" "}
-                                    <span className="font-medium">
-                                      {plot.area}
-                                    </span>
-                                  </div>
-                                </div>
-                              </Popup>
-                            </CircleMarker>
-                          </React.Fragment>
-                        ))}
+                            </React.Fragment>
+                          );
+                        })}
                       </MapContainer>
                       </MapSectionErrorBoundary>
                     ) : (
@@ -2254,66 +2424,136 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                 </div>
               </div>
 
-              <div className="lg:col-span-1 bg-white rounded-xl p-6 shadow-sm border border-gray-100 h-[400px] flex flex-col">
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="text-lg font-semibold text-gray-900">
-                    Sugarcane Status
-                  </h3>
-                </div>
-                <div className="flex-1 mb-4">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <RechartsPieChart>
-                      <Pie
-                        data={plotStatusData}
-                        cx="50%"
-                        cy="50%"
-                        innerRadius="40%"
-                        outerRadius="70%"
-                        paddingAngle={5}
-                        dataKey="value"
-                      >
-                        {plotStatusData.map((_item, index) => (
-                          <Cell
-                            key={`cell-${index}`}
-                            fill={
-                              STATUS_COLOR_PALETTE[
-                                index % STATUS_COLOR_PALETTE.length
-                              ]
-                            }
+              <div className="lg:col-span-1 bg-white rounded-xl p-5 shadow-sm border border-gray-100 flex flex-col min-h-[280px]">
+                <h3 className="text-lg font-semibold text-gray-900 mb-3">
+                  Sugarcane Status
+                </h3>
+
+                {plotStatusData.length === 0 ? (
+                  <div className="flex flex-1 items-center justify-center text-sm text-gray-500">
+                    No status data for the current filters.
+                  </div>
+                ) : (
+                <div className="flex items-center gap-3">
+                  <div className="relative h-40 w-40 shrink-0">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <RechartsPieChart>
+                        <Pie
+                          data={plotStatusData}
+                          cx="50%"
+                          cy="50%"
+                          innerRadius="52%"
+                          outerRadius="78%"
+                          paddingAngle={3}
+                          dataKey="value"
+                          stroke="none"
+                        >
+                          {plotStatusData.map((item, index) => (
+                            <Cell
+                              key={`cell-${index}`}
+                              fill={
+                                item.color ||
+                                STATUS_COLOR_PALETTE[
+                                  index % STATUS_COLOR_PALETTE.length
+                                ]
+                              }
+                            />
+                          ))}
+                          <Label
+                            content={({ viewBox }) => {
+                              if (
+                                !viewBox ||
+                                !("cx" in viewBox) ||
+                                !("cy" in viewBox)
+                              ) {
+                                return null;
+                              }
+                              const { cx, cy } = viewBox;
+                              const totalLabel =
+                                sugarcaneStatusTotalArea > 0
+                                  ? sugarcaneStatusTotalArea.toLocaleString(
+                                      undefined,
+                                      {
+                                        maximumFractionDigits: 0,
+                                      },
+                                    )
+                                  : "0";
+                              return (
+                                <text
+                                  x={cx}
+                                  y={cy}
+                                  textAnchor="middle"
+                                  dominantBaseline="middle"
+                                >
+                                  <tspan
+                                    x={cx}
+                                    dy="-0.55em"
+                                    className="fill-gray-500"
+                                    style={{ fontSize: 11 }}
+                                  >
+                                    Total Area
+                                  </tspan>
+                                  <tspan
+                                    x={cx}
+                                    dy="1.35em"
+                                    className="fill-gray-900"
+                                    style={{ fontSize: 15, fontWeight: 700 }}
+                                  >
+                                    {totalLabel} acre
+                                  </tspan>
+                                </text>
+                              );
+                            }}
                           />
-                        ))}
-                      </Pie>
-                      <Tooltip />
-                    </RechartsPieChart>
-                  </ResponsiveContainer>
-                </div>
-                <div className="space-y-2 mb-4">
-                  {plotStatusData.map((item, index) => (
-                    <div
-                      key={index}
-                      className="flex items-center justify-between"
-                    >
-                      <div className="flex items-center gap-2">
-                        <div
-                          className="w-3 h-3 rounded-full"
-                          style={{
-                            backgroundColor: STATUS_COLOR_PALETTE[index],
-                          }}
-                        ></div>
-                        <span className="text-sm text-gray-700">
-                          {item.name}
-                        </span>
+                        </Pie>
+                        <Tooltip
+                          formatter={(value: number, name: string) => [
+                            `${Number(value).toLocaleString(undefined, {
+                              maximumFractionDigits: 2,
+                            })} acre`,
+                            name,
+                          ]}
+                        />
+                      </RechartsPieChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  <div className="flex-1 min-w-0 space-y-2">
+                    {plotStatusData.map((item, index) => (
+                      <div
+                        key={item.name}
+                        className="flex items-start justify-between gap-2"
+                      >
+                        <div className="flex items-start gap-2 min-w-0">
+                          <div
+                            className="w-2.5 h-2.5 rounded-full mt-1.5 shrink-0"
+                            style={{
+                              backgroundColor:
+                                item.color ||
+                                STATUS_COLOR_PALETTE[
+                                  index % STATUS_COLOR_PALETTE.length
+                                ],
+                            }}
+                          />
+                          <div className="min-w-0">
+                            <div className="text-xs font-medium text-gray-800 truncate">
+                              {item.name}
+                            </div>
+                            <div className="text-[11px] text-gray-500">
+                              {item.value.toLocaleString(undefined, {
+                                maximumFractionDigits: 2,
+                              })}{" "}
+                              acre · {item.pct.toFixed(1)}%
+                            </div>
+                          </div>
+                        </div>
                       </div>
-                      <span className="text-sm font-semibold text-gray-900">
-                        {item.value}
-                      </span>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
+                )}
               </div>
             </div>
-          </div>
-        </div>
 
         <div className="mt-6">
           <CombinedChart
