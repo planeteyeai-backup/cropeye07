@@ -157,43 +157,7 @@ function areaAcresFromFarmerProfile(
   return areaAcresFromProfilePlot(profile.plots[0]);
 }
 
-function areaAcresFromFeature(feature: unknown): number | null {
-  const row = feature as any;
-  if (!row) return null;
-
-  return areaAcresFromApiRecord(row.properties ?? row);
-}
-
-function areaAcresFromAgroStatsCache(plotName: string): number | null {
-  if (!plotName?.trim()) return null;
-
-  const today = new Date().toISOString().split("T")[0];
-  const keys = [
-    `agroStats_v3_${today}`,
-    `agroStats_${today}`,
-    "agroStats_v3",
-    "agroStats",
-  ];
-
-  for (const key of keys) {
-    const payload = getCache(key) as Record<string, unknown> | null;
-    if (!payload || typeof payload !== "object") continue;
-
-    const row =
-      payload[plotName] ??
-      payload[`"${plotName}"`] ??
-      Object.entries(payload).find(([plotKey]) =>
-        normalizePlotKey(plotKey) === normalizePlotKey(plotName),
-      )?.[1];
-
-    const acres = areaAcresFromApiRecord(row);
-    if (acres != null) return acres;
-  }
-
-  return null;
-}
-
-/** Prefer analyzeSinglePlot area_acres; fall back to feature / agroStats / profile. */
+/** Prefer analyzeSinglePlot area_acres only — never tile/agroStats (those are ~1.56 stale). */
 function resolveDisplayAreaAcres(args: {
   plotBoundary: any;
   plotData: any;
@@ -201,26 +165,26 @@ function resolveDisplayAreaAcres(args: {
   apiAreaAcres: number | null;
   profile?: { plots?: unknown[] } | null;
 }): number | null {
-  // analyzeSinglePlot is the source of truth for the map acre label.
   if (args.apiAreaAcres != null && args.apiAreaAcres > 0) {
     return args.apiAreaAcres;
   }
 
-  const feature = args.plotBoundary ?? args.plotData?.features?.[0];
+  // Profile only as last resort while analyze loads / fails — skip feature & agroStats.
+  return areaAcresFromFarmerProfile(args.profile, args.selectedPlotName);
+}
 
-  const fromFeature = areaAcresFromFeature(feature);
-  if (fromFeature != null) return fromFeature;
-
-  const fromAgroStats = areaAcresFromAgroStatsCache(args.selectedPlotName);
-  if (fromAgroStats != null) return fromAgroStats;
-
-  const fromProfile = areaAcresFromFarmerProfile(
-    args.profile,
-    args.selectedPlotName,
-  );
-  if (fromProfile != null) return fromProfile;
-
-  return null;
+/** Events analyzeSinglePlot keys use underscore (`564_865`); slash often 404s. */
+function analyzePlotIdCandidates(
+  plotName: string,
+  plots?: { fastapi_plot_id?: string | null; gat_number?: unknown; plot_number?: unknown }[] | null,
+): string[] {
+  const raw = String(plotName ?? "").trim();
+  if (!raw) return [];
+  const underscore = raw.replace(/\//g, "_");
+  const slash = raw.replace(/_/g, "/");
+  const api = resolveApiPlotName(raw, plots);
+  const apiUnder = api ? api.replace(/\//g, "_") : "";
+  return [...new Set([underscore, raw, apiUnder, api, slash].filter(Boolean))];
 }
 
 // Add custom styles for the enhanced tooltip
@@ -391,7 +355,13 @@ function waterUptakeVeryHealthyCoordinates(pixelSummary: Record<string, unknown>
  */
 
 function isNoImageryError(message: string | undefined): boolean {
-  return isAdminNoImageryError(message);
+  if (isAdminNoImageryError(message)) return true;
+  const m = String(message ?? "").toLowerCase();
+  return (
+    m.includes("empty response") ||
+    m.includes("invalid data") ||
+    m.includes("unexpected end of json")
+  );
 }
 
 /** Overview framing: zoom in enough to see analysis tiles inside the yellow border. */
@@ -2105,44 +2075,45 @@ const CropEyeMap: React.FC<MapProps> = ({
     ],
   );
 
-  // Always refresh acre from analyzeSinglePlot so stale agroStats (e.g. 1.56)
-  // cannot override the live API value (e.g. 1.41).
+  // Always refresh acre from analyzeSinglePlot (underscore plot_id — slash 404s).
   useEffect(() => {
     if (!selectedPlotName?.trim()) {
       setApiFallbackAreaAcres(null);
       return;
     }
 
-    // Clear previous plot's analyze value until this plot's response arrives.
-    setApiFallbackAreaAcres(null);
-
     let cancelled = false;
-    const apiPlot = plotNameForApi(selectedPlotName);
-    const cacheKey = `mapPlotAreaAcres_${selectedPlotName}`;
+    const cacheKey = `mapPlotAreaAcres_v2_${selectedPlotName}`;
+    const candidates = analyzePlotIdCandidates(selectedPlotName, profile?.plots);
 
-    void getSinglePlotAgroStats(apiPlot)
-      .then((data) => {
-        if (cancelled) return;
-        const acres = areaAcresFromAnalyzeResponse(data);
-        if (acres != null) {
-          setApiFallbackAreaAcres(acres);
-          setCached(cacheKey, { areaAcres: acres });
+    void (async () => {
+      for (const apiPlot of candidates) {
+        if (cancelled || !apiPlot) continue;
+        try {
+          const data = await getSinglePlotAgroStats(apiPlot);
+          if (cancelled) return;
+          const acres = areaAcresFromAnalyzeResponse(data);
+          if (acres != null) {
+            const rounded = Number(acres.toFixed(2));
+            setApiFallbackAreaAcres(rounded);
+            setCached(cacheKey, { areaAcres: rounded });
+            return;
+          }
+        } catch {
+          // try next plot_id form
         }
-      })
-      .catch(() => {
-        // analyzeSinglePlot may fail when plantation date is missing —
-        // fall back to feature / agroStats / profile via resolveDisplayAreaAcres.
-        if (cancelled) return;
-        const cached = getCached(cacheKey) as { areaAcres?: number } | null;
-        if (cached?.areaAcres != null && cached.areaAcres > 0) {
-          setApiFallbackAreaAcres(cached.areaAcres);
-        }
-      });
+      }
+      if (cancelled) return;
+      const cached = getCached(cacheKey) as { areaAcres?: number } | null;
+      if (cached?.areaAcres != null && cached.areaAcres > 0) {
+        setApiFallbackAreaAcres(cached.areaAcres);
+      }
+    })();
 
     return () => {
       cancelled = true;
     };
-  }, [selectedPlotName, getCached, setCached]);
+  }, [selectedPlotName, profile?.plots, getCached, setCached]);
 
   const legendData = useMemo(() => {
     if (activeLayer === "PEST") {

@@ -27,7 +27,7 @@ export function toSafeUserError(
     /vite_|import\.meta|econnaborted|err_failed|access-control|cors/i.test(
       lower,
     ) ||
-    /unexpected end of json|failed to execute ['"]json['"]|is not valid json/i.test(
+    /unexpected end of json|failed to execute ['"]json['"]|is not valid json|empty response|invalid data/i.test(
       lower,
     ) ||
     /request failed \(\d{3}\).* for \//i.test(raw) ||

@@ -58,6 +58,9 @@ export function isAdminNoImageryError(message: string | undefined): boolean {
     m.includes("growth_tiles_disabled") ||
     m.includes("no sentinel") ||
     m.includes("no images found") ||
+    m.includes("empty response") ||
+    m.includes("invalid data") ||
+    m.includes("unexpected end of json") ||
     /\b404\b/.test(m)
   );
 }
@@ -220,11 +223,12 @@ export async function fetchAdminLayerWithDateFallback(options: {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       lastError = err instanceof Error ? err : new Error(message);
+      // Empty/truncated JSON and 404s: try the next ribbon date instead of hard-failing.
       if (isAdminNoImageryError(message)) {
         markLayerEndDateFailed(plotName, layer, endDate);
         removeCache(cacheKey);
         console.warn(
-          `[AdminLayer] ${layer} 404 @ ${endDate} for ${apiPlotName}; trying next date (match backend)…`,
+          `[AdminLayer] ${layer} miss @ ${endDate} for ${apiPlotName}; trying next date…`,
         );
         continue;
       }

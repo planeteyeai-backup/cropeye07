@@ -690,21 +690,32 @@ const IrrigationSchedule: React.FC = () => {
 
     setPlotAreaAcres(resolvePlotAreaAcresFromProfile(selectedPlot, firstFarm));
 
-    // Override with analyzeSinglePlot area_acres (same source as map label).
+    // Override with analyzeSinglePlot area_acres (underscore plot_id — slash often 404s).
     let cancelled = false;
-    const apiPlot =
-      resolveApiPlotName(plotId, profile?.plots) || plotId;
-    if (apiPlot) {
-      void getSinglePlotAgroStats(apiPlot)
-        .then((data) => {
+    const analyzeCandidates = [
+      plotId.replace(/\//g, "_"),
+      plotId,
+      resolveApiPlotName(plotId, profile?.plots)?.replace(/\//g, "_"),
+      resolveApiPlotName(plotId, profile?.plots),
+      plotId.replace(/_/g, "/"),
+    ].filter((v, i, arr): v is string => Boolean(v) && arr.indexOf(v) === i);
+
+    void (async () => {
+      for (const apiPlot of analyzeCandidates) {
+        if (cancelled) return;
+        try {
+          const data = await getSinglePlotAgroStats(apiPlot);
           if (cancelled) return;
           const acres = areaAcresFromAnalyzeResponse(data);
-          if (acres != null) setPlotAreaAcres(acres);
-        })
-        .catch(() => {
-          /* keep profile/boundary acres */
-        });
-    }
+          if (acres != null) {
+            setPlotAreaAcres(Number(acres.toFixed(2)));
+            return;
+          }
+        } catch {
+          /* try next id form */
+        }
+      }
+    })();
 
     try {
       let latN: number | null = null;
