@@ -11,7 +11,6 @@ export const SAR_INDEX_HOST_DEFAULT =
 /** Field Score `/analyze` lives on SEF (not the tile host). */
 export const FIELD_SCORE_HOST_DEFAULT = "https://sef-cropeye.up.railway.app";
 
-const DEV_SAR_PROXY = "/api/sar-index";
 const DEV_SEF_PROXY = "/api/sef";
 
 function isUnreliableTunnelHost(url: string): boolean {
@@ -27,7 +26,7 @@ function envSarUrl(): string {
 /** Absolute upstream (no trailing slash). Env overrides default; tunnels ignored. */
 export function sarIndexUpstream(): string {
   const fromEnv = envSarUrl();
-  if (/^https?:\/\//i.test(fromEnv) && !isUnreliableTunnelHost(fromEnv)) {
+  if (/^https?:\/\//i.test(fromEnv) && !isUnreliableTunnelHost(fromEnv) && !fromEnv.includes('cropeye.ai')) {
     return fromEnv;
   }
   return SAR_INDEX_HOST_DEFAULT;
@@ -38,11 +37,6 @@ export function sarIndexUpstream(): string {
  * Dev always uses Vite `/api/sar-index` → upstream.
  */
 export function getSarIndexBaseUrl(): string {
-  if (import.meta.env.DEV) {
-    const fromEnv = envSarUrl();
-    if (fromEnv && !/^https?:\/\//i.test(fromEnv)) return fromEnv;
-    return DEV_SAR_PROXY;
-  }
   return sarIndexUpstream();
 }
 

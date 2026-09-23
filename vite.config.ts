@@ -48,58 +48,6 @@ export default defineConfig(({ mode }) => {
         });
       },
     },
-    "/api/sar-index": {
-      target: sarIndexTarget,
-      changeOrigin: true,
-      secure: false,
-      timeout: 180_000,
-      proxyTimeout: 180_000,
-      rewrite: (path: string) => path.replace(/^\/api\/sar-index/, ""),
-      configure: (proxy: any) => {
-        proxy.on("proxyReq", (proxyReq: any) => {
-          proxyReq.setHeader("Accept", "application/json");
-          proxyReq.setTimeout(180_000);
-        });
-        proxy.on("proxyRes", (proxyRes: any) => {
-          proxyRes.headers["connection"] = "keep-alive";
-        });
-        proxy.on("error", (err: any, _req: any, res: any) => {
-          console.log("sar-index proxy error:", err?.message || err);
-          if (res && !res.headersSent) {
-            res.writeHead(502, { "Content-Type": "application/json" });
-            res.end(
-              JSON.stringify({
-                error: "SAR index upstream unavailable",
-                detail: String(err?.message || err),
-              }),
-            );
-          }
-        });
-      },
-    },
-    "/api/dev-plot": {
-      target: sarIndexTarget,
-      changeOrigin: true,
-      secure: false,
-      rewrite: (path: string) => path.replace(/^\/api\/dev-plot/, ""),
-      configure: (proxy: any) => {
-        proxy.on("proxyReq", (proxyReq: any) => {
-          proxyReq.setHeader("Accept", "application/json");
-        });
-        proxy.on("error", (err: any, _req: any, res: any) => {
-          console.log("dev-plot (sar) proxy error", err);
-          if (res && !res.headersSent) {
-            res.writeHead(502, { "Content-Type": "application/json" });
-            res.end(
-              JSON.stringify({
-                error: "SAR index upstream unavailable",
-                detail: String(err?.message || err),
-              }),
-            );
-          }
-        });
-      },
-    },
   };
 
   return {
