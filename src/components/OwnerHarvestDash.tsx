@@ -2488,26 +2488,26 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                 </div>
               </div>
 
-              <div className="lg:col-span-1 bg-white rounded-xl p-4 shadow-sm border border-gray-100 flex flex-col">
-                <h3 className="text-base font-semibold text-gray-900 mb-2">
+              <div className="lg:col-span-1 bg-white rounded-xl p-5 shadow-sm border border-gray-100 flex flex-col min-h-[280px]">
+                <h3 className="text-lg font-semibold text-gray-900 mb-3">
                   Sugarcane Status
                 </h3>
 
                 {plotStatusData.length === 0 ? (
-                  <div className="flex flex-1 items-center justify-center text-sm text-gray-500 py-6">
+                  <div className="flex flex-1 items-center justify-center text-sm text-gray-500">
                     No status data for the current filters.
                   </div>
                 ) : (
-                <div className="flex flex-col items-center gap-3">
-                  <div className="relative h-36 w-36 shrink-0">
+                <div className="flex flex-1 items-center justify-center gap-6 w-full">
+                  <div className="relative h-52 w-52 shrink-0">
                     <ResponsiveContainer width="100%" height="100%">
                       <RechartsPieChart>
                         <Pie
                           data={plotStatusData}
                           cx="50%"
                           cy="50%"
-                          innerRadius="54%"
-                          outerRadius="80%"
+                          innerRadius="55%"
+                          outerRadius="85%"
                           paddingAngle={3}
                           dataKey="value"
                           stroke="none"
@@ -2553,7 +2553,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                                     x={cx}
                                     dy="-0.5em"
                                     className="fill-gray-500"
-                                    style={{ fontSize: 10 }}
+                                    style={{ fontSize: 11 }}
                                   >
                                     Total Area
                                   </tspan>
@@ -2561,7 +2561,7 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                                     x={cx}
                                     dy="1.3em"
                                     className="fill-gray-900"
-                                    style={{ fontSize: 13, fontWeight: 700 }}
+                                    style={{ fontSize: 14, fontWeight: 700 }}
                                   >
                                     {totalLabel} acre
                                   </tspan>
@@ -2582,31 +2582,33 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                     </ResponsiveContainer>
                   </div>
 
-                  <div className="w-full space-y-2">
+                  <div className="flex-1 min-w-0 space-y-3">
                     {plotStatusData.map((item, index) => (
                       <div
                         key={item.name}
-                        className="flex items-center gap-2 rounded-lg bg-gray-50 px-2.5 py-1.5"
+                        className="flex items-start justify-between gap-2"
                       >
-                        <div
-                          className="w-2.5 h-2.5 rounded-full shrink-0"
-                          style={{
-                            backgroundColor:
-                              item.color ||
-                              STATUS_COLOR_PALETTE[
-                                index % STATUS_COLOR_PALETTE.length
-                              ],
-                          }}
-                        />
-                        <div className="min-w-0 flex-1">
-                          <div className="text-xs font-semibold text-gray-800 truncate">
-                            {item.name}
-                          </div>
-                          <div className="text-[11px] text-gray-500 tabular-nums">
-                            {item.value.toLocaleString(undefined, {
-                              maximumFractionDigits: 2,
-                            })}{" "}
-                            acre · {item.pct.toFixed(1)}%
+                        <div className="flex items-start gap-2 min-w-0">
+                          <div
+                            className="w-3 h-3 rounded-full mt-1 shrink-0"
+                            style={{
+                              backgroundColor:
+                                item.color ||
+                                STATUS_COLOR_PALETTE[
+                                  index % STATUS_COLOR_PALETTE.length
+                                ],
+                            }}
+                          />
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-gray-800 truncate">
+                              {item.name}
+                            </div>
+                            <div className="text-xs text-gray-500 mt-0.5">
+                              {item.value.toLocaleString(undefined, {
+                                maximumFractionDigits: 2,
+                              })}{" "}
+                              acre
+                            </div>
                           </div>
                         </div>
                       </div>
