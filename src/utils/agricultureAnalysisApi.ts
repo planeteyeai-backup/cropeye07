@@ -10,11 +10,10 @@
  * origin_error when the tunnel host is down.
  */
 import axios from "axios";
+import { getAuthToken } from "./auth";
 
 export const AGRICULTURE_ANALYSIS_API_DEFAULT =
-  "https://events-cropeye.up.railway.app";
-
-const DEV_PROXY = "/api/agriculture-analysis";
+  "https://cropeye-backendd.up.railway.app/api";
 
 function isUnreliableTunnelHost(url: string): boolean {
   return /trycloudflare\.com|ngrok|loca\.lt|cloudflared/i.test(url);
@@ -48,10 +47,8 @@ export function agricultureAnalysisUpstream(): string {
 
 /**
  * Base URL for browser fetches.
- * Dev prefers Vite proxy to avoid Cloudflare tunnel CORS issues.
  */
 export function agricultureAnalysisBaseUrl(): string {
-  if (import.meta.env.DEV) return DEV_PROXY;
   return agricultureAnalysisUpstream();
 }
 
@@ -71,3 +68,16 @@ export const agricultureAnalysisHttp = axios.create({
     Accept: "application/json",
   },
 });
+
+agricultureAnalysisHttp.interceptors.request.use(
+  (config) => {
+    const token = getAuthToken();
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
+  }
+);

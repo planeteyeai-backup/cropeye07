@@ -79,7 +79,7 @@ function areaAcresFromApiRecord(record: unknown): number | null {
 }
 
 /** analyzeSinglePlot body: top-level, GeoJSON feature, or nested plot dict. */
-function areaAcresFromAnalyzeResponse(data: unknown): number | null {
+export function areaAcresFromAnalyzeResponse(data: unknown): number | null {
   const direct = areaAcresFromApiRecord(data);
   if (direct != null) return direct;
 
