@@ -1117,9 +1117,32 @@ const OwnerFarmDash: React.FC = () => {
     const selManager = managers.find(
       (m) => String(m.id ?? m.user_id) === String(selectedManagerId),
     );
-    const district = String(
-      selManager?.district || selManager?.factory_name || "",
+
+    // Try manager's explicit district field first, then extract from factory name
+    const rawDistrict = String(
+      selManager?.district ||
+      selManager?.region ||
+      selManager?.factory_name ||
+      selManager?.industry?.name ||
+      selManager?.industry_name ||
+      "",
     ).trim();
+
+    // Extract district keyword from strings like "ICPL Sugar Factory Vijayapur"
+    const extractDistrictFromLabel = (label: string): string => {
+      const lower = label.toLowerCase().replace(/\s+/g, "");
+      if (/vijay|bijapur|vijapura/.test(lower)) return "vijaypura";
+      if (/mandya/.test(lower)) return "mandya";
+      if (/kalbur|gulbarga/.test(lower)) return "kalburgi";
+      if (/bagalk/.test(lower)) return "bagalkot";
+      if (/mudhol/.test(lower)) return "bagalkot";
+      if (/indi/.test(lower)) return "vijaypura";
+      if (/maddur/.test(lower)) return "mandya";
+      if (/aland/.test(lower)) return "kalburgi";
+      return label;
+    };
+
+    const district = extractDistrictFromLabel(rawDistrict);
     if (!district) {
       setDistrictAreaData(null);
       return;
@@ -3276,7 +3299,9 @@ const OwnerFarmDash: React.FC = () => {
 
   const displayArea = selectedFarmerId
     ? metrics.area  // farmer selected → show that farmer's plot area from analyzeSinglePlot
-    : ownerDistrictsAreaSum?.total_area_acres ?? foArea ?? null; // no farmer → total district area
+    : selectedManagerId && districtAreaData?.total_area_acres != null
+      ? districtAreaData.total_area_acres  // manager/district selected → show that district's area
+      : ownerDistrictsAreaSum?.total_area_acres ?? foArea ?? null; // default → total district area
   const displayCropStatus = useFoFactoryMetrics
     ? foCropStatusLabel
     : metrics.growthStage;
