@@ -94,6 +94,10 @@ import api, {
   isAnalyzeSinglePlotPlantationDateError,
   parseFarmersByFieldOfficerResponse,
   PLANTATION_DATE_NOT_PROVIDED_MSG,
+  fetchDistrictTotalPlotArea,
+  fetchOwnerDistrictsTotalPlotAreaSum,
+  type OwnerDistrictsTotalPlotAreaSum,
+  type DistrictTotalPlotAreaResponse,
 } from "../api"; // Import the authenticated api instance + hierarchy helpers
 import {
   buildFoMapPlotsFromAgroStats,
@@ -122,7 +126,7 @@ import { resolveProgressOwnerId } from "./progressbar/useFactoryProgress";
 import { LatLngBounds } from "leaflet";
 
 // Comprehensive Agriculture Analysis API (Events Railway; Vite proxy in DEV)
-const BASE_URL = agricultureAnalysisBaseUrl();
+const BASE_URL = "https://events-cropeye.up.railway.app";
 
 /** indices / stress / irrigation on this host are often slow; 10s caused AbortController + axios to cancel (Network shows "(canceled)" ~10s). */
 const OWNER_EVENTS_SLOW_ENDPOINT_TIMEOUT_MS = 90_000;
@@ -1033,6 +1037,14 @@ const OwnerFarmDash: React.FC = () => {
   const [loadingFactoryDash, setLoadingFactoryDash] = useState(false);
   const [factoryRollup, setFactoryRollup] =
     useState<FactoryDashboardFactory | null>(null);
+
+  // Owner total area (all districts) — shown when no manager selected
+  const [ownerDistrictsAreaSum, setOwnerDistrictsAreaSum] =
+    useState<OwnerDistrictsTotalPlotAreaSum | null>(null);
+  // Manager-selected district area
+  const [districtAreaData, setDistrictAreaData] =
+    useState<DistrictTotalPlotAreaResponse | null>(null);
+  const [districtAreaLoading, setDistrictAreaLoading] = useState(false);
   const [foMapPlots, setFoMapPlots] = useState<FoMapPlot[]>([]);
   /** Backend Growth PNG/XYZ from analyze_Growth (same as Map page). */
   const [growthOverlayUrl, setGrowthOverlayUrl] = useState<string | null>(null);
@@ -1052,6 +1064,8 @@ const OwnerFarmDash: React.FC = () => {
   const dashboardLoadedForPlotRef = useRef<string>("");
   const farmerFetchGenRef = useRef(0);
   const factoryDashRequestIdRef = useRef(0);
+  /** Cache FO agroStats so fetchAllData can look up a plot without calling analyzeSinglePlot. */
+  const foAgroStatsRef = useRef<Record<string, any> | null>(null);
 
   const selectedFarmerForUi =
     farmersForSelectedOfficer.find(
@@ -1084,6 +1098,40 @@ const OwnerFarmDash: React.FC = () => {
   useEffect(() => {
     fetchOwnerHierarchy();
   }, []);
+
+  // Owner total area — fetch once on mount (all districts, no manager filter)
+  useEffect(() => {
+    let cancelled = false;
+    fetchOwnerDistrictsTotalPlotAreaSum()
+      .then((sum) => { if (!cancelled) setOwnerDistrictsAreaSum(sum); })
+      .catch(() => { if (!cancelled) setOwnerDistrictsAreaSum(null); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Manager-selected district area
+  useEffect(() => {
+    if (!selectedManagerId) {
+      setDistrictAreaData(null);
+      return;
+    }
+    const selManager = managers.find(
+      (m) => String(m.id ?? m.user_id) === String(selectedManagerId),
+    );
+    const district = String(
+      selManager?.district || selManager?.factory_name || "",
+    ).trim();
+    if (!district) {
+      setDistrictAreaData(null);
+      return;
+    }
+    let cancelled = false;
+    setDistrictAreaLoading(true);
+    fetchDistrictTotalPlotArea(district)
+      .then((data) => { if (!cancelled) setDistrictAreaData(data); })
+      .catch(() => { if (!cancelled) setDistrictAreaData(null); })
+      .finally(() => { if (!cancelled) setDistrictAreaLoading(false); });
+    return () => { cancelled = true; };
+  }, [selectedManagerId, managers]);
 
   // Keep refs so async boundary refresh targets the latest selection.
   useEffect(() => {
@@ -1406,6 +1454,8 @@ const OwnerFarmDash: React.FC = () => {
             raw && typeof raw === "object"
               ? (raw as Record<string, unknown>)
               : null;
+          // Cache FO agroStats so fetchAllData can use it without calling analyzeSinglePlot
+          if (agroStats) foAgroStatsRef.current = agroStats as Record<string, any>;
         } else {
           const officers =
             teamFieldOfficersRaw.length > 0
@@ -1512,7 +1562,20 @@ const OwnerFarmDash: React.FC = () => {
         if (cancelled) return;
 
         const apiFarmers = parseFarmersByFieldOfficerResponse(res?.data);
-        setFarmersForSelectedOfficer(apiFarmers);
+
+        // If API returns empty, fall back to hierarchy data (nested farmers / teamFarmersRaw)
+        if (apiFarmers.length > 0) {
+          setFarmersForSelectedOfficer(apiFarmers);
+        } else {
+          const officer = fieldOfficers.find(
+            (fo) =>
+              String(fo.id ?? fo.user_id) === String(selectedFieldOfficerId),
+          );
+          const fallbackFarmers = officer
+            ? getFarmersForFieldOfficer(officer, teamFarmersRaw)
+            : [];
+          setFarmersForSelectedOfficer(fallbackFarmers);
+        }
       } catch {
         if (cancelled) return;
         const officer = fieldOfficers.find(
@@ -1595,11 +1658,23 @@ const OwnerFarmDash: React.FC = () => {
         );
         if (cancelled || fetchGen !== farmerFetchGenRef.current) return;
 
-        let enrichedPlots = farmPlots;
+        // If API returned no plots, fall back to hierarchy farmer data
+        let resolvedFarmer = farmer;
+        let resolvedPlots = farmPlots;
+        if (!resolvedPlots.length) {
+          const hierarchyFarmer = farmersForSelectedOfficer.find(
+            (f) => getFarmerId(f) === farmerId,
+          );
+          if (hierarchyFarmer) {
+            resolvedFarmer = hierarchyFarmer;
+            resolvedPlots = plotsFromFieldOfficerFarmer(hierarchyFarmer);
+          }
+        }
+        let enrichedPlots = resolvedPlots;
         try {
           const farmsRes = await getFarmsByFarmerId(farmerId);
           const farms = parseFarmsListResponse(farmsRes?.data);
-          enrichedPlots = enrichPlotsWithFarmDetails(farmPlots, farms);
+          enrichedPlots = enrichPlotsWithFarmDetails(resolvedPlots, farms);
           // Drop Events/FO polygon cache so map redraws from Django KML.
           setPlotCoordinatesCache((prev) => {
             const next = new Map(prev);
@@ -1612,7 +1687,7 @@ const OwnerFarmDash: React.FC = () => {
             return next;
           });
         } catch {
-          enrichedPlots = farmPlots;
+          enrichedPlots = resolvedPlots;
         }
 
         lastFetchedFarmerIdRef.current = farmerId;
@@ -1621,13 +1696,13 @@ const OwnerFarmDash: React.FC = () => {
           [farmerId]: enrichedPlots,
         }));
 
-        if (farmer) {
+        if (resolvedFarmer) {
           setFarmersForSelectedOfficer((prev) =>
             prev.map((f) =>
               getFarmerId(f) === farmerId
                 ? {
                     ...f,
-                    ...farmer,
+                    ...resolvedFarmer,
                     plots: enrichedPlots,
                     plots_count: enrichedPlots.length,
                   }
@@ -3199,7 +3274,9 @@ const OwnerFarmDash: React.FC = () => {
       ? Number(factoryRollup.field_score_avg)
       : null;
 
-  const displayArea = useFoFactoryMetrics ? foArea : metrics.area;
+  const displayArea = selectedFarmerId
+    ? metrics.area  // farmer selected → show that farmer's plot area from analyzeSinglePlot
+    : ownerDistrictsAreaSum?.total_area_acres ?? foArea ?? null; // no farmer → total district area
   const displayCropStatus = useFoFactoryMetrics
     ? foCropStatusLabel
     : metrics.growthStage;

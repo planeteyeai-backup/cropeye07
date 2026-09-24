@@ -2050,12 +2050,7 @@ export const getSinglePlotAgroStats = async (
     params.set("end_date", endDate);
   }
   const { endDate: _omit, ...axiosConfig } = config ?? {};
-  // Must NOT use eventsApi baseURL with a relative /api/... path — that would
-  // incorrectly nest under Railway. Prefer agricultureAnalysisUrl() which now
-  // defaults to Events Railway (Cloudflare tunnel was 502ing).
-  const url = agricultureAnalysisUrl(
-    `/plots/analyzeSinglePlot?${params.toString()}`,
-  );
+  const url = `https://events-cropeye.up.railway.app/plots/analyzeSinglePlot?${params.toString()}`;
   const response = await agricultureAnalysisHttp.get(url, axiosConfig);
   return response.data;
 };

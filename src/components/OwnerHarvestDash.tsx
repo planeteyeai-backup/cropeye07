@@ -2534,7 +2534,14 @@ const HarvestDashboard: React.FC<HarvestDashboardProps> = ({
                               }
                               const { cx, cy } = viewBox;
                               const totalLabel =
-                                sugarcaneStatusTotalArea > 0
+                                ownerDistrictsAreaSum?.total_area_acres != null
+                                  ? ownerDistrictsAreaSum.total_area_acres.toLocaleString(
+                                      undefined,
+                                      {
+                                        maximumFractionDigits: 2,
+                                      },
+                                    )
+                                  : sugarcaneStatusTotalArea > 0
                                   ? sugarcaneStatusTotalArea.toLocaleString(
                                       undefined,
                                       {
