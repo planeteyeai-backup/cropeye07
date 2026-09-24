@@ -15,33 +15,12 @@ import { getAuthToken } from "./auth";
 export const AGRICULTURE_ANALYSIS_API_DEFAULT =
   "https://cropeye-backendd.up.railway.app/api";
 
-function isUnreliableTunnelHost(url: string): boolean {
-  return /trycloudflare\.com|ngrok|loca\.lt|cloudflared/i.test(url);
-}
+// function isUnreliableTunnelHost(url: string): boolean {
+//   return /trycloudflare\.com|ngrok|loca\.lt|cloudflared/i.test(url);
+// }
 
 /** Absolute upstream host (no trailing slash). */
 export function agricultureAnalysisUpstream(): string {
-  const preferred = String(
-    import.meta.env.VITE_AGRICULTURE_ANALYSIS_API_URL ?? "",
-  )
-    .trim()
-    .replace(/\/$/, "");
-  if (/^https?:\/\//i.test(preferred) && !isUnreliableTunnelHost(preferred)) {
-    return preferred;
-  }
-
-  // VITE_DEV_EVENTS_API_URL is often a dead Cloudflare tunnel in Render env —
-  // never use tunnel hosts for plot stats (analyzeSinglePlot / indices).
-  const eventsAlias = String(import.meta.env.VITE_DEV_EVENTS_API_URL ?? "")
-    .trim()
-    .replace(/\/$/, "");
-  if (
-    /^https?:\/\//i.test(eventsAlias) &&
-    !isUnreliableTunnelHost(eventsAlias)
-  ) {
-    return eventsAlias;
-  }
-
   return AGRICULTURE_ANALYSIS_API_DEFAULT;
 }
 
