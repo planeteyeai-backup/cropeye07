@@ -32,6 +32,7 @@ export function parseDaysToHarvest(raw: unknown): FactoryDaysToHarvest | null {
   const within_45_days = asFiniteNumber(d.within_45_days);
   const within_90_days = asFiniteNumber(d.within_90_days);
   const within_120_days = asFiniteNumber(d.within_120_days);
+  const above_120_days = asFiniteNumber(d.above_120_days);
   const plots_with_days_to_harvest = asFiniteNumber(
     d.plots_with_days_to_harvest,
   );
@@ -41,6 +42,7 @@ export function parseDaysToHarvest(raw: unknown): FactoryDaysToHarvest | null {
     within_45_days == null &&
     within_90_days == null &&
     within_120_days == null &&
+    above_120_days == null &&
     plots_with_days_to_harvest == null
   ) {
     return null;
@@ -51,6 +53,7 @@ export function parseDaysToHarvest(raw: unknown): FactoryDaysToHarvest | null {
     within_45_days: within_45_days ?? undefined,
     within_90_days: within_90_days ?? undefined,
     within_120_days: within_120_days ?? undefined,
+    above_120_days: above_120_days ?? undefined,
     plots_with_days_to_harvest: plots_with_days_to_harvest ?? undefined,
     note: d.note != null ? String(d.note) : undefined,
   };
@@ -67,6 +70,7 @@ export function sumDaysToHarvest(
     within_45_days: 0,
     within_90_days: 0,
     within_120_days: 0,
+    above_120_days: 0,
     plots_with_days_to_harvest: 0,
   };
   for (const item of items) {
@@ -82,6 +86,8 @@ export function sumDaysToHarvest(
       (out.within_90_days || 0) + (Number(item.within_90_days) || 0);
     out.within_120_days =
       (out.within_120_days || 0) + (Number(item.within_120_days) || 0);
+    out.above_120_days =
+      (out.above_120_days || 0) + (Number(item.above_120_days) || 0);
     out.plots_with_days_to_harvest =
       (out.plots_with_days_to_harvest || 0) +
       (Number(item.plots_with_days_to_harvest) || 0);
@@ -257,6 +263,7 @@ export type FactoryDaysToHarvest = {
   within_45_days?: number;
   within_90_days?: number;
   within_120_days?: number;
+  above_120_days?: number;
   plots_with_days_to_harvest?: number;
   note?: string;
 };

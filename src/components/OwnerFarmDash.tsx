@@ -4055,6 +4055,13 @@ const OwnerFarmDash: React.FC = () => {
                       value={`${Number(factoryRollup.days_to_harvest.within_120_days ?? 0)} plots`}
                       tone="text-orange-600"
                     />
+                    {factoryRollup.days_to_harvest.above_120_days != null ? (
+                      <MetricListRow
+                        label=">120 days"
+                        value={`${Number(factoryRollup.days_to_harvest.above_120_days)} plots`}
+                        tone="text-orange-600"
+                      />
+                    ) : null}
                   </div>
                 )}
                 <p className="text-xs text-gray-800 font-bold">
