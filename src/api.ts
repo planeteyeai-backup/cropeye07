@@ -2154,7 +2154,8 @@ const EVENTS_DISTRICT_SLUGS = new Set([
 export function normalizeDistrictForEventsApi(district: string): string {
   const d = district.trim().toLowerCase().replace(/\s+/g, "");
   if (!d) return "";
-  return DISTRICT_EVENTS_API_ALIASES[d] ?? d;
+  const slug = DISTRICT_EVENTS_API_ALIASES[d] ?? d;
+  return EVENTS_DISTRICT_SLUGS.has(slug) ? slug : "";
 }
 
 function slugFromDistrictLabel(label: string): string {
@@ -2203,6 +2204,8 @@ function collectDistrictLabelsFromRecord(
   push(row.region);
   push(row.taluka);
   push(row.state);
+  push(row.factory_name);
+  push(row.industry_name);
 
   const addressInfo = row.address_info as Record<string, unknown> | undefined;
   if (addressInfo) {

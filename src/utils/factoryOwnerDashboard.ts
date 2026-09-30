@@ -295,6 +295,7 @@ export type FactoryDashboardFactory = {
   total_field_area_acres?: number | null;
   average_yield_t_per_acre?: number | null;
   expected_yield_t_per_acre?: number | null;
+  expected_yield_avg_t_per_acre?: number | null;
   expected_yield_min_t_per_acre?: number | null;
   expected_yield_max_t_per_acre?: number | null;
   biomass_avg_t_per_acre?: number | null;
@@ -445,6 +446,19 @@ export function parseFactoryDashboardFactory(
   }
 
   const factory = { ...(data as FactoryDashboardFactory) };
+
+  factory.expected_yield_t_per_acre =
+    asFiniteNumber(factory.expected_yield_t_per_acre) ??
+    asFiniteNumber(factory.expected_yield_avg_t_per_acre) ??
+    asFiniteNumber(factory.average_yield_t_per_acre) ??
+    pickMinMax(data, ["expected_yield_avg_t_per_acre", "avg_sugar_yield_t_per_acre"]) ??
+    nestedStat(data, ["expected_yield", "yield", "sugar_yield"], "mean") ??
+    nestedStat(data, ["expected_yield", "yield", "sugar_yield"], "avg");
+  factory.biomass_avg_t_per_acre =
+    asFiniteNumber(factory.biomass_avg_t_per_acre) ??
+    pickMinMax(data, ["average_biomass_t_per_acre", "avg_biomass_t_per_acre"]) ??
+    nestedStat(data, ["biomass", "avg_biomass"], "mean") ??
+    nestedStat(data, ["biomass", "avg_biomass"], "avg");
 
   factory.brix_min =
     asFiniteNumber(factory.brix_min) ??
@@ -792,9 +806,8 @@ export function findFactoryById(
 }
 
 /**
- * Accept industry/factory ids only when they appear on GET /factories/dashboard.
- * Django often stores owner_id (e.g. 2476) as industry_id — that 404s on
- * GET /factories/{id}/dashboard. Prefer FO → factory mapping instead.
+ * Resolve the selected factory from its field officers first. Django industry
+ * IDs can numerically collide with a different Events factory ID.
  */
 export function resolveEventsFactoryId(opts: {
   list: FactoryDashboardResponse | null | undefined;
@@ -802,11 +815,6 @@ export function resolveEventsFactoryId(opts: {
   fieldOfficerIds?: Array<string | number | null | undefined>;
 }): string {
   const known = knownFactoryIds(opts.list);
-
-  for (const raw of opts.candidateIds ?? []) {
-    const id = String(raw ?? "").trim();
-    if (id && known.has(id)) return id;
-  }
 
   for (const raw of opts.fieldOfficerIds ?? []) {
     const fo = String(raw ?? "").trim();
@@ -816,6 +824,11 @@ export function resolveEventsFactoryId(opts: {
       const id = String(found.factory_id).trim();
       if (id && known.has(id)) return id;
     }
+  }
+
+  for (const raw of opts.candidateIds ?? []) {
+    const id = String(raw ?? "").trim();
+    if (id && known.has(id)) return id;
   }
 
   return "";
