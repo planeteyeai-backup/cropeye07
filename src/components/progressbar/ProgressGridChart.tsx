@@ -19,6 +19,10 @@ import { requestProgressDashboardNav } from './progressNavigation';
 import { DEFAULT_MONTH_SECTION } from './progressConstants';
 import type { FactoryId } from './factoryProgressTypes';
 import {
+  loadFarmerPlotMetrics,
+  type FarmerPlotMetrics,
+} from './farmerPlotMetrics';
+import {
   CHART_TOP_RANGES,
   CHART_Y_DOMAIN,
   YIELD_GRID_LINES,
@@ -140,6 +144,12 @@ interface RangeFarmerRow {
   bud: string;
   /** Days from plantation date to today. */
   plantationDays: string;
+  daysToHarvest: number | null;
+  cropStatus: string;
+  fieldScore: number | null;
+  recoveryRate: number | null;
+  metricsUnavailable: boolean;
+  metricsLoading: boolean;
   tons: number;
   yieldDate: string;
   hasYieldData: boolean;
@@ -218,6 +228,9 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
   const [timeMode, setTimeMode] = useState<ChartTimeMode>('current');
   const [asOfDate, setAsOfDate] = useState<string | null>(null);
   const [prefReady, setPrefReady] = useState(false);
+  const [farmerMetrics, setFarmerMetrics] = useState<
+    Record<string, FarmerPlotMetrics>
+  >({});
   const farmerTableRef = useRef<HTMLDivElement>(null);
 
   const snapshotDates = useMemo(
@@ -313,6 +326,60 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
     );
   }, [farmerInputs]);
 
+  useEffect(() => {
+    if (selectedRangeIndex == null) {
+      setFarmerMetrics({});
+      return;
+    }
+
+    const group = rangeGroups[selectedRangeIndex];
+    if (!group) {
+      setFarmerMetrics({});
+      return;
+    }
+
+    let cancelled = false;
+    const farmerIds = group.farmers.map((farmer) => farmer.farmerId);
+    setFarmerMetrics(
+      Object.fromEntries(
+        farmerIds.map((farmerId) => [
+          farmerId,
+          {
+            daysToHarvest: null,
+            cropStatus: null,
+            fieldScore: null,
+            recoveryRate: null,
+            plotCount: 0,
+            unavailable: false,
+            loading: true,
+          },
+        ]),
+      ),
+    );
+
+    void (async () => {
+      const batchSize = 4;
+      for (let index = 0; index < farmerIds.length; index += batchSize) {
+        const batch = farmerIds.slice(index, index + batchSize);
+        const results = await Promise.all(
+          batch.map(async (farmerId) => [
+            farmerId,
+            await loadFarmerPlotMetrics(farmerId),
+          ] as const),
+        );
+        if (cancelled) return;
+        setFarmerMetrics((current) => ({
+          ...current,
+          ...Object.fromEntries(results),
+        }));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRangeIndex, rangeGroups]);
+
   const maxRangeIndex = CHART_TOP_RANGES.length - 1;
 
   const rangeDots = useMemo((): RangeBubbleRow[] => {
@@ -379,6 +446,7 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
         }
 
         const days = daysSincePlantation(cfg?.plantationDate);
+        const metrics = farmerMetrics[farmer.farmerId];
 
         return {
           farmerId: farmer.farmerId,
@@ -388,12 +456,18 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
           variety: cfg?.variety?.trim() || '-',
           bud: cfg?.budMethod?.trim() || '-',
           plantationDays: days != null ? String(days) : '-',
+          daysToHarvest: metrics?.daysToHarvest ?? null,
+          cropStatus: metrics?.cropStatus ?? '-',
+          fieldScore: metrics?.fieldScore ?? null,
+          recoveryRate: metrics?.recoveryRate ?? null,
+          metricsUnavailable: metrics?.unavailable ?? false,
+          metricsLoading: metrics?.loading ?? true,
           tons: farmer.tons,
           yieldDate,
           hasYieldData: farmer.hasYieldData,
         };
       });
-  }, [selectedRangeIndex, rangeGroups, farmerInputs]);
+  }, [selectedRangeIndex, rangeGroups, farmerInputs, farmerMetrics]);
 
   const selectedRangeLabel =
     selectedRangeIndex != null ? rangeGroups[selectedRangeIndex]?.label : null;
@@ -806,7 +880,10 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
                     <button
                       type="button"
                       onClick={() => void handleRangeExcelDownload()}
-                      disabled={exporting}
+                      disabled={
+                        exporting ||
+                        selectedFarmers.some((farmer) => farmer.metricsLoading)
+                      }
                       className="inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
                       style={{
                         borderColor: `${T.active}55`,
@@ -815,7 +892,11 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
                       }}
                     >
                       <Download className="h-3 w-3" />
-                      {exporting ? 'Preparing…' : 'Download Excel'}
+                      {exporting
+                        ? 'Preparing…'
+                        : selectedFarmers.some((farmer) => farmer.metricsLoading)
+                          ? 'Loading metrics…'
+                          : 'Download Excel'}
                     </button>
                   )}
                   <button
@@ -835,7 +916,7 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
                 </p>
               ) : (
                 <>
-                  <table className="w-full table-fixed text-left text-xs">
+                  <table className="min-w-[1260px] w-full table-fixed text-left text-xs">
                     <colgroup>
                       <col className="w-10 sm:w-12" />
                       <col />
@@ -844,6 +925,10 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
                       <col className="w-20 sm:w-24" />
                       <col className="w-16 sm:w-20" />
                       <col className="w-16 sm:w-20" />
+                      <col className="w-24 sm:w-28" />
+                      <col className="w-28 sm:w-32" />
+                      <col className="w-20 sm:w-24" />
+                      <col className="w-24 sm:w-28" />
                       <col className="w-24 sm:w-28" />
                       <col className="w-16 sm:w-20" />
                     </colgroup>
@@ -862,7 +947,31 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
                           className="px-2 py-2"
                           title="Days from plantation date to today"
                         >
-                          Days
+                          Plantation days
+                        </th>
+                        <th
+                          className="px-2 py-2"
+                          title="Average days to harvest across this farmer's plots"
+                        >
+                          Days to harvest
+                        </th>
+                        <th
+                          className="px-2 py-2"
+                          title="Crop status for this farmer's plots"
+                        >
+                          Crop status
+                        </th>
+                        <th
+                          className="px-2 py-2"
+                          title="Average field score across this farmer's plots"
+                        >
+                          Field score
+                        </th>
+                        <th
+                          className="px-2 py-2"
+                          title="Average recovery rate across this farmer's plots"
+                        >
+                          Recovery rate
                         </th>
                         <th className="px-2 py-2">Yield date</th>
                         <th className="px-2 py-2 text-right">Yield (ton)</th>
@@ -870,10 +979,10 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
                     </thead>
                   </table>
                   <div
-                    className="overflow-y-auto overflow-x-hidden"
+                    className="overflow-auto"
                     style={{ maxHeight: FARMER_LIST_MAX_HEIGHT }}
                   >
-                    <table className="w-full table-fixed text-left text-xs">
+                    <table className="min-w-[1260px] w-full table-fixed text-left text-xs">
                       <colgroup>
                         <col className="w-10 sm:w-12" />
                         <col />
@@ -882,6 +991,10 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
                         <col className="w-20 sm:w-24" />
                         <col className="w-16 sm:w-20" />
                         <col className="w-16 sm:w-20" />
+                        <col className="w-24 sm:w-28" />
+                        <col className="w-28 sm:w-32" />
+                        <col className="w-20 sm:w-24" />
+                        <col className="w-24 sm:w-28" />
                         <col className="w-24 sm:w-28" />
                         <col className="w-16 sm:w-20" />
                       </colgroup>
@@ -936,6 +1049,56 @@ const ProgressGridChart: React.FC<ProgressGridChartProps> = ({
                               style={{ color: C.text }}
                             >
                               {farmer.plantationDays}
+                            </td>
+                            <td
+                              className="whitespace-nowrap px-2 py-1.5"
+                              style={{ color: C.text }}
+                              title={
+                                farmer.metricsUnavailable
+                                  ? 'One or more plot metrics could not be loaded'
+                                  : 'Average across this farmer’s plots'
+                              }
+                            >
+                              {farmer.daysToHarvest != null
+                                ? `${Math.round(farmer.daysToHarvest)} d`
+                                : farmer.metricsLoading
+                                  ? 'Loading…'
+                                  : '-'}
+                            </td>
+                            <td
+                              className="truncate px-2 py-1.5"
+                              style={{ color: C.text }}
+                              title={farmer.cropStatus}
+                            >
+                              {farmer.metricsLoading
+                                ? 'Loading…'
+                                : farmer.cropStatus}
+                            </td>
+                            <td
+                              className="whitespace-nowrap px-2 py-1.5"
+                              style={{ color: C.text }}
+                              title={
+                                farmer.metricsUnavailable
+                                  ? 'One or more plot metrics could not be loaded'
+                                  : 'Average across this farmer’s plots'
+                              }
+                            >
+                              {farmer.fieldScore != null
+                                ? `${farmer.fieldScore.toFixed(1)}%`
+                                : farmer.metricsLoading
+                                  ? 'Loading…'
+                                  : '-'}
+                            </td>
+                            <td
+                              className="whitespace-nowrap px-2 py-1.5"
+                              style={{ color: C.text }}
+                              title="Average across this farmer’s plots"
+                            >
+                              {farmer.recoveryRate != null
+                                  ? `${farmer.recoveryRate.toFixed(1)}%`
+                                  : farmer.metricsLoading
+                                    ? 'Loading…'
+                                    : '-'}
                             </td>
                             <td
                               className="whitespace-nowrap px-2 py-1.5"

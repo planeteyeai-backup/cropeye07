@@ -91,6 +91,10 @@ export interface YieldRangeExportRow {
   variety?: string;
   bud?: string;
   plantationDays?: string;
+  daysToHarvest?: number | null;
+  cropStatus?: string;
+  fieldScore?: number | null;
+  recoveryRate?: number | null;
   yieldDate: string;
   tons: number;
   hasYieldData: boolean;
@@ -114,6 +118,19 @@ export async function downloadYieldRangeFarmersExcel(
     Variety: farmer.variety?.trim() || '-',
     Bud: farmer.bud?.trim() || '-',
     'Plantation days': farmer.plantationDays?.trim() || '-',
+    'Days to harvest':
+      farmer.daysToHarvest != null
+        ? Number(farmer.daysToHarvest.toFixed(1))
+        : '-',
+    'Crop status': farmer.cropStatus?.trim() || '-',
+    'Field score':
+      farmer.fieldScore != null
+        ? Number(farmer.fieldScore.toFixed(1))
+        : '-',
+    'Recovery rate':
+      farmer.recoveryRate != null
+        ? Number(farmer.recoveryRate.toFixed(1))
+        : '-',
     'Yield date': farmer.yieldDate === '-' ? '-' : farmer.yieldDate,
     'Yield (ton)': farmer.hasYieldData ? formatYieldTon(farmer.tons) : '-',
   }));
@@ -127,6 +144,10 @@ export async function downloadYieldRangeFarmersExcel(
       'Variety',
       'Bud',
       'Plantation days',
+      'Days to harvest',
+      'Crop status',
+      'Field score',
+      'Recovery rate',
       'Yield date',
       'Yield (ton)',
     ],
@@ -140,6 +161,11 @@ export async function downloadYieldRangeFarmersExcel(
     { wch: 12 },
     { wch: 14 },
     { wch: 16 },
+    { wch: 28 },
+    { wch: 14 },
+    { wch: 16 },
+    { wch: 16 },
+    { wch: 14 },
     { wch: 12 },
   ];
 
