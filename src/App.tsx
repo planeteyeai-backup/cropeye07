@@ -22,6 +22,7 @@ function lazyNamed<T extends Record<string, React.ComponentType<any>>>(
 }
 
 const OwnerFarmDash = lazy(() => import("./components/OwnerFarmDash"));
+const OwnerOverviewDash = lazy(() => import("./components/OwnerOverviewDash"));
 const OwnerHarvestDash = lazy(() => import("./components/OwnerHarvestDash"));
 const Addusers = lazyNamed(() => import("./components/Addusers"), "Addusers");
 const UserList = lazyNamed(() => import("./components/userList"), "UserList");
@@ -74,6 +75,7 @@ enum View {
   OwnerAgroDashboard = "OwnerAgroDashboard",
   ManagerFarmDash = "ManagerFarmDash",
   OwnerFarmDash = "OwnerFarmDash",
+  OwnerOverviewDash = "OwnerOverviewDash",
   OwnerHarvestDash = "OwnerHarvestDash",
   AddUsers = "addusers",
   userList = "userlist",
@@ -125,8 +127,12 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
       : userRole;
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [currentView, setCurrentView] = useState<View>(View.Home);
-  const [cachedViews, setCachedViews] = useState<View[]>([View.Home]);
+  const [currentView, setCurrentView] = useState<View>(
+    effectiveRole === "owner" ? View.OwnerOverviewDash : View.Home,
+  );
+  const [cachedViews, setCachedViews] = useState<View[]>([
+    effectiveRole === "owner" ? View.OwnerOverviewDash : View.Home,
+  ]);
   const [activeSubmenu, setActiveSubmenu] = useState<string | null>(null);
   const [expandedSidebarMenu, setExpandedSidebarMenu] = useState<string | null>(
     null
@@ -239,6 +245,8 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
       'managerfarmdash': View.ManagerFarmDash,
       'owner-farm-dash': View.OwnerFarmDash,
       'ownerfarmdash': View.OwnerFarmDash,
+      'owner-overview': View.OwnerOverviewDash,
+      'owneroverview': View.OwnerOverviewDash,
       'owner-harvest-dash': View.OwnerHarvestDash,
       'ownerharvestdash': View.OwnerHarvestDash,
       'farmer-dashboard': View.FarmerDashboard,
@@ -298,6 +306,10 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
         } else {
           nextView = View.HarvestDashboard;
         }
+        break;
+      case "Owner Overview":
+      case "owner-overview":
+        nextView = View.OwnerOverviewDash;
         break;
       case "ViewFarmerPlot":
         nextView = View.FarmCropStatus;
@@ -432,6 +444,7 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
       [View.HarvestDashboard]: 'harvestdashboard',
       [View.ManagerFarmDash]: 'managerfarmdash',
       [View.OwnerFarmDash]: 'ownerfarmdash',
+      [View.OwnerOverviewDash]: 'owneroverview',
       [View.OwnerHarvestDash]: 'ownerharvestdash',
       [View.FarmerDashboard]: 'farmerdashboard',
       [View.ProgressDashboard]: 'progressdashboard',
@@ -825,6 +838,12 @@ const App: React.FC<AppProps> = ({ userRole, onLogout }) => {
             {cachedViews.includes(View.OwnerFarmDash) && (
               <div style={{ display: currentView === View.OwnerFarmDash ? 'block' : 'none' }}>
                 <OwnerFarmDash />
+              </div>
+            )}
+
+            {cachedViews.includes(View.OwnerOverviewDash) && (
+              <div style={{ display: currentView === View.OwnerOverviewDash ? 'block' : 'none' }}>
+                <OwnerOverviewDash onMenuClick={handleMenuSelect} />
               </div>
             )}
 

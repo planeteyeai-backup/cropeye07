@@ -124,6 +124,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         ];
       case 'owner':
         return [
+          renderMenu('Owner Overview', <LayoutGrid size={20} />),
           renderMenu('Farm Crop Status', <BarChart3 size={20} />),
           renderMenu('Harvesting Planning', <GiSugarCane size={20} />),
           renderMenu('Agroclimatic', <Cloud size={20} />),
