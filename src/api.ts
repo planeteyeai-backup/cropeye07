@@ -329,7 +329,7 @@ api.interceptors.response.use(
 //Login function - backend expects phone_number field
 // Uses publicApi since login doesn't require authentication
 export const login = (phone_number: string, password: string) => {
-  return publicApi.post("/users/login/", { phone_number, password });
+  return publicApi.post("/login/", { phone_number, password });
 };
 
 // Token refresh function
@@ -629,8 +629,14 @@ export const getFarmById = (id: string) => {
 };
 
 // Get farms by farmer ID (include_farmer helps return plot gat/plot numbers)
-export const getFarmsByFarmerId = (farmerId: string) => {
-  return api.get(`/farms/?farmer_id=${farmerId}&include_farmer=true`);
+export const getFarmsByFarmerId = (
+  farmerId: string,
+  config?: { timeout?: number; signal?: AbortSignal },
+) => {
+  return api.get(
+    `/farms/?farmer_id=${farmerId}&include_farmer=true`,
+    config,
+  );
 };
 
 export type OwnerFactoryRef = {
@@ -2272,7 +2278,7 @@ export const fetchDistrictTotalPlotArea = async (
     throw new Error("District is required");
   }
 
-  const cacheKey = `district_total_plot_area_${d}`;
+  const cacheKey = `district_total_plot_area_v2_${d}`;
   const cached = getCache(cacheKey, AGRO_STATS_CACHE_TTL_MS);
   if (cached != null) {
     return cached as DistrictTotalPlotAreaResponse;

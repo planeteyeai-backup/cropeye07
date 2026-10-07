@@ -262,16 +262,16 @@ function farmsOf(raw: any): any[] {
 }
 
 function rawPlotsOfFarmer(farmer: any): any[] {
-  const out: any[] = [];
-  if (Array.isArray(farmer?.plots)) out.push(...farmer.plots);
-  if (!out.length && Array.isArray(farmer?.farms)) {
-    for (const farm of farmer.farms) {
-      if (farm?.plot && typeof farm.plot === "object") {
-        out.push({ ...farm.plot, farms: [farm] });
-      }
-    }
+  if (Array.isArray(farmer?.plots) && farmer.plots.length > 0) {
+    return [farmer.plots[0]];
   }
-  return out;
+
+  const firstFarmWithPlot = Array.isArray(farmer?.farms)
+    ? farmer.farms.find((farm: any) => farm?.plot && typeof farm.plot === "object")
+    : null;
+  return firstFarmWithPlot
+    ? [{ ...firstFarmWithPlot.plot, farms: [firstFarmWithPlot] }]
+    : [];
 }
 
 /* ═══════════════════════════ Crop stage ═══════════════════════════ */
@@ -648,7 +648,6 @@ export function mergeRollup(base: ScopeMetrics, f: FactoryDashboardFactory | nul
     out.area = num(f.total_field_area_acres);
     mark("area");
   }
-  if (num(f.plot_count) != null) out.plots = Math.max(out.plots, n0(f.plot_count));
 
   const c = f.crop_status?.counts;
   if (c && n0(c.total_plots) > 0) {

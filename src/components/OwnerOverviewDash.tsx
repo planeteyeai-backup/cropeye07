@@ -46,7 +46,6 @@ import {
   mergeRollup,
   metricsFromPlots,
   normKey,
-  orphanAgroPlotsForOfficer,
   plotGrowthTrend,
   withExtras,
   type IndexPoint,
@@ -305,34 +304,18 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
     const agro = agroByManager[selectedManagerId] ?? null;
     const built = buildOverviewManagers(hierarchy, agro, industryName).find((m) => m.id === selectedManagerId);
     if (!built) return null;
-    const known = new Set<string>();
-    built.fieldOfficers.forEach((fo) => fo.farmers.forEach((f) => f.plots.forEach((p) => known.add(normKey(p.key)))));
     built.fieldOfficers = built.fieldOfficers.map((fo) => {
       const farmers = fo.farmers.map((f) => {
         if (f.plots.length || !farmerFarms[f.id]) return f;
         const extra = farmerFarms[f.id].map((p) => {
-          known.add(normKey(p.key));
           return { ...p, fieldOfficerId: fo.id, fieldOfficerName: fo.name, managerId: built.id };
         });
         return { ...f, plots: extra };
       });
-      const orphans = orphanAgroPlotsForOfficer(agro, { ...fo, farmers }, built.id, known);
-      if (!orphans.length) return { ...fo, farmers };
-      const byFarmer = new Map<string, OverviewFarmer>(farmers.map((f) => [f.id, { ...f, plots: [...f.plots] }]));
-      const unassignedPlots = [...(fo.unassignedPlots ?? [])];
-      for (const p of orphans) {
-        known.add(normKey(p.key));
-        const target = byFarmer.get(p.farmerId);
-        if (target) target.plots.push(p);
-        else unassignedPlots.push(p);
-      }
-      return { ...fo, farmers: [...byFarmer.values()], unassignedPlots };
+      return { ...fo, farmers, unassignedPlots: [] };
     });
     const farmers = built.fieldOfficers.flatMap((fo) => fo.farmers);
-    const plots = [
-      ...farmers.flatMap((f) => f.plots),
-      ...built.fieldOfficers.flatMap((fo) => fo.unassignedPlots ?? []),
-    ];
+    const plots = farmers.flatMap((f) => f.plots);
     return { ...built, farmersCount: farmers.length, plotsCount: plots.length, areaAcres: plots.reduce((s, p) => s + (p.areaAcres ?? 0), 0) };
   }, [selectedManagerId, hierarchy, agroByManager, farmerFarms, industryName]);
 
@@ -444,7 +427,6 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
     const scopedFarmers = selectedFarmerId ? farmersInScope.filter((f) => f.id === selectedFarmerId) : farmersInScope;
     const plotsInScope = [
       ...scopedFarmers.flatMap((f) => f.plots),
-      ...(selectedFarmerId ? [] : scopedOfficers.flatMap((o) => o.unassignedPlots ?? [])),
     ];
     const rawScopedPlots = selectedPlotKey ? plotsInScope.filter((p) => p.key === selectedPlotKey) : plotsInScope;
     return { officers, scopedOfficers, farmersInScope, scopedFarmers, plotsInScope, rawScopedPlots };
@@ -453,10 +435,9 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
   const managerCardPlots = useMemo(() => {
     if (!selectedManager) return [];
     const plots = [
-      ...selectedManager.fieldOfficers.flatMap((officer) => [
-        ...officer.farmers.flatMap((farmer) => farmer.plots),
-        ...(officer.unassignedPlots ?? []),
-      ]),
+      ...selectedManager.fieldOfficers.flatMap((officer) =>
+        officer.farmers.flatMap((farmer) => farmer.plots),
+      ),
     ];
     return withExtras(plots, extras);
   }, [selectedManager, extras]);
@@ -564,8 +545,9 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
     if (managerScope && selectedManagerDistrictArea) {
       return {
         ...merged,
+        plots: selectedManagerDistrictArea.plot_count,
         area: selectedManagerDistrictArea.total_area_acres,
-        fromDistrict: new Set([...merged.fromDistrict, "area"]),
+        fromDistrict: new Set([...merged.fromDistrict, "area", "plots"]),
       };
     }
     return merged;
@@ -576,8 +558,9 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
     if (!selectedManagerDistrictArea) return merged;
     return {
       ...merged,
+      plots: selectedManagerDistrictArea.plot_count,
       area: selectedManagerDistrictArea.total_area_acres,
-      fromDistrict: new Set([...merged.fromDistrict, "area"]),
+      fromDistrict: new Set([...merged.fromDistrict, "area", "plots"]),
     };
   }, [managerCardPlots, extras, rollup, selectedManagerDistrictArea]);
   const health = useMemo(() => healthScore(metrics), [metrics]);
@@ -630,7 +613,7 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
   const cardAreaPlotCount = activeManagerCardSnapshot
     ? activeManagerCardSnapshot.areaPlotCount
     : showManagerCards
-      ? selectedManagerDistrictArea?.plot_count ?? rollup?.plot_count
+      ? managerCardPlots.filter((plot) => plot.areaAcres != null).length
       : undefined;
   const issues = useMemo(
     () =>
@@ -783,7 +766,14 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
                 ? [
                     { label: "Field Officers", value: <CountUp value={officers.length} />, icon: Users },
                     { label: "Farmers", value: <CountUp value={selectedManager.farmersCount} />, icon: Sprout },
-                    { label: "Plots", value: <CountUp value={selectedManager.plotsCount} />, icon: Layers },
+                    {
+                      label: "Plots",
+                      value: <CountUp value={selectedManagerDistrictArea?.plot_count ?? selectedManager.plotsCount} />,
+                      icon: Layers,
+                      title: selectedManagerDistrictArea
+                        ? `District total-plot-area endpoint: ${selectedManagerDistrictArea.district}`
+                        : "Count of plots linked to this manager's farmers",
+                    },
                     {
                       label: "Field Area",
                       value: (selectedManagerDistrictArea?.total_area_acres ?? rollup?.total_field_area_acres) != null
@@ -801,9 +791,13 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
                     { label: "Total Farmers", value: <CountUp value={ownerTotals.farmers} />, icon: Sprout },
                     {
                       label: "Total Plots",
-                      value: <CountUp value={ownerTotals.plots} />,
+                      value: ownerDistrictAreaLoading
+                        ? "…"
+                        : <CountUp value={ownerDistrictArea?.plot_count ?? ownerTotals.plots} />,
                       icon: Layers,
-                      title: "Count of plots in the loaded owner hierarchy",
+                      title: ownerDistrictArea
+                        ? `Sum of district total-plot-area endpoints (${ownerDistrictArea.districts.length} districts)`
+                        : "Count of plots in the loaded owner hierarchy",
                     },
                     {
                       label: "Total Field Area",
@@ -878,7 +872,7 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
                               top25Recovery: peers.top25Avg,
                               areaPlotCount:
                                 selectedManagerDistrictArea?.plot_count ??
-                                rollup?.plot_count,
+                                scopedPlots.filter((plot) => plot.areaAcres != null).length,
                             });
                           } else if (!v) {
                             setManagerCardSnapshot(null);

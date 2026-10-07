@@ -151,7 +151,10 @@ export const ManagerPicker: React.FC<{
                     {[
                       { l: "FOs", v: m.fieldOfficers.length },
                       { l: "Farmers", v: m.farmersCount },
-                      { l: "Plots", v: m.plotsCount },
+                      {
+                        l: "Plots",
+                        v: districtArea?.plot_count ?? m.plotsCount,
+                      },
                       { l: "Acre", v: districtArea?.total_area_acres != null ? fmt(districtArea.total_area_acres, 1) : rollup?.total_field_area_acres != null ? fmt(rollup.total_field_area_acres, 1) : m.id in districtAreas ? "—" : "…" },
                     ].map((s) => (
                       <div key={s.l} className="bg-gray-50 rounded-lg py-1.5 text-center">
