@@ -369,8 +369,8 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
         const district = resolveManagerDistrictForEventsApi(
           null,
           manager.fieldOfficers.map((officer) => ({ district: officer.region })),
-          manager.raw,
-          manager.raw?.industry,
+          { ...manager.raw, name: manager.name, region: manager.region },
+          { ...manager.raw?.industry, name: manager.industryName },
         );
         return district ? fetchDistrictTotalPlotArea(district) : null;
       }),

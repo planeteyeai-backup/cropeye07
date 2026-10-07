@@ -2165,7 +2165,7 @@ function slugFromDistrictLabel(label: string): string {
   const lower = label.toLowerCase();
   if (/kalbur|gulbarga/.test(lower)) return "kalburgi";
   if (/bagalk/.test(lower)) return "bagalkot";
-  if (/mandya/.test(lower)) return "mandya";
+  if (/mandya|maddur/.test(lower)) return "mandya";
   if (/vijay|bijapur/.test(lower)) return "vijaypura";
   return "";
 }
@@ -2206,6 +2206,7 @@ function collectDistrictLabelsFromRecord(
   push(row.state);
   push(row.factory_name);
   push(row.industry_name);
+  push(row.name);
 
   const addressInfo = row.address_info as Record<string, unknown> | undefined;
   if (addressInfo) {

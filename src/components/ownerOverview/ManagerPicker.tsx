@@ -14,7 +14,10 @@ import {
   Wheat,
 } from "lucide-react";
 import { STAGE_COLORS, type CropStage, type OverviewManager } from "../../utils/ownerOverview";
-import type { DistrictTotalPlotAreaResponse } from "../../api";
+import {
+  resolveManagerDistrictForEventsApi,
+  type DistrictTotalPlotAreaResponse,
+} from "../../api";
 import type { FactoryDashboardFactory } from "../../utils/factoryOwnerDashboard";
 import { fmt, SectionTitle } from "./ui";
 
@@ -84,6 +87,17 @@ export const ManagerPicker: React.FC<{
             const share = totalFarmers ? (m.farmersCount / totalFarmers) * 100 : 0;
             const rollup = rollups[m.id];
             const districtArea = districtAreas[m.id];
+            const resolvedDistrict = resolveManagerDistrictForEventsApi(
+              null,
+              m.fieldOfficers.map((officer) => ({ district: officer.region })),
+              { ...m.raw, name: m.name, region: m.region },
+              { ...m.raw?.industry, name: m.industryName },
+            );
+            const districtLabel = districtArea?.district
+              ? districtArea.district.charAt(0).toUpperCase() + districtArea.district.slice(1)
+              : resolvedDistrict
+                ? resolvedDistrict.charAt(0).toUpperCase() + resolvedDistrict.slice(1)
+                : m.region || "District not available";
             const plots = m.fieldOfficers.flatMap((fo) => fo.farmers.flatMap((f) => f.plots));
             const stageCounts = STAGES.map((s) => ({ s, n: plots.filter((p) => p.stage === s).length }));
             const stageTotal = stageCounts.reduce((sum, stage) => sum + stage.n, 0);
@@ -111,8 +125,8 @@ export const ManagerPicker: React.FC<{
                   <div className="flex items-end justify-between gap-3">
                     <div
                       className={`w-12 h-12 rounded-xl bg-gradient-to-br ${grad} text-white flex items-center justify-center ring-4 ring-white shadow-md`}
-                      title={`District: ${m.region || "Not available"}`}
-                      aria-label={`District icon${m.region ? ` for ${m.region}` : ""}`}
+                      title={`District: ${districtLabel}`}
+                      aria-label={`District icon${districtLabel !== "District not available" ? ` for ${districtLabel}` : ""}`}
                     >
                       <MapPinned className="w-5 h-5" aria-hidden="true" />
                     </div>
@@ -125,7 +139,7 @@ export const ManagerPicker: React.FC<{
                     <p className="text-[11px] text-gray-500">Manager</p>
                     <div className="mt-1 inline-flex max-w-full items-center gap-1 rounded-full border border-emerald-100 bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-800">
                       <MapPinned className="w-3 h-3 shrink-0" aria-hidden="true" />
-                      <span className="truncate">{m.region || "District not available"}</span>
+                      <span className="truncate">{districtLabel}</span>
                     </div>
                   </div>
                   {m.phone && (
