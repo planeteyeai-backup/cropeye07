@@ -5,6 +5,7 @@ import "leaflet/dist/leaflet.css";
 import "./Map.css";
 import { useFarmerProfile } from "../hooks/useFarmerProfile";
 import { useAppContext } from "../context/AppContext";
+import { getUserRole } from "../utils/auth";
 import { FaExpand, FaColumns } from 'react-icons/fa';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 import { AnalysisTimelineRibbon } from "./AnalysisTimelineRibbon";
@@ -107,49 +108,6 @@ export function areaAcresFromAnalyzeResponse(data: unknown): number | null {
   return null;
 }
 
-/** Profile/farm area_size is stored in hectares in Django — convert to acres. */
-function areaAcresFromProfilePlot(record: unknown): number | null {
-  const row = record as Record<string, unknown> | null | undefined;
-  if (!row) return null;
-
-  const fromAcres = areaAcresFromApiRecord(row);
-  if (fromAcres != null) return fromAcres;
-
-  const farms = row.farms as unknown[] | undefined;
-  const farm = Array.isArray(farms) ? farms[0] : row.farm;
-  const farmRow = farm as Record<string, unknown> | null | undefined;
-  if (farmRow) {
-    const farmAcres = areaAcresFromApiRecord(farmRow);
-    if (farmAcres != null) return farmAcres;
-  }
-
-  const hectares =
-    parsePositiveArea(row.area_size_numeric) ??
-    parsePositiveArea(row.area_size) ??
-    parsePositiveArea(farmRow?.area_size_numeric) ??
-    parsePositiveArea(farmRow?.area_size);
-
-  return hectares == null ? null : hectares * 2.47105;
-}
-
-function areaAcresFromFarmerProfile(
-  profile: { plots?: unknown[] } | null | undefined,
-  plotName: string,
-): number | null {
-  if (!profile?.plots?.length || !plotName.trim()) return null;
-  const target = normalizePlotKey(plotName);
-  for (const plot of profile.plots) {
-    const row = plot as Record<string, unknown>;
-    const key = normalizePlotKey(
-      String(row.fastapi_plot_id ?? `${row.gat_number ?? ""}_${row.plot_number ?? ""}`),
-    );
-    if (key !== target) continue;
-    const acres = areaAcresFromProfilePlot(plot);
-    if (acres != null) return acres;
-  }
-  return areaAcresFromProfilePlot(profile.plots[0]);
-}
-
 function isPlotNumber100(
   plotName: string,
   plots?: {
@@ -177,18 +135,13 @@ function resolveDisplayAreaAcres(args: {
   growthLayerData: unknown;
   selectedPlotName: string;
   apiAreaAcres: number | null;
-  profile?: { plots?: unknown[] } | null;
 }): number | null {
   if (isPlot171(args.selectedPlotName)) {
     const growthAreaAcres = areaAcresFromAnalyzeResponse(args.growthLayerData);
     if (growthAreaAcres != null) return growthAreaAcres;
   }
 
-  if (args.apiAreaAcres != null && args.apiAreaAcres > 0) {
-    return args.apiAreaAcres;
-  }
-
-  return areaAcresFromFarmerProfile(args.profile, args.selectedPlotName);
+  return args.apiAreaAcres;
 }
 
 /** Events analyzeSinglePlot keys use underscore (`564_865`); slash often 404s. */
@@ -773,7 +726,7 @@ const CropEyeMap: React.FC<MapProps> = ({
 }) => {
   const { profile, loading: profileLoading, refreshMyProfile } = useFarmerProfile();
   const { t } = useI18nLite();
-  const { getCached, setCached, setAppState, setSelectedPlotName: setAppSelectedPlotName } =
+  const { setAppState, setSelectedPlotName: setAppSelectedPlotName } =
     useAppContext();
   const plotNameForApi = (plotKey: string) =>
     resolveApiPlotName(plotKey, profile?.plots);
@@ -2156,7 +2109,6 @@ const CropEyeMap: React.FC<MapProps> = ({
         growthLayerData: growthData,
         selectedPlotName,
         apiAreaAcres: endpointAreaAcres,
-        profile,
       });
 
   // Always refresh acre from analyzeSinglePlot (underscore plot_id — slash 404s).
@@ -2177,7 +2129,6 @@ const CropEyeMap: React.FC<MapProps> = ({
 
     void (async () => {
       if (isFarmerPlot100) return;
-      const cacheKey = `mapPlotAreaAcres_v2_${selectedPlotName}`;
       let lastError: unknown;
       for (const apiPlot of candidates) {
         if (cancelled || !apiPlot) continue;
@@ -2188,7 +2139,6 @@ const CropEyeMap: React.FC<MapProps> = ({
           if (acres != null) {
             const rounded = Number(acres.toFixed(2));
             setEndpointAreaAcres(rounded);
-            setCached(cacheKey, { areaAcres: rounded });
             return;
           }
         } catch (error) {
@@ -2201,17 +2151,13 @@ const CropEyeMap: React.FC<MapProps> = ({
           `Could not load endpoint acreage for plot ${selectedPlotName}.`,
           lastError,
         );
-        const cached = getCached(cacheKey) as { areaAcres?: number } | null;
-        if (cached?.areaAcres != null && cached.areaAcres > 0) {
-          setEndpointAreaAcres(cached.areaAcres);
-        }
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [selectedPlotName, profile?.plots, getCached, setCached]);
+  }, [selectedPlotName, profile?.plots]);
 
   const legendData = useMemo(() => {
     if (activeLayer === "PEST") {
