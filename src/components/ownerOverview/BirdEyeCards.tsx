@@ -142,6 +142,12 @@ export const BirdEyeCards: React.FC<{
   const areaBreakdownMatches = m.area != null && Math.abs(areaTotal - m.area) <= Math.max(0.01, m.area * 0.01);
   const areaAveragePlotCount = endpointPlotCount ?? plots.filter((p) => p.areaAcres != null).length;
   const brixPlots = plots.filter((p) => p.brix != null);
+  const recoveryEligiblePlots = plots.filter(
+    (p) => p.brix != null && p.brix > 0 && p.recovery != null,
+  );
+  const plotsBelowRecoveryThreshold = recoveryEligiblePlots.filter(
+    (p) => p.recovery != null && p.recovery < 10,
+  );
   const sweet = brixPlots.filter((p) => (p.brix as number) >= 20).length;
   const fsWeak = m.fieldScore.total ? (m.fieldScore.below_40 + m.fieldScore.b40_60) / m.fieldScore.total : 0;
   const ylow = m.yieldDist.total ? m.yieldDist.below_50 / m.yieldDist.total : 0;
@@ -232,9 +238,24 @@ export const BirdEyeCards: React.FC<{
           </div>
         </div>
       )}
-      {plots.some((p) => p.recovery != null) && (
+      {recoveryEligiblePlots.length > 0 && (
         <div className="mt-2">
-          <Bucket label="Plots below 10%" value={plots.filter((p) => p.recovery != null && p.recovery < 10).length} total={plots.filter((p) => p.recovery != null).length} color="#a855f7" onClick={() => onFocus("Recovery < 10%", (p) => p.recovery != null && p.recovery < 10)} />
+          <Bucket
+            label="Plots below 10%"
+            value={plotsBelowRecoveryThreshold.length}
+            total={recoveryEligiblePlots.length}
+            color="#a855f7"
+            onClick={() =>
+              onFocus(
+                "Recovery < 10%",
+                (p) =>
+                  p.brix != null &&
+                  p.brix > 0 &&
+                  p.recovery != null &&
+                  p.recovery < 10,
+              )
+            }
+          />
         </div>
       )}
     </Card>,
