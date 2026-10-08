@@ -732,6 +732,9 @@ export function mergeRollup(base: ScopeMetrics, f: FactoryDashboardFactory | nul
       n: out.plots,
     };
     mark("biomass");
+  } else {
+    out.biomass = { avg: 0, min: null, max: null, n: 0 };
+    mark("biomass");
   }
   if (num(f.cci_avg) != null) {
     out.cci = { avg: num(f.cci_avg), n: out.plots };

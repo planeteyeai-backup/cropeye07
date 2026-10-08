@@ -14,10 +14,7 @@ import {
   Wheat,
 } from "lucide-react";
 import { STAGE_COLORS, type CropStage, type OverviewManager } from "../../utils/ownerOverview";
-import {
-  resolveManagerDistrictForEventsApi,
-  type DistrictTotalPlotAreaResponse,
-} from "../../api";
+import { resolveManagerDistrictForEventsApi } from "../../api";
 import type { FactoryDashboardFactory } from "../../utils/factoryOwnerDashboard";
 import { fmt, SectionTitle } from "./ui";
 
@@ -44,13 +41,12 @@ const STAGES: CropStage[] = ["Tillering", "Grand Growth", "Harvest Maturity", "O
 export const ManagerPicker: React.FC<{
   managers: OverviewManager[];
   rollups: Record<string, FactoryDashboardFactory | null>;
-  districtAreas: Record<string, DistrictTotalPlotAreaResponse | null>;
   loading: boolean;
   industryName: string;
   totalFarmers: number;
   onPick: (id: string) => void;
   onMenuClick?: (menu: string) => void;
-}> = ({ managers, rollups, districtAreas, loading, industryName, totalFarmers, onPick, onMenuClick }) => {
+}> = ({ managers, rollups, loading, industryName, totalFarmers, onPick, onMenuClick }) => {
   const [q, setQ] = useState("");
   const filtered = managers.filter((m) => {
     const n = q.trim().toLowerCase();
@@ -86,18 +82,15 @@ export const ManagerPicker: React.FC<{
             const grad = GRADS[i % GRADS.length];
             const share = totalFarmers ? (m.farmersCount / totalFarmers) * 100 : 0;
             const rollup = rollups[m.id];
-            const districtArea = districtAreas[m.id];
             const resolvedDistrict = resolveManagerDistrictForEventsApi(
               null,
               m.fieldOfficers.map((officer) => ({ district: officer.region })),
               { ...m.raw, name: m.name, region: m.region },
               { ...m.raw?.industry, name: m.industryName },
             );
-            const districtLabel = districtArea?.district
-              ? districtArea.district.charAt(0).toUpperCase() + districtArea.district.slice(1)
-              : resolvedDistrict
-                ? resolvedDistrict.charAt(0).toUpperCase() + resolvedDistrict.slice(1)
-                : m.region || "District not available";
+            const districtLabel = resolvedDistrict
+              ? resolvedDistrict.charAt(0).toUpperCase() + resolvedDistrict.slice(1)
+              : m.region || "District not available";
             const plots = m.fieldOfficers.flatMap((fo) => fo.farmers.flatMap((f) => f.plots));
             const stageCounts = STAGES.map((s) => ({ s, n: plots.filter((p) => p.stage === s).length }));
             const stageTotal = stageCounts.reduce((sum, stage) => sum + stage.n, 0);
@@ -153,9 +146,9 @@ export const ManagerPicker: React.FC<{
                       { l: "Farmers", v: m.farmersCount },
                       {
                         l: "Plots",
-                        v: districtArea?.plot_count ?? m.plotsCount,
+                        v: rollup?.plot_count ?? rollup?.crop_status?.counts?.total_plots ?? "—",
                       },
-                      { l: "Acre", v: districtArea?.total_area_acres != null ? fmt(districtArea.total_area_acres, 1) : rollup?.total_field_area_acres != null ? fmt(rollup.total_field_area_acres, 1) : m.id in districtAreas ? "—" : "…" },
+                      { l: "Acre", v: rollup?.total_field_area_acres != null ? fmt(rollup.total_field_area_acres, 1) : "—" },
                     ].map((s) => (
                       <div key={s.l} className="bg-gray-50 rounded-lg py-1.5 text-center">
                         <div className="text-xs font-extrabold text-gray-800 tabular-nums">{s.v}</div>

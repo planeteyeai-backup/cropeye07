@@ -16,16 +16,10 @@ import {
   X,
 } from "lucide-react";
 import api, {
-  fetchDistrictTotalPlotArea,
-  fetchOwnerDistrictsTotalPlotAreaSum,
   getCurrentUser,
   getFarmsByFarmerId,
   getFieldOfficerAgroStats,
   getTeamConnect,
-  OWNER_HARVEST_DISTRICT_SLUGS,
-  resolveManagerDistrictForEventsApi,
-  type DistrictTotalPlotAreaResponse,
-  type OwnerDistrictsTotalPlotAreaSum,
 } from "../api";
 import {
   parseOwnerHierarchyResponse,
@@ -33,7 +27,13 @@ import {
   pickBestHierarchy,
   type TeamConnectHierarchy,
 } from "../utils/teamConnectHarvest";
-import { factoryDashboardEndDate, factoryRecoveryPeersFromRollup, type FactoryDashboardFactory } from "../utils/factoryOwnerDashboard";
+import {
+  factoryDashboardEndDate,
+  factoryRecoveryPeersFromRollup,
+  fetchOwnerFactoriesDetailedDashboard,
+  type FactoryDashboardFactory,
+} from "../utils/factoryOwnerDashboard";
+import { resolveProgressOwnerId } from "./progressbar/useFactoryProgress";
 import { getUserData, getUserRole } from "../utils/auth";
 import { getCache, setCache } from "../utils/cache";
 import {
@@ -105,8 +105,8 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
   const [ownerName, setOwnerName] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [ownerDistrictArea, setOwnerDistrictArea] = useState<OwnerDistrictsTotalPlotAreaSum | null>(null);
-  const [ownerDistrictAreaLoading, setOwnerDistrictAreaLoading] = useState(true);
+  const [ownerFactoryRollup, setOwnerFactoryRollup] = useState<FactoryDashboardFactory | null>(null);
+  const [ownerFactoryRollupLoading, setOwnerFactoryRollupLoading] = useState(true);
 
   const [selectedManagerId, setSelectedManagerId] = useState("");
   const [selectedFoId, setSelectedFoId] = useState("");
@@ -116,7 +116,6 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
   const [agroByManager, setAgroByManager] = useState<Record<string, Record<string, unknown>>>({});
   const [agroLoading, setAgroLoading] = useState(false);
   const [rollups, setRollups] = useState<Record<string, FactoryDashboardFactory | null>>({});
-  const [managerDistrictAreas, setManagerDistrictAreas] = useState<Record<string, DistrictTotalPlotAreaResponse | null>>({});
   const [rollupLoading, setRollupLoading] = useState(false);
   const [farmerFarms, setFarmerFarms] = useState<Record<string, OverviewPlot[]>>({});
   const [extras, setExtras] = useState<Record<string, PlotExtra>>({});
@@ -130,7 +129,6 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
 
   const agroReqRef = useRef(0);
   const rollupRequestedRef = useRef<Set<string>>(new Set());
-  const managerDistrictAreaRequestedRef = useRef<Set<string>>(new Set());
   const requestedRef = useRef<Set<string>>(new Set());
   const detailRequestedRef = useRef<Set<string>>(new Set());
   const extrasRef = useRef(extras);
@@ -254,29 +252,25 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
 
   useEffect(() => {
     if (!isOwner) {
-      setOwnerDistrictAreaLoading(false);
+      setOwnerFactoryRollupLoading(false);
       return;
     }
     let cancelled = false;
-    fetchOwnerDistrictsTotalPlotAreaSum()
-      .then((result) => {
-        if (cancelled) return;
-        if (result.districts.length !== OWNER_HARVEST_DISTRICT_SLUGS.length) {
-          console.warn(
-            `Owner Overview acreage is incomplete: ${result.districts.length} of ${OWNER_HARVEST_DISTRICT_SLUGS.length} district totals were returned.`,
-          );
-          setOwnerDistrictArea(null);
-          return;
-        }
-        setOwnerDistrictArea(result);
+    fetchOwnerFactoriesDetailedDashboard(
+      resolveProgressOwnerId(),
+      factoryDashboardEndDate(),
+    )
+      .then((rollup) => {
+        if (!cancelled) setOwnerFactoryRollup(rollup);
       })
-      .catch((areaError) => {
-        if (cancelled) return;
-        console.warn("Could not load owner district acreage; using registered plot acreage.", areaError);
-        setOwnerDistrictArea(null);
+      .catch((rollupError) => {
+        if (!cancelled) {
+          console.warn("Could not load owner factory acreage and plot totals.", rollupError);
+          setOwnerFactoryRollup(null);
+        }
       })
       .finally(() => {
-        if (!cancelled) setOwnerDistrictAreaLoading(false);
+        if (!cancelled) setOwnerFactoryRollupLoading(false);
       });
     return () => {
       cancelled = true;
@@ -340,34 +334,6 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
       setRollupLoading(false);
     });
   }, [baseManagers, rollups]);
-
-  useEffect(() => {
-    const pending = baseManagers.filter(
-      (manager) => !(manager.id in managerDistrictAreas) && !managerDistrictAreaRequestedRef.current.has(manager.id),
-    );
-    if (!pending.length) return;
-    pending.forEach((manager) => managerDistrictAreaRequestedRef.current.add(manager.id));
-    void Promise.allSettled(
-      pending.map(async (manager) => {
-        const district = resolveManagerDistrictForEventsApi(
-          null,
-          manager.fieldOfficers.map((officer) => ({ district: officer.region })),
-          { ...manager.raw, name: manager.name, region: manager.region },
-          { ...manager.raw?.industry, name: manager.industryName },
-        );
-        return district ? fetchDistrictTotalPlotArea(district) : null;
-      }),
-    ).then((results) => {
-      const updates: Record<string, DistrictTotalPlotAreaResponse | null> = {};
-      results.forEach((result, index) => {
-        updates[pending[index].id] = result.status === "fulfilled" ? result.value : null;
-        if (result.status === "rejected") {
-          console.warn(`Could not load district acreage for manager ${pending[index].name}.`, result.reason);
-        }
-      });
-      setManagerDistrictAreas((current) => ({ ...current, ...updates }));
-    });
-  }, [baseManagers, managerDistrictAreas]);
 
   /* ── agroStats for the manager's FOs (per-plot metrics + geometry) ── */
   useEffect(() => {
@@ -446,7 +412,6 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
     !!selectedFoId && !selectedFarmerId && !selectedPlotKey;
   const smallScope = !!selectedFarmerId || !!selectedPlotKey;
   const rollup = selectedManagerId ? rollups[selectedManagerId] ?? null : null;
-  const selectedManagerDistrictArea = selectedManagerId ? managerDistrictAreas[selectedManagerId] : null;
 
   const scopeLabel = selectedPlotKey
     ? `Plot ${scopedPlots[0]?.label ?? selectedPlotKey}`
@@ -541,28 +506,29 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
   /* ── Derived analytics ── */
   const metrics = useMemo(() => {
     const base = metricsFromPlots(scopedPlots, extras);
-    const merged = managerScope ? mergeRollup(base, rollup) : base;
-    if (managerScope && selectedManagerDistrictArea) {
-      return {
-        ...merged,
-        plots: selectedManagerDistrictArea.plot_count,
-        area: selectedManagerDistrictArea.total_area_acres,
-        fromDistrict: new Set([...merged.fromDistrict, "area", "plots"]),
-      };
-    }
-    return merged;
-  }, [scopedPlots, extras, managerScope, rollup, selectedManagerDistrictArea]);
+    if (!managerScope) return base;
+    const merged = mergeRollup(base, rollup);
+    const factoryPlotCount =
+      rollup?.plot_count ?? rollup?.crop_status?.counts?.total_plots ?? 0;
+    return {
+      ...merged,
+      plots: factoryPlotCount,
+      area: rollup?.total_field_area_acres ?? null,
+      fromRollup: new Set([...merged.fromRollup, "area", "plots"]),
+    };
+  }, [scopedPlots, extras, managerScope, rollup]);
   const managerCardMetrics = useMemo(() => {
     const base = metricsFromPlots(managerCardPlots, extras);
     const merged = mergeRollup(base, rollup);
-    if (!selectedManagerDistrictArea) return merged;
+    const factoryPlotCount =
+      rollup?.plot_count ?? rollup?.crop_status?.counts?.total_plots ?? 0;
     return {
       ...merged,
-      plots: selectedManagerDistrictArea.plot_count,
-      area: selectedManagerDistrictArea.total_area_acres,
-      fromDistrict: new Set([...merged.fromDistrict, "area", "plots"]),
+      plots: factoryPlotCount,
+      area: rollup?.total_field_area_acres ?? null,
+      fromRollup: new Set([...merged.fromRollup, "area", "plots"]),
     };
-  }, [managerCardPlots, extras, rollup, selectedManagerDistrictArea]);
+  }, [managerCardPlots, extras, rollup]);
   const health = useMemo(() => healthScore(metrics), [metrics]);
   const series = useMemo(
     () => monitored.map((p) => extras[normKey(p.key)]?.indices).filter((s): s is IndexPoint[] => Array.isArray(s) && s.length > 0),
@@ -768,21 +734,19 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
                     { label: "Farmers", value: <CountUp value={selectedManager.farmersCount} />, icon: Sprout },
                     {
                       label: "Plots",
-                      value: <CountUp value={selectedManagerDistrictArea?.plot_count ?? selectedManager.plotsCount} />,
+                      value: rollup?.plot_count != null
+                        ? <CountUp value={rollup.plot_count} />
+                        : rollup?.crop_status?.counts?.total_plots != null
+                          ? <CountUp value={rollup.crop_status.counts.total_plots} />
+                          : rollupLoading ? "…" : "—",
                       icon: Layers,
-                      title: selectedManagerDistrictArea
-                        ? `District total-plot-area endpoint: ${selectedManagerDistrictArea.district}`
-                        : "Count of plots linked to this manager's farmers",
                     },
                     {
                       label: "Field Area",
-                      value: (selectedManagerDistrictArea?.total_area_acres ?? rollup?.total_field_area_acres) != null
-                        ? <><CountUp value={selectedManagerDistrictArea?.total_area_acres ?? rollup?.total_field_area_acres ?? null} digits={1} /> ac</>
+                      value: rollup?.total_field_area_acres != null
+                        ? <><CountUp value={rollup.total_field_area_acres} digits={1} /> ac</>
                         : rollupLoading ? "…" : "—",
                       icon: MapPin,
-                      title: selectedManagerDistrictArea
-                        ? `District total-plot-area endpoint: ${selectedManagerDistrictArea.district}`
-                        : "Manager factory dashboard field-area total",
                     },
                   ]
                 : [
@@ -791,29 +755,27 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
                     { label: "Total Farmers", value: <CountUp value={ownerTotals.farmers} />, icon: Sprout },
                     {
                       label: "Total Plots",
-                      value: ownerDistrictAreaLoading
+                      value: ownerFactoryRollupLoading
                         ? "…"
-                        : <CountUp value={ownerDistrictArea?.plot_count ?? ownerTotals.plots} />,
+                        : ownerFactoryRollup?.plot_count != null
+                          ? <CountUp value={ownerFactoryRollup.plot_count} />
+                          : ownerFactoryRollup?.crop_status?.counts?.total_plots != null
+                            ? <CountUp value={ownerFactoryRollup.crop_status.counts.total_plots} />
+                            : "—",
                       icon: Layers,
-                      title: ownerDistrictArea
-                        ? `Sum of district total-plot-area endpoints (${ownerDistrictArea.districts.length} districts)`
-                        : "Count of plots in the loaded owner hierarchy",
                     },
                     {
                       label: "Total Field Area",
-                      value: ownerDistrictAreaLoading
+                      value: ownerFactoryRollupLoading
                         ? "…"
-                        : ownerDistrictArea
-                          ? <><CountUp value={ownerDistrictArea.total_area_acres} digits={1} /> ac</>
+                        : ownerFactoryRollup?.total_field_area_acres != null
+                          ? <><CountUp value={ownerFactoryRollup.total_field_area_acres} digits={1} /> ac</>
                           : "—",
                       icon: MapPin,
-                      title: ownerDistrictArea
-                        ? `Sum of district total-plot-area endpoints (${ownerDistrictArea.districts.length} districts; real plots only)`
-                        : "District acreage endpoint totals are unavailable",
                     },
                   ]
               ).map((s) => (
-                <div key={s.label} title={"title" in s ? s.title : undefined} className={`min-w-0 overflow-hidden bg-white/10 backdrop-blur rounded-2xl ring-1 ring-white/20 ${selectedManager ? "p-3" : "p-2 sm:p-2.5"}`}>
+                <div key={s.label} className={`min-w-0 overflow-hidden bg-white/10 backdrop-blur rounded-2xl ring-1 ring-white/20 ${selectedManager ? "p-3" : "p-2 sm:p-2.5"}`}>
                   <div className={`flex min-w-0 items-start gap-2 text-emerald-50 font-medium ${selectedManager ? "text-xs" : "text-[10px] sm:text-xs"}`}>
                     <s.icon className="w-4 h-4 shrink-0" />
                     <span className="min-w-0 leading-tight break-words">{s.label}</span>
@@ -830,7 +792,7 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
         <AnimatePresence mode="wait">
           {!selectedManager ? (
             <motion.div key="pick" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.97, y: -10 }} transition={{ duration: 0.3 }}>
-              <ManagerPicker managers={baseManagers} rollups={rollups} districtAreas={managerDistrictAreas} loading={loading} industryName={industryName} totalFarmers={ownerTotals.farmers} onPick={pickManager} onMenuClick={onMenuClick} />
+              <ManagerPicker managers={baseManagers} rollups={rollups} loading={loading} industryName={industryName} totalFarmers={ownerTotals.farmers} onPick={pickManager} onMenuClick={onMenuClick} />
             </motion.div>
           ) : (
             <motion.div key="detail" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }} transition={{ duration: 0.35 }} className="space-y-5">
@@ -870,9 +832,8 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
                               metrics,
                               plots: scopedPlots,
                               top25Recovery: peers.top25Avg,
-                              areaPlotCount:
-                                selectedManagerDistrictArea?.plot_count ??
-                                scopedPlots.filter((plot) => plot.areaAcres != null).length,
+                              areaPlotCount: rollup?.plot_count ??
+                                rollup?.crop_status?.counts?.total_plots,
                             });
                           } else if (!v) {
                             setManagerCardSnapshot(null);

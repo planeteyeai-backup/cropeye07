@@ -211,7 +211,7 @@ export const BirdEyeCards: React.FC<{
       )}
     </Card>,
 
-    <Card key="brix" i={3} title="Sugar Content" icon={TestTube2} tone="sky" badge={<SourceBadge rollup={R("brix")} n={m.brix.n} />} health={m.brix.avg == null ? "none" : m.brix.avg >= 20 ? "good" : m.brix.avg >= 18 ? "warn" : "bad"} footer="Brix (°) — mature cane reads 20°+">
+    <Card key="brix" i={3} title="Sugar Content" icon={TestTube2} tone="sky" badge={<SourceBadge rollup={R("brix")} n={m.brix.n} />} health={m.brix.avg == null ? "none" : m.brix.avg >= 20 ? "good" : m.brix.avg >= 18 ? "warn" : "bad"} footer="">
       {loading ? <Spinner /> : <Big value={m.brix.avg} digits={1} unit="° Brix avg" tone="sky" />}
       <MinMax min={m.brix.min} max={m.brix.max} />
       {brixPlots.length > 0 && (
