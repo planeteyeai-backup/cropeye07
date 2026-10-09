@@ -1,7 +1,7 @@
 /**
  * Water Balance / Soil Moisture card — CropO Flutter logic port:
  * - SoilMoistureApi: GET irrigation-and-soil-moisture/{plot}
- * - WaterBalanceApi: GET water-remain-per-day?plot_name&crop_name&start_date&end_date
+ * - WaterBalanceApi: GET water-remain-per-day?plot_name&start_date&end_date
  *   (SEF OpenAPI — lat/lon are not accepted on this route)
  * - Irrigation needed kL = remain < 0 ? abs(remainL)/1000 : 0
  * - ETo loss card = eto_loss_liters / 1000 (kL)
@@ -447,10 +447,7 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
       );
 
       const coords = plotCoordsRef.current;
-      const waterExtras: { cropName: string; allowShortRange: boolean } = {
-        cropName: cropName || "sugarcane",
-        allowShortRange: true,
-      };
+      const waterExtras = { allowShortRange: true };
 
       try {
         const plotRefs = externalPlot ? null : profile?.plots;
@@ -504,7 +501,7 @@ const SoilMoistureCard: React.FC<SoilMoistureCardProps> = ({
         }
 
         try {
-          // SEF GET: plot_name + crop_name + 1-month dates (Month tab window).
+          // Let SEF resolve the plot's saved crop; crop IDs are not crop names.
           const monthWater = await fetchWaterRemainForPlot(
             plotName,
             plotRefs,

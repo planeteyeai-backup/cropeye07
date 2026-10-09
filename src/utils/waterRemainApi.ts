@@ -43,7 +43,6 @@ export type WaterRemainParsed = {
 };
 
 export type WaterRemainFetchExtras = {
-  cropName?: string;
   sandPct?: number;
   siltPct?: number;
   clayPct?: number;
@@ -154,7 +153,6 @@ function waterRemainCacheKey(
   end_date: string,
   extras?: WaterRemainFetchExtras,
 ): string {
-  const crop = (extras?.cropName?.trim() || "sugarcane").toLowerCase();
   const sand =
     extras?.sandPct != null && Number.isFinite(extras.sandPct)
       ? String(extras.sandPct)
@@ -167,7 +165,7 @@ function waterRemainCacheKey(
     extras?.clayPct != null && Number.isFinite(extras.clayPct)
       ? String(extras.clayPct)
       : "";
-  return `waterRemain_${plotName}_${start_date}_${end_date}_${crop}_${sand}_${silt}_${clay}`;
+  return `waterRemain_${plotName}_${start_date}_${end_date}_${sand}_${silt}_${clay}`;
 }
 
 function normalizeHourStep(item: any, index = 0): WaterHourStep | null {
@@ -410,9 +408,6 @@ async function getWaterRemainOnce(
     start_date,
     end_date,
   });
-  // Official SEF GET params (OpenAPI): crop_name is required for correct remain.
-  // Never omit it — short calls without crop default to sugarcane server-side and skew KL.
-  qs.set("crop_name", extras?.cropName?.trim() || "sugarcane");
   if (extras?.sandPct != null && Number.isFinite(extras.sandPct)) {
     qs.set("sand_pct", String(extras.sandPct));
   }
@@ -482,8 +477,8 @@ function resolveFetchRange(
 
 /**
  * GET `/water-remain-per-day` — SEF OpenAPI.
- * Preferred window = last ~1 calendar month (start ≈ same day last month → today)
- * + crop_name. Matches Month tab ("19 August to 18 Sept").
+ * Preferred window = last ~1 calendar month (start ≈ same day last month → today).
+ * Leave crop_name unset so SEF resolves the saved crop for the plot.
  */
 export async function fetchWaterRemainForPlot(
   plotId: string,

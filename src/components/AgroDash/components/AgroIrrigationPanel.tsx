@@ -174,7 +174,7 @@ const AgroIrrigationPanel: React.FC<AgroIrrigationPanelProps> = ({
           null,
           31,
           pastSameDayLastMonthRange(),
-          { cropName: "sugarcane", allowShortRange: true },
+          { allowShortRange: true },
         );
         if (!cancelled) {
           setRemainDays(filterPastDays(parsed.days, 7));
