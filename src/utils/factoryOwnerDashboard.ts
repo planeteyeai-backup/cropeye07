@@ -404,6 +404,16 @@ export function isSparseFactoryDashboard(
   );
 }
 
+function hasCompleteYieldSummary(
+  factory: FactoryDashboardFactory | null | undefined,
+): boolean {
+  return (
+    asFiniteNumber(factory?.expected_yield_avg_t_per_acre ?? factory?.expected_yield_t_per_acre) != null &&
+    asFiniteNumber(factory?.expected_yield_min_t_per_acre) != null &&
+    asFiniteNumber(factory?.expected_yield_max_t_per_acre) != null
+  );
+}
+
 export function isSparseFactoriesPayload(
   payload: FactoryDashboardResponse | null | undefined,
 ): boolean {
@@ -632,7 +642,10 @@ export async function fetchFactoryOwnerDashboardById(
 
   const cached = resultCache.get(cacheKey);
   if (cached?.data?.factories?.[0] && Date.now() - cached.at < RESULT_CACHE_TTL_MS) {
-    return cached.data.factories[0];
+    if (hasCompleteYieldSummary(cached.data.factories[0])) {
+      return cached.data.factories[0];
+    }
+    resultCache.delete(cacheKey);
   }
 
   try {
@@ -651,10 +664,12 @@ export async function fetchFactoryOwnerDashboardById(
           if (!resp.ok) break;
           const parsed = parseFactoryDashboardFactory(await resp.json());
           if (!parsed || isSparseFactoryDashboard(parsed)) break;
-          resultCache.set(cacheKey, {
-            at: Date.now(),
-            data: { owner_id: Number(oid) || undefined, factories: [parsed] },
-          });
+          if (hasCompleteYieldSummary(parsed)) {
+            resultCache.set(cacheKey, {
+              at: Date.now(),
+              data: { owner_id: Number(oid) || undefined, factories: [parsed] },
+            });
+          }
           return parsed;
         } catch {
           if (attempt < FACTORY_DASH_RETRIES) {
