@@ -9,7 +9,12 @@ import { getUserRole } from "../utils/auth";
 import { FaExpand, FaColumns } from 'react-icons/fa';
 import { ArrowLeft, Loader2 } from 'lucide-react';
 import { AnalysisTimelineRibbon } from "./AnalysisTimelineRibbon";
-import { resolveApiPlotName, plotKeyFromRecord } from "../utils/plotName";
+import {
+  normalizePlotKey as normalizeFieldScorePlotKey,
+  resolveApiPlotName,
+  plotKeyFromRecord,
+} from "../utils/plotName";
+import { getFieldScoreBaseUrl } from "../utils/sarIndexHost";
 import { getCache, removeCache, removeCachesMatchingPlot } from "../utils/cache";
 import {
   fetchAnalysisTimeline,
@@ -1688,10 +1693,10 @@ const CropEyeMap: React.FC<MapProps> = ({
       );
       if (!currentDate) return;
       const resp = await fetch(
-        `https://sef-cropeye.up.railway.app/analyze?plot_name=${encodeURIComponent(apiPlot)}&end_date=${currentDate}&days_back=15`,
+        `${getFieldScoreBaseUrl()}/analyze?plot_name=${encodeURIComponent(apiPlot)}&end_date=${encodeURIComponent(currentDate)}&days_back=15`,
         {
           method: "GET",
-          headers: { "Content-Type": "application/json" },
+          headers: { Accept: "application/json" },
         }
       );
 
@@ -1703,15 +1708,24 @@ const CropEyeMap: React.FC<MapProps> = ({
 
       if (Array.isArray(data)) {
         const plotData = data.filter((item: any) => {
-          const itemPlotName = item.plot_name || item.plot || item.name || '';
-          return itemPlotName === plotName;
+          const itemPlotName =
+            item.plot_name || item.plot || item.name || item.plot_id || "";
+          const normalizedItemPlotName = normalizeFieldScorePlotKey(
+            String(itemPlotName).replace(/^gat[\s_-]*/i, ""),
+          );
+          return (
+            normalizedItemPlotName ===
+              normalizeFieldScorePlotKey(apiPlot.replace(/^gat[\s_-]*/i, "")) ||
+            normalizedItemPlotName ===
+              normalizeFieldScorePlotKey(plotName.replace(/^gat[\s_-]*/i, ""))
+          );
         });
 
         if (plotData.length > 0) {
           plotData.sort((a: any, b: any) => {
             const dateA = a.date || a.analysis_date || '';
             const dateB = b.date || b.analysis_date || '';
-            return dateB.localeCompare(dateA);
+            return String(dateB).localeCompare(String(dateA));
           });
 
           fieldData = plotData[0];
@@ -1721,9 +1735,21 @@ const CropEyeMap: React.FC<MapProps> = ({
       }
 
       if (fieldData && onFieldAnalysisChange) {
-        const overallHealth = fieldData?.overall_health ?? fieldData?.health_score ?? 0;
+        const score =
+          fieldData?.overall_health ??
+          fieldData?.health_score ??
+          fieldData?.statistics?.mean ??
+          fieldData?.mean;
+        const overallHealth = Number(score);
+        if (score == null || !Number.isFinite(overallHealth)) {
+          console.warn("Map: Field score response did not contain a valid score", {
+            plotName,
+            apiPlot,
+          });
+          return;
+        }
         const healthStatus = fieldData?.health_status ?? fieldData?.status ?? "Unknown";
-        const meanValue = fieldData?.statistics?.mean ?? fieldData?.mean ?? 0;
+        const meanValue = fieldData?.statistics?.mean ?? fieldData?.mean ?? overallHealth;
 
         onFieldAnalysisChange({
           plotName: fieldData.plot_name ?? plotName,
@@ -1735,7 +1761,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         });
       }
     } catch (err) {
-      // console.error("Error in fetchFieldAnalysis:", err);
+      console.error("Map: Field score request failed", err);
     } finally {
       setFieldScoreLoading(false);
       onFieldAnalysisLoadingChange?.(false);
