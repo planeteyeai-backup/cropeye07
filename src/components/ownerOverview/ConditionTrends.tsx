@@ -42,7 +42,9 @@ export const ConditionTrends: React.FC<{
   loading: boolean;
   progress: { done: number; total: number };
   scopeLabel: string;
-}> = ({ series, monitored, total, loading, progress, scopeLabel }) => {
+  /** Plot/field labels when farmer or plot is selected (e.g. "4", "126_-2"). */
+  fieldLabels?: string[];
+}> = ({ series, monitored, total, loading, progress, scopeLabel, fieldLabels = [] }) => {
   const [period, setPeriod] = useState<Period>("monthly");
   const [visible, setVisible] = useState<Record<IndexKey, boolean>>({ growth: true, stress: true, water: true, moisture: true });
   const rows = useMemo(
@@ -52,6 +54,19 @@ export const ConditionTrends: React.FC<{
   const cmp = useMemo(() => compareWindows(series), [series]);
   const empty = !rows.length;
 
+  const singleField = fieldLabels.length === 1;
+  const multiField = fieldLabels.length > 1;
+  const chartTitle = singleField
+    ? `Field Indices — plot ${fieldLabels[0]}`
+    : multiField
+      ? `Field Indices — ${fieldLabels.length} fields (${fieldLabels.slice(0, 3).join(", ")}${fieldLabels.length > 3 ? "…" : ""})`
+      : "Field Indices — average of all monitored plots";
+  const scopeSubtitle = singleField
+    ? `${scopeLabel} · field ${fieldLabels[0]}`
+    : multiField
+      ? `${scopeLabel} · ${fieldLabels.length} fields`
+      : `${scopeLabel} · cumulative across ${monitored} of ${total} plots${monitored < total ? " (sampled across field officers)" : ""}`;
+
   return (
     <Panel id="ov-trends">
       <SectionTitle
@@ -59,8 +74,7 @@ export const ConditionTrends: React.FC<{
         title="Condition History — past vs current"
         subtitle={
           <>
-            {scopeLabel} · cumulative across {monitored} of {total} plots
-            {monitored < total ? " (sampled across field officers)" : ""}
+            {scopeSubtitle}
             {cmp.latest ? ` · latest image ${new Date(cmp.latest).toLocaleDateString("en-IN")}` : ""}
           </>
         }
@@ -128,7 +142,7 @@ export const ConditionTrends: React.FC<{
 
       <div className="flex items-center justify-between mb-1">
         <div className="flex items-center gap-1.5 text-xs font-bold text-gray-700">
-          <LineIcon className="w-3.5 h-3.5 text-emerald-600" /> Field Indices — average of all monitored plots
+          <LineIcon className="w-3.5 h-3.5 text-emerald-600" /> {chartTitle}
         </div>
         <div className="flex flex-wrap gap-1">
           {(Object.keys(INDEX_META) as IndexKey[]).map((k) => (

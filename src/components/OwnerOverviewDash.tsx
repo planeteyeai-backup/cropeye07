@@ -980,11 +980,34 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
                 </div>
               </div>
 
-              <PerformancePanels m={metrics} recovery={{ regional: peers.factoryAvg, top25: peers.top25Avg, topFarmers: peers.topFarmers }} scopeLabel={scopeLabel} />
+              <PerformancePanels
+                m={metrics}
+                recovery={{
+                  regional: peers.factoryAvg,
+                  top25: peers.top25Avg,
+                  topFarmers: peers.topFarmers,
+                }}
+                scopeLabel={scopeLabel}
+                hideTopFarmersList={smallScope}
+              />
 
               <IssueDiagnosis issues={issues} loadingHistory={history.loading} onShow={onShowIssue} activeId={focus?.issueId ?? null} />
 
-              <ConditionTrends series={series} monitored={series.length || monitored.length} total={rawScopedPlots.length} loading={history.loading} progress={history} scopeLabel={scopeLabel} />
+              <ConditionTrends
+                series={series}
+                monitored={series.length || monitored.length}
+                total={rawScopedPlots.length}
+                loading={history.loading}
+                progress={history}
+                scopeLabel={scopeLabel}
+                fieldLabels={
+                  smallScope
+                    ? scopedPlots
+                        .map((p) => String(p.label ?? p.key ?? "").trim())
+                        .filter(Boolean)
+                    : undefined
+                }
+              />
 
               <FarmerConditionTable
                 rows={farmerRows}
