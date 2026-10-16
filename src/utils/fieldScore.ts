@@ -6,7 +6,7 @@ import {
   normalizePlotKey,
   type PlotRef,
 } from './plotName';
-import { getFieldScoreBaseUrl } from './sarIndexHost';
+import { FIELD_SCORE_HOST_DEFAULT } from './sarIndexHost';
 import { parseResponseJson } from './requestCache';
 
 export { fieldScoreCacheKey };
@@ -31,19 +31,67 @@ function extractScore(fieldData: any): number | null {
   return Number(score);
 }
 
-/** SEF `/analyze` expects gat/plot names (`64/1`), not bare Django numeric ids. */
-function fieldScorePlotCandidates(
+/**
+ * SEF `/analyze` plot ids:
+ * - underscore (`564_865`) usually works; slash (`564/865`) often 500s
+ * - bare Django numeric ids (`100`) also work on SEF for some plots
+ */
+export function fieldScorePlotCandidates(
   plotId: string,
   plots?: PlotRef[] | null,
 ): string[] {
   const all = getPlotNameCandidates(plotId, plots);
-  const preferred = all.filter((c) => !/^\d+$/.test(c));
-  return preferred.length > 0 ? preferred : all;
+  const named = all.filter((candidate) => !/^\d+$/.test(candidate));
+  const numeric = all.filter((candidate) => /^\d+$/.test(candidate));
+  const matched = findPlotRef(plots, plotId);
+  if (matched?.id != null) {
+    const id = String(matched.id).trim();
+    if (/^\d+$/.test(id) && !numeric.includes(id)) numeric.push(id);
+  }
+  if (/^\d+$/.test(String(plotId).trim())) {
+    const id = String(plotId).trim();
+    if (!numeric.includes(id)) numeric.push(id);
+  }
+
+  const out: string[] = [];
+  const seen = new Set<string>();
+
+  const add = (value: string | undefined | null) => {
+    const s = String(value ?? '').trim();
+    if (!s) return;
+    const key = s.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(s);
+  };
+
+  // Prefer numeric Django id first when available — SEF often keys plots this way.
+  for (const candidate of numeric) add(candidate);
+
+  for (const candidate of named) {
+    if (candidate.includes('/')) add(candidate.replace(/\//g, '_'));
+  }
+  for (const candidate of named) add(candidate);
+  for (const candidate of named) {
+    if (candidate.includes('_') && !candidate.includes('/')) {
+      add(candidate.replace(/_/g, '/'));
+    }
+  }
+
+  // Some records append a local sub-plot suffix (for example `36/1_-2`)
+  // that is not present in the SEF plot catalog; retry the parent plot name.
+  for (const candidate of [...out]) {
+    const parent = candidate.replace(/(?:_|\/)-\d+$/, '').trim();
+    if (parent && parent !== candidate) add(parent);
+  }
+
+  return out;
 }
 
 async function fetchFieldScoreByPlotName(
   apiPlot: string,
   plotKeyNorm: string,
+  signal: AbortSignal,
 ): Promise<number | null> {
   const tzOffsetMs = new Date().getTimezoneOffset() * 60000;
   const endDate = new Date(Date.now() - tzOffsetMs)
@@ -51,17 +99,20 @@ async function fetchFieldScoreByPlotName(
     .slice(0, 10);
 
   const formattedPlot = formatPlotNameForApi(apiPlot);
-  const base = getFieldScoreBaseUrl();
+  // Always SEF Railway — cropeye.ai/api/sef returns SPA HTML (200) with no score.
   const resp = await fetch(
-    `${base}/analyze?plot_name=${encodeURIComponent(formattedPlot)}&end_date=${endDate}&days_back=7`,
+    `${FIELD_SCORE_HOST_DEFAULT}/analyze?plot_name=${encodeURIComponent(formattedPlot)}&end_date=${endDate}&days_back=7`,
     {
       method: 'GET',
       headers: {
         Accept: 'application/json',
       },
+      signal,
     },
   );
   if (!resp.ok) return null;
+  const ct = (resp.headers.get('content-type') || '').toLowerCase();
+  if (!ct.includes('application/json')) return null;
 
   const data = await parseResponseJson(resp);
   let fieldData: any = null;
@@ -94,15 +145,25 @@ export async function fetchFieldScoreForPlot(
       : plots;
 
   const candidates = fieldScorePlotCandidates(plotId, plotList);
-  const plotKeyNorm = normalizePlotKey(candidates[0] ?? plotId);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8_000);
 
-  for (const candidate of candidates) {
-    try {
-      const score = await fetchFieldScoreByPlotName(candidate, plotKeyNorm);
-      if (score != null) return score;
-    } catch {
-      // try next candidate
+  try {
+    for (const candidate of candidates) {
+      try {
+        const score = await fetchFieldScoreByPlotName(
+          candidate,
+          normalizePlotKey(candidate),
+          controller.signal,
+        );
+        if (score != null) return score;
+      } catch {
+        if (controller.signal.aborted) return null;
+        // try next candidate
+      }
     }
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   return null;

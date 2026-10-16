@@ -14,7 +14,11 @@ import {
   resolveApiPlotName,
   plotKeyFromRecord,
 } from "../utils/plotName";
-import { getFieldScoreBaseUrl } from "../utils/sarIndexHost";
+import { fieldScorePlotCandidates } from "../utils/fieldScore";
+import { FIELD_SCORE_HOST_DEFAULT } from "../utils/sarIndexHost";
+
+/** Live Field Score must hit SEF Railway — never cropeye.ai/api/sef (SPA HTML). */
+const FIELD_SCORE_ANALYZE_BASE = FIELD_SCORE_HOST_DEFAULT;
 import { getCache, removeCache, removeCachesMatchingPlot } from "../utils/cache";
 import {
   fetchAnalysisTimeline,
@@ -223,48 +227,48 @@ const tooltipStyles = `
   text-align: right;
   font-size: 10px;
   }
-  
+
   @media (max-width: 768px) {
     .hover-tooltip {
       padding: 6px 8px;
       font-size: 10px;
       max-width: 150px;
     }
-    
+
     .enhanced-tooltip {
       padding: 6px 8px;
       font-size: 10px;
       max-width: 160px;
     }
-    
+
     .layer-name {
       min-width: 40px;
       font-size: 9px;
     }
-    
+
     .layer-description {
       font-size: 9px;
     }
   }
-  
+
   @media (max-width: 320px) {
     .hover-tooltip {
       padding: 4px 6px;
       font-size: 9px;
       max-width: 120px;
     }
-    
+
     .enhanced-tooltip {
       padding: 2px 15px;
       font-size: 9px;
       max-width: 100px;
     }
-    
+
     .layer-name {
       min-width: 30px;
       font-size: 8px;
     }
-    
+
     .layer-description {
       font-size: 8px;
     }
@@ -424,7 +428,7 @@ interface MapProps {
   onSplitScreen?: () => void;
 }
 
-/** Clip analysis tiles to the saved (yellow) plot boundary so old Admin green cannot sit on the wrong field. */
+/** Clip analysis tiles to the active plot boundary so raster pixels stay inside the field. */
 const ClipAnalysisPaneToBoundary: React.FC<{
   paneName: string;
   boundary: GeoJsonPolygon | null;
@@ -782,7 +786,7 @@ const CropEyeMap: React.FC<MapProps> = ({
   const [endpointAreaAcres, setEndpointAreaAcres] = useState<number | null>(
     null,
   );
-  
+
   // Date navigation state — empty until timeline snaps to a Sentinel-available date.
   // Never start as calendar "today" (Mandya Admin 404/500 for today).
   const [currentEndDate, setCurrentEndDate] = useState<string>("");
@@ -826,18 +830,19 @@ const CropEyeMap: React.FC<MapProps> = ({
     mapRebinSnapKeyRef.current = "";
     layerTilesCacheRef.current.clear();
     setCurrentEndDate("");
-    fetchAnalysisTimeline(plotNameForApi(plot), profile?.plots)
+    // Use the selected plot key (e.g. Django id `100`), not only fastapi slash id.
+    fetchAnalysisTimeline(plot, profile?.plots)
       .then((data) => {
         if (cancelled) return;
         setTimelinePayload(data);
         // Store Sentinel-available end dates for this plot (Map + Soil/Fertilizer reuse).
         if (data?.timeline?.length) {
           persistPlotImageEndDatesFromTimeline(
-            plotNameForApi(plot),
+            plotNameForApi(plot) || plot,
             data.timeline,
           );
         } else {
-          // No stored-tiles dates for this plot — still load layers with today;
+          // No analysis_timeline dates for this plot — still load layers with today;
           // floss analyze_* returns the actual image end_date on the tile.
           const today = new Date().toISOString().split("T")[0];
           setCurrentEndDate(today);
@@ -852,6 +857,9 @@ const CropEyeMap: React.FC<MapProps> = ({
             ),
           );
           setTimelinePayload(null);
+          // Keep map/field-score usable when cropeye-database timeline is down.
+          const today = new Date().toISOString().split("T")[0];
+          setCurrentEndDate(today);
         }
       })
       .finally(() => {
@@ -954,7 +962,7 @@ const CropEyeMap: React.FC<MapProps> = ({
   }, [activeLayer, selectedPlotName]);
 
   // Fetch Growth / Water / Soil / Pest once we have an end_date.
-  // Do NOT wait for Field Score or stored-tiles ribbon — tiles load independently.
+  // Do NOT wait for Field Score or timeline ribbon — tiles load independently.
   useEffect(() => {
     if (!selectedPlotName) return;
     if (timelineLoading) return;
@@ -1225,7 +1233,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedPlotName, refreshMyProfile]);
 
-  // Reset Field Score gate whenever the selected plot changes (login / plot switch).
+  // Reset layers whenever the selected plot changes (login / plot switch).
   useEffect(() => {
     if (!selectedPlotName) {
       setFieldScoreReady(false);
@@ -1233,6 +1241,8 @@ const CropEyeMap: React.FC<MapProps> = ({
       return;
     }
     setFieldScoreReady(false);
+    // Allow Field Score to run again for the new plot (also resets Strict Mode skip).
+    initialFetchDoneRef.current = false;
     layerFetchInFlightRef.current.clear();
     layersPendingRef.current = new Set();
     setDateNavigationLoading(false);
@@ -1242,27 +1252,39 @@ const CropEyeMap: React.FC<MapProps> = ({
     setPestData(null);
   }, [selectedPlotName]);
 
-  // Field Score runs in parallel — does not block map tiles.
+  // Field Score calls SEF directly — do not wait on timeline (timeline can 502).
   useEffect(() => {
-    if (!selectedPlotName || initialFetchDoneRef.current || profileLoading) {
-      return;
-    }
-    if (timelineLoading) return;
-    // Need a date for /analyze; use ribbon latest or current UI date (today fallback).
-    if (!currentEndDate && !latestRebinOverall) return;
+    if (!selectedPlotName || profileLoading) return;
 
-    initialFetchDoneRef.current = true;
+    const plotForScore = selectedPlotName;
+    let cancelled = false;
+    // Mark after scheduling so React Strict Mode remount can still re-run.
+    const timer = window.setTimeout(() => {
+      if (cancelled) return;
+      if (initialFetchDoneRef.current) return;
+      initialFetchDoneRef.current = true;
+      console.log("🔄 Map: Fetching field analysis for plot:", plotForScore);
+      void fetchFieldAnalysis(plotForScore)
+        .then(() => {
+          if (!cancelled) {
+            console.log("✅ Map: Field analysis fetched successfully");
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) {
+            console.error("❌ Map: Field analysis fetch failed:", err);
+            // Allow a retry if this attempt failed before a score was applied.
+            initialFetchDoneRef.current = false;
+          }
+        });
+    }, 0);
 
-    console.log('🔄 Map: Fetching field analysis on login for plot:', selectedPlotName);
-    fetchFieldAnalysis(selectedPlotName)
-      .then(() => {
-        console.log('✅ Map: Field analysis fetched successfully on login');
-      })
-      .catch((err) => {
-        console.error('❌ Map: Field analysis fetch failed:', err);
-      });
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPlotName, profileLoading, timelineLoading, currentEndDate, latestRebinOverall]);
+  }, [selectedPlotName, profileLoading]);
 
   // Removed fetchAllLayerData - date-dependent layers are now fetched by useEffect
 
@@ -1678,60 +1700,116 @@ const CropEyeMap: React.FC<MapProps> = ({
 
   const fetchFieldAnalysis = async (plotName: string) => {
     if (!plotName) return;
-    const apiPlot = plotNameForApi(plotName);
 
     setFieldScoreReady(false);
     setFieldScoreLoading(true);
     onFieldAnalysisLoadingChange?.(true);
 
     try {
-      const currentDate = getApiEndDateForLayer(
+      const timelineDate = getApiEndDateForLayer(
         plotName,
         "Growth",
         timelinePayload?.timeline,
         currentEndDate,
       );
-      if (!currentDate) return;
-      const resp = await fetch(
-        `${getFieldScoreBaseUrl()}/analyze?plot_name=${encodeURIComponent(apiPlot)}&end_date=${encodeURIComponent(currentDate)}&days_back=15`,
-        {
-          method: "GET",
-          headers: { Accept: "application/json" },
-        }
+      // SEF works with today's date even when analysis_timeline is down (502).
+      const currentDate =
+        timelineDate ||
+        currentEndDate ||
+        latestRebinOverall ||
+        new Date().toISOString().slice(0, 10);
+
+      // Prefer Django numeric id + underscore forms — SEF often 500s on slash ids.
+      // Example: selected `B/1A` fails; Django id `100` returns overall_health.
+      const candidates = [...fieldScorePlotCandidates(plotName, profile?.plots)];
+      const matched = profile?.plots?.find(
+        (p) =>
+          normalizeFieldScorePlotKey(plotKeyFromRecord(p)) ===
+            normalizeFieldScorePlotKey(plotName) ||
+          (p.id != null && String(p.id) === String(plotName).trim()),
       );
-
-      if (!resp.ok) throw new Error(`Field analysis API failed: ${resp.status}`);
-
-      const data = await parseResponseJson(resp);
+      if (matched?.id != null) {
+        const djangoId = String(matched.id).trim();
+        if (djangoId && !candidates.includes(djangoId)) {
+          candidates.unshift(djangoId);
+        }
+      }
+      if (candidates.length === 0) {
+        const fallback = plotNameForTiles(plotName) || plotNameForApi(plotName) || plotName;
+        if (fallback) candidates.push(fallback);
+      }
+      // Always include the raw selected plot key.
+      if (!candidates.some((c) => c.toLowerCase() === plotName.trim().toLowerCase())) {
+        candidates.unshift(plotName.trim());
+      }
 
       let fieldData: any = null;
+      let matchedApiPlot = "";
 
-      if (Array.isArray(data)) {
-        const plotData = data.filter((item: any) => {
-          const itemPlotName =
-            item.plot_name || item.plot || item.name || item.plot_id || "";
-          const normalizedItemPlotName = normalizeFieldScorePlotKey(
-            String(itemPlotName).replace(/^gat[\s_-]*/i, ""),
-          );
-          return (
-            normalizedItemPlotName ===
-              normalizeFieldScorePlotKey(apiPlot.replace(/^gat[\s_-]*/i, "")) ||
-            normalizedItemPlotName ===
-              normalizeFieldScorePlotKey(plotName.replace(/^gat[\s_-]*/i, ""))
-          );
-        });
-
-        if (plotData.length > 0) {
-          plotData.sort((a: any, b: any) => {
-            const dateA = a.date || a.analysis_date || '';
-            const dateB = b.date || b.analysis_date || '';
-            return String(dateB).localeCompare(String(dateA));
+      for (const apiPlot of candidates) {
+        try {
+          const analyzeUrl = `${FIELD_SCORE_ANALYZE_BASE}/analyze?plot_name=${encodeURIComponent(apiPlot)}&end_date=${encodeURIComponent(currentDate)}&days_back=15`;
+          const resp = await fetch(analyzeUrl, {
+            method: "GET",
+            headers: { Accept: "application/json" },
           });
+          if (!resp.ok) continue;
+          // cropeye.ai/api/sef returns SPA HTML with 200 — reject non-JSON.
+          const ct = (resp.headers.get("content-type") || "").toLowerCase();
+          if (!ct.includes("application/json")) {
+            console.warn("Map: Field score skipped non-JSON response", {
+              analyzeUrl,
+              contentType: ct,
+            });
+            continue;
+          }
 
-          fieldData = plotData[0];
+          const data = await parseResponseJson(resp);
+          let row: any = null;
+
+          if (Array.isArray(data)) {
+            const plotRows = data.filter((item: any) => {
+              const itemPlotName =
+                item.plot_name || item.plot || item.name || item.plot_id || "";
+              const normalizedItemPlotName = normalizeFieldScorePlotKey(
+                String(itemPlotName).replace(/^gat[\s_-]*/i, ""),
+              );
+              return (
+                normalizedItemPlotName ===
+                  normalizeFieldScorePlotKey(apiPlot.replace(/^gat[\s_-]*/i, "")) ||
+                normalizedItemPlotName ===
+                  normalizeFieldScorePlotKey(plotName.replace(/^gat[\s_-]*/i, ""))
+              );
+            });
+
+            if (plotRows.length > 0) {
+              plotRows.sort((a: any, b: any) => {
+                const dateA = a.date || a.analysis_date || "";
+                const dateB = b.date || b.analysis_date || "";
+                return String(dateB).localeCompare(String(dateA));
+              });
+              row = plotRows[0];
+            } else if (data.length > 0) {
+              // Single-plot responses sometimes omit an exact name match.
+              row = data[0];
+            }
+          } else if (typeof data === "object" && data !== null) {
+            row = data;
+          }
+
+          const score =
+            row?.overall_health ??
+            row?.health_score ??
+            row?.statistics?.mean ??
+            row?.mean;
+          if (score != null && Number.isFinite(Number(score))) {
+            fieldData = row;
+            matchedApiPlot = apiPlot;
+            break;
+          }
+        } catch (candidateErr) {
+          console.warn("Map: Field score candidate failed", apiPlot, candidateErr);
         }
-      } else if (typeof data === "object" && data !== null) {
-        fieldData = data;
       }
 
       if (fieldData && onFieldAnalysisChange) {
@@ -1744,7 +1822,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         if (score == null || !Number.isFinite(overallHealth)) {
           console.warn("Map: Field score response did not contain a valid score", {
             plotName,
-            apiPlot,
+            matchedApiPlot,
           });
           return;
         }
@@ -1752,12 +1830,17 @@ const CropEyeMap: React.FC<MapProps> = ({
         const meanValue = fieldData?.statistics?.mean ?? fieldData?.mean ?? overallHealth;
 
         onFieldAnalysisChange({
-          plotName: fieldData.plot_name ?? plotName,
+          plotName: fieldData.plot_name ?? matchedApiPlot ?? plotName,
           overallHealth,
           healthStatus,
           statistics: {
             mean: meanValue,
           },
+        });
+      } else {
+        console.warn("Map: No field score for plot after trying candidates", {
+          plotName,
+          candidates,
         });
       }
     } catch (err) {
@@ -2039,11 +2122,14 @@ const CropEyeMap: React.FC<MapProps> = ({
   ]);
 
   const shouldShowAnalysisOverlay = Boolean(activeUrl);
-  const clipTilesToSavedBoundary = Boolean(savedBoundaryGeometry);
+  const analysisOverlayBoundary = analysisGeometry ?? savedBoundaryGeometry;
+  const clipAnalysisOverlay =
+    Boolean(activeUrl) && Boolean(analysisOverlayBoundary);
 
   const analysisPngBounds = useMemo(() => {
     if (!activeOverlayIsPng) return null;
     return (
+      boundsFromPolygonFeature(activeLayerFeature) ||
       boundsFromPolygonFeature(profileBoundaryFeature) ||
       boundsFromPolygonFeature(currentPlotFeature) ||
       boundsFromPolygonFeature(
@@ -2052,6 +2138,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     );
   }, [
     activeOverlayIsPng,
+    activeLayerFeature,
     profileBoundaryFeature,
     currentPlotFeature,
     analysisGeometry,
@@ -2064,12 +2151,14 @@ const CropEyeMap: React.FC<MapProps> = ({
 
   const plotFitCoordinates = useMemo(() => {
     const ring =
-      (profileBoundaryFeature ?? currentPlotFeature)?.geometry?.coordinates?.[0] ??
+      (activeUrl ? activeLayerFeature : null)?.geometry?.coordinates?.[0] ??
+      profileBoundaryFeature?.geometry?.coordinates?.[0] ??
+      currentPlotFeature?.geometry?.coordinates?.[0] ??
       analysisGeometry?.coordinates?.[0] ??
       null;
     if (!Array.isArray(ring) || ring.length < 3) return null;
     return ring as number[][];
-  }, [profileBoundaryFeature, currentPlotFeature, analysisGeometry]);
+  }, [activeUrl, activeLayerFeature, profileBoundaryFeature, currentPlotFeature, analysisGeometry]);
 
   const plotFitKey = `${selectedPlotName}|${currentEndDate}|${activeLayer}|${activeUrl ? "1" : "0"}|${plotFitNonce}`;
 
@@ -2191,7 +2280,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       const suckingPercentage = pestData?.pixel_summary?.sucking_affected_pixel_percentage || 0;
       const fungiPercentage = pestData?.pixel_summary?.fungi_affected_pixel_percentage || 0;
       const soilBornePercentage = pestData?.pixel_summary?.SoilBorn_affected_pixel_percentage || 0;
-      
+
       return [
         { label: "Chewing", color: "#DC2626", percentage: Math.round(chewingPestPercentage), description: "Areas affected by chewing pests" },
         { label: "Sucking", color: "#B91C1C", percentage: Math.round(suckingPercentage), description: "Areas affected by sucking disease" },
@@ -2243,7 +2332,7 @@ const CropEyeMap: React.FC<MapProps> = ({
 
   const getFilteredPixels = useMemo(() => {
     // console.log('getFilteredPixels called with:', { selectedLegendClass, activeLayer });
-    
+
     if (!selectedLegendClass) {
       // console.log('No selectedLegendClass, returning empty array');
       return [];
@@ -2256,15 +2345,15 @@ const CropEyeMap: React.FC<MapProps> = ({
       }
 
       // console.log('Processing PEST layer for selectedLegendClass:', selectedLegendClass);
-      
+
       if (!["Chewing", "Sucking", "fungi", "Soil Borne"].includes(selectedLegendClass)) {
         // console.log('SelectedLegendClass not in allowed pest categories:', selectedLegendClass);
         return [];
       }
-      
+
       let coordinates = [];
       let pestType = "";
-      
+
       if (selectedLegendClass === "Chewing") {
         coordinates = pestData.pixel_summary?.chewing_affected_pixel_coordinates || [];
         pestType = "Chewing";
@@ -2278,17 +2367,17 @@ const CropEyeMap: React.FC<MapProps> = ({
         coordinates = pestData.pixel_summary?.SoilBorne_affected_pixel_coordinates || [];
         pestType = "Soil Borne";
       }
-      
+
       if (!coordinates || !Array.isArray(coordinates)) {
         // console.log('No valid coordinates found for', pestType);
         return [];
       }
-      
+
       // console.log(`Found ${coordinates.length} coordinates for ${pestType}`);
 
       const actualPixels = coordinates.map((coord, index) => {
         if (!Array.isArray(coord) || coord.length < 2) return null;
-        
+
         return {
           geometry: {
             coordinates: [coord[0], coord[1]]
@@ -2300,11 +2389,11 @@ const CropEyeMap: React.FC<MapProps> = ({
           }
         };
       }).filter(Boolean);
-      
+
       // console.log(`Generated ${actualPixels.length} pixel objects for ${pestType}`);
       return actualPixels;
     }
-    
+
     if (activeLayer === "Water Uptake") {
       if (!waterUptakeData || !currentPlotFeature) {
         // console.log('Missing waterUptakeData or currentPlotFeature');
@@ -2340,7 +2429,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         // console.log('No valid coordinates found for', categoryType);
       return [];
     }
-    
+
       // console.log(`Found ${coordinates.length} coordinates for ${categoryType}`);
 
       const actualPixels = coordinates.map((coord, index) => {
@@ -2479,11 +2568,11 @@ const CropEyeMap: React.FC<MapProps> = ({
   const getMultiLayerDataForPosition = (coords: number[]) => {
     const allLayerData = [];
     const tolerance = 0.00001;
-    
+
     // Helper function to find category for coordinates in a layer
     const findCategoryInLayer = (layerData: any, layerName: string, legendItems: any[]) => {
       if (!layerData?.pixel_summary) return null;
-      
+
       for (const legendItem of legendItems) {
         const coordsKey = getCoordinatesKey(layerName, legendItem.label);
         let coordinates = layerData.pixel_summary[coordsKey] || [];
@@ -2494,12 +2583,12 @@ const CropEyeMap: React.FC<MapProps> = ({
         ) {
           coordinates = waterUptakeVeryHealthyCoordinates(layerData.pixel_summary);
         }
-        
-        const found = coordinates.find((coord: number[]) => 
-          Math.abs(coord[0] - coords[0]) < tolerance && 
+
+        const found = coordinates.find((coord: number[]) =>
+          Math.abs(coord[0] - coords[0]) < tolerance &&
           Math.abs(coord[1] - coords[1]) < tolerance
         );
-        
+
         if (found) {
           return {
             layer: layerName,
@@ -2511,7 +2600,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       }
       return null;
     };
-    
+
     // Get coordinates key for each layer type
     const getCoordinatesKey = (layerName: string, label: string) => {
       if (layerName === 'Growth') {
@@ -2531,7 +2620,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       }
       return '';
     };
-    
+
     // Check Growth layer
     if (growthData) {
       const growthLegend = [
@@ -2543,7 +2632,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       const growthResult = findCategoryInLayer(growthData, 'Growth', growthLegend);
       if (growthResult) allLayerData.push(growthResult);
     }
-    
+
     // Check Water Uptake layer
     if (waterUptakeData) {
       const waterLegend = [
@@ -2556,7 +2645,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       const waterResult = findCategoryInLayer(waterUptakeData, 'Water Uptake', waterLegend);
       if (waterResult) allLayerData.push(waterResult);
     }
-    
+
     // Check Soil Moisture layer
     if (soilMoistureData) {
       const soilLegend = [
@@ -2569,7 +2658,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       const soilResult = findCategoryInLayer(soilMoistureData, 'Soil Moisture', soilLegend);
       if (soilResult) allLayerData.push(soilResult);
     }
-    
+
     // Check PEST layer
     if (pestData) {
       const pestLegend = [
@@ -2581,7 +2670,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       const pestResult = findCategoryInLayer(pestData, 'PEST', pestLegend);
       if (pestResult) allLayerData.push(pestResult);
     }
-    
+
     return allLayerData;
   };
 
@@ -2593,8 +2682,8 @@ const CropEyeMap: React.FC<MapProps> = ({
 
   const renderPlotBorder = () => {
     let featureToUse =
-      profileBoundaryFeature ?? plotBoundary ?? currentPlotFeature;
-    
+      activeLayerFeature ?? profileBoundaryFeature ?? plotBoundary ?? currentPlotFeature;
+
     // If still no feature, try to get from active layer data as fallback (read-only)
     if (!featureToUse) {
       if (activeLayer === "Growth" && growthData?.features?.[0]) {
@@ -2607,7 +2696,7 @@ const CropEyeMap: React.FC<MapProps> = ({
         featureToUse = pestData.features[0];
       }
     }
-    
+
     const geom = featureToUse?.geometry;
     if (!geom || geom.type !== "Polygon" || !geom.coordinates?.[0]) {
       // If no geometry available, return null but don't clear anything
@@ -2626,8 +2715,9 @@ const CropEyeMap: React.FC<MapProps> = ({
         positions={coords}
         pathOptions={{
           fillOpacity: 0,
-          color: "#FFD700",
-          weight: 3,
+          color: "#FFE000",
+          opacity: 1,
+          weight: 5,
           interactive: false,
         }}
       />
@@ -2643,7 +2733,7 @@ const CropEyeMap: React.FC<MapProps> = ({
       if (!coords || !Array.isArray(coords) || coords.length < 2) {
         return null;
       }
-      
+
       const circleRadius = 0.000025;
 
       return (
@@ -2691,7 +2781,7 @@ const CropEyeMap: React.FC<MapProps> = ({
     <div className="map-wrapper">
       {/* Enhanced Multi-Layer Tooltip */}
       {pixelTooltip && pixelTooltip.layers.length > 0 && (
-        <div 
+        <div
           className="enhanced-tooltip"
           style={{
             left: `${pixelTooltip.x + 10}px`,
@@ -2866,7 +2956,7 @@ const CropEyeMap: React.FC<MapProps> = ({
             !profileLoading &&
             !activeUrl &&
             (timelineLoading || loading))) && (
-          <div 
+          <div
             style={{
               position: 'absolute',
               top: 0,
@@ -2881,7 +2971,7 @@ const CropEyeMap: React.FC<MapProps> = ({
               pointerEvents: 'none'
             }}
           >
-            <div 
+            <div
               style={{
                 display: 'flex',
                 flexDirection: 'column',
@@ -2952,7 +3042,7 @@ const CropEyeMap: React.FC<MapProps> = ({
           >
             <FaColumns />
           </button>
-        )} 
+        )}
 
         {displayAreaAcres != null && (
           <div className="plot-info">
@@ -3024,7 +3114,7 @@ const CropEyeMap: React.FC<MapProps> = ({
                 <span className="timeseries-arrow-icon timeseries-arrow-right-icon"></span>
               )}
             </button>
-            
+
             {/* Date Popup */}
             {showDatePopup && (
               <div className={`timeseries-date-popup ${popupSide === 'left' ? 'timeseries-date-popup-left' : ''} ${popupSide === 'right' ? 'timeseries-date-popup-right' : ''}`}>
@@ -3033,7 +3123,7 @@ const CropEyeMap: React.FC<MapProps> = ({
                   <div className="timeseries-date-popup-range">
                     {/* Start: {(() => {
                       const endDate = new Date(currentEndDate);
-                      const startDate = new Date(endDate);  
+                      const startDate = new Date(endDate);
                       startDate.setDate(startDate.getDate() - DAYS_STEP);
                       return startDate.toISOString().split('T')[0];
                     })()} */}
@@ -3072,8 +3162,8 @@ const CropEyeMap: React.FC<MapProps> = ({
             <Pane name="analysisOverlay" style={{ zIndex: 450 }}>
               <ClipAnalysisPaneToBoundary
                 paneName="analysisOverlay"
-                boundary={savedBoundaryGeometry}
-                enabled={clipTilesToSavedBoundary}
+                boundary={analysisOverlayBoundary}
+                enabled={clipAnalysisOverlay}
               />
               {shouldShowPngOverlay && analysisPngBounds && activeUrl ? (
                 <AnalysisPngOverlay
@@ -3107,7 +3197,7 @@ const CropEyeMap: React.FC<MapProps> = ({
               {renderFilteredPixels()}
             </Pane>
           )}
-          <Pane name="plotBorderOverlay" style={{ zIndex: 560 }}>
+          <Pane name="plotBorderOverlay" style={{ zIndex: 700 }}>
             {renderPlotBorder()}
           </Pane>
         </MapContainer>

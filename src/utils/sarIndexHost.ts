@@ -1,9 +1,8 @@
 /**
  * SAR Index / map-tiles host (Growth, Water Uptake, Soil Moisture, Pest,
- * water-stress). Defaults to Admin Railway — never use ngrok tunnels.
+ * water-stress). Always Admin Railway — never ngrok / Cloudflare tunnels.
  *
- * Env: VITE_SAR_INDEX_API_URL — Mapping/SAR Index API.
- * Dev uses Vite `/api/sar-index` → upstream (CORS).
+ * Env: VITE_SAR_INDEX_API_URL — optional Railway override only.
  */
 export const SAR_INDEX_HOST_DEFAULT =
   "https://admin-cropeye.up.railway.app";
@@ -11,9 +10,7 @@ export const SAR_INDEX_HOST_DEFAULT =
 /** Field Score `/analyze` lives on SEF (not the tile host). */
 export const FIELD_SCORE_HOST_DEFAULT = "https://sef-cropeye.up.railway.app";
 
-const DEV_SEF_PROXY = "/api/sef";
-
-function isUnreliableTunnelHost(url: string): boolean {
+function isTunnelHost(url: string): boolean {
   return /ngrok|trycloudflare\.com|loca\.lt|cloudflared/i.test(url);
 }
 
@@ -23,10 +20,14 @@ function envSarUrl(): string {
     .replace(/\/$/, "");
 }
 
-/** Absolute upstream (no trailing slash). Env overrides default; tunnels ignored. */
+/** Absolute upstream (no trailing slash). Tunnel / cropeye.ai env values ignored. */
 export function sarIndexUpstream(): string {
   const fromEnv = envSarUrl();
-  if (/^https?:\/\//i.test(fromEnv) && !isUnreliableTunnelHost(fromEnv) && !fromEnv.includes('cropeye.ai')) {
+  if (
+    /^https?:\/\//i.test(fromEnv) &&
+    !isTunnelHost(fromEnv) &&
+    !/cropeye\.ai|vercel\.app/i.test(fromEnv)
+  ) {
     return fromEnv;
   }
   return SAR_INDEX_HOST_DEFAULT;
@@ -34,19 +35,18 @@ export function sarIndexUpstream(): string {
 
 /**
  * Browser base for SAR tile / water-stress APIs.
- * Dev always uses Vite `/api/sar-index` → upstream.
+ * Always the hosted Admin Railway URL (dev + prod) — no localhost/ngrok.
  */
 export function getSarIndexBaseUrl(): string {
   return sarIndexUpstream();
 }
 
-/** Field Score `/analyze` — SEF Railway. */
+/**
+ * Field Score `/analyze` — ALWAYS SEF Railway.
+ * Do not read VITE_SEF_* env: production had VITE_SEF_API_URL=https://cropeye.ai/api/sef
+ * which Vercel rewrites to SPA HTML (200) and the Field Score card stays empty.
+ */
 export function getFieldScoreBaseUrl(): string {
-  if (import.meta.env.DEV) return DEV_SEF_PROXY;
-  const fromEnv = String(import.meta.env.VITE_SEF_API_URL ?? "")
-    .trim()
-    .replace(/\/$/, "");
-  if (/^https?:\/\//i.test(fromEnv)) return fromEnv;
   return FIELD_SCORE_HOST_DEFAULT;
 }
 

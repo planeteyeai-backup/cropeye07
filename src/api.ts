@@ -122,10 +122,13 @@ const SEF_PRODUCTION_URL = "https://sef-cropeye.up.railway.app";
 
 function resolveSefFieldApiBaseUrl(): string {
   const fromEnv = String(import.meta.env.VITE_SEF_API_BASE_URL ?? "").trim();
-  if (/^https?:\/\//i.test(fromEnv)) {
+  // cropeye.ai/api/sef is a Vercel SPA rewrite (HTML 200) — never use it.
+  if (
+    /^https?:\/\//i.test(fromEnv) &&
+    !/cropeye\.ai|vercel\.app|\/api\/sef\b|ngrok|trycloudflare/i.test(fromEnv)
+  ) {
     return fromEnv.replace(/\/$/, "");
   }
-  // Always hosted SEF — never Vite `/api/sef` localhost proxy.
   return SEF_PRODUCTION_URL;
 }
 
@@ -1770,10 +1773,10 @@ export const registerFarmerAllInOneOnly = async (
         const defaultMsg = status === 403
           ? "Access denied. Only Field Officers, Managers, and Admins can register farmers."
           : "Authentication required. Please login to register farmers.";
-        
+
         (error as any).response = {
           status: status,
-          data: { 
+          data: {
             detail: defaultMsg,
             message: defaultMsg,
           },
@@ -1781,7 +1784,7 @@ export const registerFarmerAllInOneOnly = async (
         (error as any).requiresAuth = true;
       }
     }
-    
+
     if (
       !error.requiresAuth &&
       error.response?.status !== 401 &&

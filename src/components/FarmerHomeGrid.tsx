@@ -30,6 +30,7 @@ function FarmerHomeGrid() {
       mean: number;
     };
   } | null>(null);
+  const [fieldAnalysisLoading, setFieldAnalysisLoading] = useState(false);
 
   // State to track selected plot name
   const [selectedPlotName, setSelectedPlotName] = useState<string | null>(null);
@@ -82,6 +83,7 @@ function FarmerHomeGrid() {
     };
   }) => {
     setFieldAnalysisData(data);
+    setFieldAnalysisLoading(false);
   };
 
   return (
@@ -97,6 +99,10 @@ function FarmerHomeGrid() {
                   onHealthDataChange={handleHealthDataChange}
                   onSoilDataChange={handleSoilDataChange}
                   onFieldAnalysisChange={handleFieldAnalysisChange}
+                  onFieldAnalysisLoadingChange={(loading) => {
+                    setFieldAnalysisLoading(loading);
+                    if (loading) setFieldAnalysisData(null);
+                  }}
                   onMoistGroundChange={handleMoistGroundChange}
                   onSplitScreen={() => setSplitScreen(true)}
                 />
@@ -105,7 +111,11 @@ function FarmerHomeGrid() {
 
             <div className="lg:col-span-4 h-[82vh] min-h-[580px] flex flex-col gap-3">
               <div className="h-[220px] flex-none rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden">
-                <FieldHealthAnalysis fieldAnalysisData={fieldAnalysisData} compact />
+                <FieldHealthAnalysis
+                  fieldAnalysisData={fieldAnalysisData}
+                  loading={fieldAnalysisLoading}
+                  compact
+                />
               </div>
 
               <div className="flex-1 min-h-0 rounded-2xl bg-white/90 backdrop-blur-sm shadow-lg ring-1 ring-black/5 overflow-hidden">
