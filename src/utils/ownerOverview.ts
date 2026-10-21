@@ -38,13 +38,19 @@ export type OverviewPlot = {
   stage: CropStage;
   status: string;
   expectedYield: number | null;
+  yieldMin: number | null;
+  yieldMax: number | null;
   brix: number | null;
+  brixMin: number | null;
+  brixMax: number | null;
   recovery: number | null;
   daysToHarvest: number | null;
   biomass: number | null;
+  biomassMin: number | null;
+  biomassMax: number | null;
   /** 0–100 when present in agroStats; enriched later from SEF for small scopes. */
   fieldScore: number | null;
-  /** 0–100 Crop Condition Index when present in agroStats. */
+  /** 0–100 from FO agroStats; farmer/plot scope uses water-stress 0–10. */
   cci: number | null;
 };
 
@@ -97,6 +103,24 @@ export type PlotExtra = {
   stressDays?: number | null;
   fieldScore?: number | null;
   cci?: number | null;
+  /** 10 = Farm Crop Status `cci.value`; 100 = percent. */
+  cciScale?: 10 | 100;
+  cropConditionLabel?: string | null;
+  /** Overlay from Events `/plots/analyzeSinglePlot` (farmer / plot scope). */
+  agroLoaded?: boolean;
+  areaAcres?: number | null;
+  status?: string | null;
+  daysToHarvest?: number | null;
+  brix?: number | null;
+  brixMin?: number | null;
+  brixMax?: number | null;
+  recovery?: number | null;
+  expectedYield?: number | null;
+  yieldMin?: number | null;
+  yieldMax?: number | null;
+  biomass?: number | null;
+  biomassMin?: number | null;
+  biomassMax?: number | null;
 };
 
 export type Stat = { avg: number | null; min: number | null; max: number | null; n: number };
@@ -114,6 +138,8 @@ export type ScopeMetrics = {
   yield: Stat;
   biomass: Stat;
   cci: { avg: number | null; n: number };
+  /** 10 matches Farm Crop Status; 100 is factory / FO percent. */
+  cciScale: 10 | 100;
   stress: { events: number | null; days: number | null; plots: number };
   /** Which metric groups came from the factory rollup (vs. per-plot aggregation). */
   fromRollup: Set<string>;
@@ -381,6 +407,54 @@ export function agroMetrics(agro: Record<string, any> | null | undefined) {
   };
 }
 
+/** Card values from Events `/plots/analyzeSinglePlot` — same mapping as OwnerFarmDash. */
+export type SinglePlotCardMetrics = {
+  areaAcres: number | null;
+  status: string;
+  daysToHarvest: number | null;
+  brix: number | null;
+  brixMin: number | null;
+  brixMax: number | null;
+  recovery: number | null;
+  expectedYield: number | null;
+  yieldMin: number | null;
+  yieldMax: number | null;
+  biomass: number | null;
+  biomassMin: number | null;
+  biomassMax: number | null;
+};
+
+export function singlePlotCardMetrics(agro: Record<string, any> | null | undefined): SinglePlotCardMetrics {
+  const pick = (...vals: unknown[]) => {
+    for (const v of vals) {
+      const n = num(v);
+      if (n != null) return n;
+    }
+    return null;
+  };
+  const m = agroMetrics(agro);
+  const areaHa = agro?.area_ha != null ? Number(agro.area_ha) * 2.47105 : null;
+  return {
+    areaAcres:
+      pos(agro?.area_acres) ??
+      pos(agro?.soil?.area_acres) ??
+      pos(areaHa) ??
+      pos(agro?.area),
+    status: m.status,
+    daysToHarvest: m.daysToHarvest,
+    brix: m.brix,
+    brixMin: pick(agro?.brix_sugar?.brix?.min),
+    brixMax: pick(agro?.brix_sugar?.brix?.max),
+    recovery: m.recovery,
+    expectedYield: m.expectedYield,
+    yieldMin: pick(agro?.brix_sugar?.sugar_yield?.min, agro?.sugar_yield_min),
+    yieldMax: pick(agro?.brix_sugar?.sugar_yield?.max, agro?.sugar_yield_max),
+    biomass: m.biomass,
+    biomassMin: pick(agro?.biomass?.min),
+    biomassMax: pick(agro?.biomass?.max),
+  };
+}
+
 function buildPlot(
   raw: any,
   farmer: { id: string; name: string },
@@ -429,6 +503,12 @@ function buildPlot(
     plantationDate,
     daysSincePlantation: dsp,
     stage: cropStageBucket(agroStage, dsp),
+    yieldMin: null,
+    yieldMax: null,
+    brixMin: null,
+    brixMax: null,
+    biomassMin: null,
+    biomassMax: null,
     ...m,
   };
 }
@@ -527,6 +607,12 @@ export function orphanAgroPlotsForOfficer(
       plantationDate,
       daysSincePlantation: dsp,
       stage: cropStageBucket(agroStage, dsp),
+      yieldMin: null,
+      yieldMax: null,
+      brixMin: null,
+      brixMax: null,
+      biomassMin: null,
+      biomassMax: null,
       ...m,
     });
   }
@@ -535,15 +621,45 @@ export function orphanAgroPlotsForOfficer(
 
 /* ═══════════════════════════ Scope metrics ═══════════════════════════ */
 
-/** Apply lazily fetched extras (SEF field score, SAR CCI) onto plots. */
+function statWithRange(
+  avgs: Array<number | null | undefined>,
+  mins: Array<number | null | undefined>,
+  maxs: Array<number | null | undefined>,
+): Stat {
+  const a = avgs.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  const lo = mins.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  const hi = maxs.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  if (!a.length && !lo.length && !hi.length) return { avg: null, min: null, max: null, n: 0 };
+  return {
+    avg: a.length ? a.reduce((s, v) => s + v, 0) / a.length : null,
+    min: lo.length ? Math.min(...lo) : a.length ? Math.min(...a) : null,
+    max: hi.length ? Math.max(...hi) : a.length ? Math.max(...a) : null,
+    n: a.length,
+  };
+}
+
+/** Apply lazily fetched extras (analyzeSinglePlot, SEF field score, SAR CCI) onto plots. */
 export function withExtras(plots: OverviewPlot[], extras: Record<string, PlotExtra>): OverviewPlot[] {
   return plots.map((p) => {
     const e = extras[normKey(p.key)];
     if (!e) return p;
     return {
       ...p,
-      fieldScore: p.fieldScore ?? e.fieldScore ?? null,
-      cci: p.cci ?? e.cci ?? null,
+      fieldScore: e.fieldScore ?? p.fieldScore ?? null,
+      cci: e.cci ?? p.cci ?? null,
+      areaAcres: e.areaAcres ?? p.areaAcres,
+      status: e.status ? e.status : p.status,
+      daysToHarvest: e.daysToHarvest ?? p.daysToHarvest,
+      brix: e.brix ?? p.brix,
+      brixMin: e.brixMin ?? p.brixMin,
+      brixMax: e.brixMax ?? p.brixMax,
+      recovery: e.recovery ?? p.recovery,
+      expectedYield: e.expectedYield ?? p.expectedYield,
+      yieldMin: e.yieldMin ?? p.yieldMin,
+      yieldMax: e.yieldMax ?? p.yieldMax,
+      biomass: e.biomass ?? p.biomass,
+      biomassMin: e.biomassMin ?? p.biomassMin,
+      biomassMax: e.biomassMax ?? p.biomassMax,
     };
   });
 }
@@ -608,20 +724,34 @@ export function metricsFromPlots(plots: OverviewPlot[], extras: Record<string, P
       .filter((point) => point.water != null && Number.isFinite(point.water))
       .sort((a, b) => b.date.localeCompare(a.date))[0]?.water ?? null;
   });
+  const cciScale: 10 | 100 = plots.some((p) => extras[normKey(p.key)]?.cciScale === 10) ? 10 : 100;
 
   return {
     plots: plots.length,
     area: areaSum || null,
     stage,
     dth,
-    brix: stat(plots.map((p) => p.brix)),
+    brix: statWithRange(
+      plots.map((p) => p.brix),
+      plots.map((p) => p.brixMin ?? p.brix),
+      plots.map((p) => p.brixMax ?? p.brix),
+    ),
     recovery: stat(plots.map((p) => p.recovery)),
     waterIndex: stat(latestWaterIndices),
     fieldScore: fs,
     yieldDist: yd,
-    yield: stat(plots.map((p) => p.expectedYield)),
-    biomass: stat(plots.map((p) => p.biomass)),
+    yield: statWithRange(
+      plots.map((p) => p.expectedYield),
+      plots.map((p) => p.yieldMin ?? p.expectedYield),
+      plots.map((p) => p.yieldMax ?? p.expectedYield),
+    ),
+    biomass: statWithRange(
+      plots.map((p) => p.biomass),
+      plots.map((p) => p.biomassMin ?? p.biomass),
+      plots.map((p) => p.biomassMax ?? p.biomass),
+    ),
     cci: { avg: avg(plots.map((p) => p.cci)), n: plots.filter((p) => p.cci != null).length },
+    cciScale,
     stress: stressPlots
       ? { events: stressEvents, days: stressDays || null, plots: stressPlots }
       : { events: null, days: null, plots: 0 },
@@ -641,7 +771,7 @@ const n0 = (v: unknown) => {
  */
 export function mergeRollup(base: ScopeMetrics, f: FactoryDashboardFactory | null): ScopeMetrics {
   if (!f) return base;
-  const out: ScopeMetrics = { ...base, fromRollup: new Set(), fromDistrict: new Set() };
+  const out: ScopeMetrics = { ...base, cciScale: 100, fromRollup: new Set(), fromDistrict: new Set() };
   const mark = (k: string) => out.fromRollup.add(k);
 
   if (num(f.total_field_area_acres) != null) {
@@ -754,7 +884,10 @@ export function healthScore(m: ScopeMetrics): { score: number | null; grade: str
       0.3,
     ]);
   }
-  if (m.cci.avg != null) parts.push([Math.max(0, Math.min(100, m.cci.avg)), 0.3]);
+  if (m.cci.avg != null) {
+    const cci100 = m.cciScale === 10 ? m.cci.avg * 10 : m.cci.avg;
+    parts.push([Math.max(0, Math.min(100, cci100)), 0.3]);
+  }
   if (m.yieldDist.total > 0) {
     const t = m.yieldDist.total;
     parts.push([
@@ -1129,19 +1262,21 @@ export function diagnoseIssues(ctx: {
     }
   }
 
-  // CCI
-  if (m.cci.avg != null && m.cci.avg < 65) {
+  // CCI (0–100 factory scale, or 0–10 Farm Crop Status scale)
+  const cci100 = m.cci.avg == null ? null : m.cciScale === 10 ? m.cci.avg * 10 : m.cci.avg;
+  const cciPlotFloor = m.cciScale === 10 ? 6 : 60;
+  if (cci100 != null && cci100 < 65) {
     issues.push({
       id: "cci",
-      severity: m.cci.avg < 45 ? "critical" : "warning",
+      severity: cci100 < 45 ? "critical" : "warning",
       category: "Crop Health",
-      title: `Crop Condition Index low (${m.cci.avg.toFixed(1)})`,
-      metric: "Healthy command areas stay above 65",
+      title: `Crop Condition Index low (${m.cci.avg!.toFixed(1)})`,
+      metric: m.cciScale === 10 ? "Healthy crop stays above 6.5 (0–10)" : "Healthy command areas stay above 65",
       cause: "SAR-based condition index shows moisture/vigour stress across the area.",
       action: "Cross-check with the water-stress trend below and verify canal / borewell availability.",
       plotKeys: m.fromRollup.has("cci")
         ? []
-        : plots.filter((p) => p.cci != null && p.cci < 60).map((p) => p.key),
+        : plots.filter((p) => p.cci != null && p.cci < cciPlotFloor).map((p) => p.key),
     });
   }
 

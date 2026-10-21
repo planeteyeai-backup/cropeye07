@@ -12,7 +12,8 @@ import {
   Target,
   TestTube2,
 } from "lucide-react";
-import { STAGE_COLORS, type CropStage, type OverviewPlot, type ScopeMetrics } from "../../utils/ownerOverview";
+import { STAGE_COLORS, avg, type CropStage, type OverviewPlot, type ScopeMetrics } from "../../utils/ownerOverview";
+import { cropConditionLabelFromCci } from "../../utils/waterStressApi";
 import { CountUp, fmt, SourceBadge, Spinner, TONES, type Tone } from "./ui";
 
 export type FocusFn = (label: string, test: (p: OverviewPlot) => boolean) => void;
@@ -129,8 +130,10 @@ export const BirdEyeCards: React.FC<{
   top25Recovery: number | null;
   loading: boolean;
   stressLoading: boolean;
+  /** Single farmer / plot — same card values as Farm Crop Status. */
+  farmerScope?: boolean;
   onFocus: FocusFn;
-}> = ({ m, plots, areaPlotCount: endpointPlotCount, top25Recovery, loading, stressLoading, onFocus }) => {
+}> = ({ m, plots, areaPlotCount: endpointPlotCount, top25Recovery, loading, stressLoading, farmerScope = false, onFocus }) => {
   const R = (k: string) => m.fromRollup.has(k);
   const areaFromDistrict = m.fromDistrict.has("area");
   const stages: CropStage[] = ["Harvest Maturity", "Grand Growth", "Tillering", "Other"];
@@ -151,10 +154,25 @@ export const BirdEyeCards: React.FC<{
   const sweet = brixPlots.filter((p) => (p.brix as number) >= 20).length;
   const fsWeak = m.fieldScore.total ? (m.fieldScore.below_40 + m.fieldScore.b40_60) / m.fieldScore.total : 0;
   const ylow = m.yieldDist.total ? m.yieldDist.below_50 / m.yieldDist.total : 0;
+  const statusCounts = new Map<string, number>();
+  for (const p of plots) {
+    const s = (p.status || "").trim();
+    if (!s) continue;
+    statusCounts.set(s, (statusCounts.get(s) ?? 0) + 1);
+  }
+  const cropStatusLabel =
+    [...statusCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+  const daysToHarvestAvg = avg(plots.map((p) => p.daysToHarvest));
+  const cciTen = farmerScope || m.cciScale === 10;
+  const cciGood = cciTen ? 6.5 : 65;
+  const cciWarn = cciTen ? 4.5 : 45;
+  const cciLabel = m.cci.avg != null ? cropConditionLabelFromCci(m.cci.avg) : null;
+  const cciGaugePct = m.cci.avg == null ? 0 : cciTen ? Math.min(100, Math.max(0, m.cci.avg * 10)) : Math.min(100, Math.max(0, m.cci.avg));
 
   const cards: React.ReactNode[] = [
-    <Card key="area" i={0} title="Field Area" icon={MapPin} tone="emerald" badge={<SourceBadge rollup={R("area")} district={areaFromDistrict} n={m.plots} />} footer={`${m.plots} plots in selection`}>
+    <Card key="area" i={0} title="Field Area" icon={MapPin} tone="emerald" badge={farmerScope ? undefined : <SourceBadge rollup={R("area")} district={areaFromDistrict} n={m.plots} />} footer={farmerScope ? "" : `${m.plots} plots in selection`}>
       {loading ? <Spinner /> : <Big value={m.area} digits={2} unit="acre" tone="emerald" />}
+      {!farmerScope && (
       <div className="mt-3 grid grid-cols-2 gap-1.5">
         <div className="bg-gray-50 rounded-lg px-2 py-1">
           <div className="text-[9px] uppercase text-gray-400 font-semibold">{areaFromDistrict ? "Avg / real plot" : "Avg / plot"}</div>
@@ -165,7 +183,8 @@ export const BirdEyeCards: React.FC<{
           <div className="text-xs font-bold text-gray-700">{m.plots}</div>
         </div>
       </div>
-      {areaTotal > 0 && areaBreakdownMatches && (
+      )}
+      {!farmerScope && areaTotal > 0 && areaBreakdownMatches && (
         <div className="mt-3">
           <div className="text-[9px] uppercase text-gray-400 font-semibold mb-1">Area by crop stage</div>
           <div className="flex h-2 rounded-full overflow-hidden bg-gray-100">
@@ -185,12 +204,14 @@ export const BirdEyeCards: React.FC<{
         </div>
       )}
       {areaTotal > 0 && !areaBreakdownMatches && (
-        <div className="mt-3 text-[10px] text-gray-400">Crop-stage area breakdown does not match this total.</div>
+        <div className="mt-3 text-[10px] text-gray-400"></div>
       )}
     </Card>,
 
-    <Card key="stage" i={1} title="Crop Status" icon={Leaf} tone="lime" badge={<SourceBadge rollup={R("stage")} n={m.stage.total} />} footer={`${m.stage.total} plots${R("stage") ? " · factory summary" : " · click a stage to map it"}`}>
-      {loading ? <Spinner /> : (
+    <Card key="stage" i={1} title="Crop Status" icon={Leaf} tone="lime" badge={farmerScope ? undefined : <SourceBadge rollup={R("stage")} n={m.stage.total} />} footer={farmerScope ? "" : `${m.stage.total} plots${R("stage") ? " · factory summary" : " · click a stage to map it"}`}>
+      {loading ? <Spinner /> : farmerScope ? (
+        <div className="text-[26px] font-extrabold text-gray-800 leading-none">{cropStatusLabel || "—"}</div>
+      ) : (
         <div className="space-y-1.5">
           <Bucket label="Harvest Maturity" value={m.stage.harvest_maturity} total={m.stage.total} color="#f59e0b" onClick={R("stage") ? undefined : () => onFocus("Harvest Maturity", (p) => p.stage === "Harvest Maturity")} />
           <Bucket label="Grand Growth" value={m.stage.grand_growth} total={m.stage.total} color="#16a34a" onClick={R("stage") ? undefined : () => onFocus("Grand Growth", (p) => p.stage === "Grand Growth")} />
@@ -200,8 +221,10 @@ export const BirdEyeCards: React.FC<{
       )}
     </Card>,
 
-    <Card key="dth" i={2} title="Days to Harvest" icon={CalendarClock} tone="orange" badge={<SourceBadge rollup={R("dth")} n={m.dth.total} />} footer={`${m.dth.total} plots with a harvest estimate${R("dth") ? " · factory summary" : ""}`}>
-      {loading ? <Spinner /> : (
+    <Card key="dth" i={2} title="Days to Harvest" icon={CalendarClock} tone="orange" badge={farmerScope ? undefined : <SourceBadge rollup={R("dth")} n={m.dth.total} />} footer={farmerScope ? "" : `${m.dth.total} plots with a harvest estimate${R("dth") ? " · factory summary" : ""}`}>
+      {loading ? <Spinner /> : farmerScope ? (
+        <Big value={daysToHarvestAvg} digits={0} unit="Days" tone="orange" />
+      ) : (
         <div className="space-y-1">
           {([
             ["≤ 15 days", m.dth.d15, 0, 15],
@@ -217,10 +240,10 @@ export const BirdEyeCards: React.FC<{
       )}
     </Card>,
 
-    <Card key="brix" i={3} title="Sugar Content" icon={TestTube2} tone="sky" badge={<SourceBadge rollup={R("brix")} n={m.brix.n} />} health={m.brix.avg == null ? "none" : m.brix.avg >= 20 ? "good" : m.brix.avg >= 18 ? "warn" : "bad"} footer="">
-      {loading ? <Spinner /> : <Big value={m.brix.avg} digits={1} unit="° Brix avg" tone="sky" />}
-      <MinMax min={m.brix.min} max={m.brix.max} />
-      {brixPlots.length > 0 && (
+    <Card key="brix" i={3} title="Sugar Content" icon={TestTube2} tone="sky" badge={farmerScope ? undefined : <SourceBadge rollup={R("brix")} n={m.brix.n} />} health={m.brix.avg == null ? "none" : m.brix.avg >= 20 ? "good" : m.brix.avg >= 18 ? "warn" : "bad"} footer="">
+      {loading ? <Spinner /> : <Big value={m.brix.avg} digits={farmerScope ? 2 : 1} unit={farmerScope ? "Brix(Avg)" : "° Brix avg"} tone="sky" />}
+      <MinMax min={m.brix.min} max={m.brix.max} digits={farmerScope ? 2 : 1} />
+      {!farmerScope && brixPlots.length > 0 && (
         <div className="mt-3 space-y-1.5">
           <Bucket label="≥ 20° (harvest-ready sugar)" value={sweet} total={brixPlots.length} color="#0284c7" onClick={() => onFocus("Brix ≥ 20°", (p) => (p.brix ?? 0) >= 20)} />
           <Bucket label="< 18° (immature)" value={brixPlots.filter((p) => (p.brix as number) < 18).length} total={brixPlots.length} color="#f97316" onClick={() => onFocus("Brix < 18°", (p) => p.brix != null && p.brix < 18)} />
@@ -228,9 +251,9 @@ export const BirdEyeCards: React.FC<{
       )}
     </Card>,
 
-    <Card key="rec" i={4} title="Recovery Rate" icon={Droplets} tone="violet" badge={<SourceBadge rollup={R("recovery")} n={m.recovery.n} />} footer={m.recovery.avg == null ? "Available near maturity" : `${m.recovery.n} plots with recovery`}>
-      {loading ? <Spinner /> : <Big value={m.recovery.avg} digits={2} unit="%" tone="violet" />}
-      {top25Recovery != null && (
+    <Card key="rec" i={4} title="Recovery Rate" icon={Droplets} tone="violet" badge={farmerScope ? undefined : <SourceBadge rollup={R("recovery")} n={m.recovery.n} />} footer={farmerScope ? "" : m.recovery.avg == null ? "Available near maturity" : `${m.recovery.n} plots with recovery`}>
+      {loading ? <Spinner /> : <Big value={m.recovery.avg} digits={farmerScope ? 1 : 2} unit="%" tone="violet" />}
+      {!farmerScope && top25Recovery != null && (
         <div className="mt-3 grid grid-cols-1 gap-1.5">
           <div className="bg-emerald-50 rounded-lg px-2 py-1">
             <div className="text-[9px] uppercase text-emerald-600 font-semibold">Top 25 avg</div>
@@ -238,7 +261,7 @@ export const BirdEyeCards: React.FC<{
           </div>
         </div>
       )}
-      {recoveryEligiblePlots.length > 0 && (
+      {!farmerScope && (recoveryEligiblePlots.length > 0 ? (
         <div className="mt-2">
           <Bucket
             label="Plots below 10%"
@@ -257,11 +280,15 @@ export const BirdEyeCards: React.FC<{
             }
           />
         </div>
-      )}
+      ) : (
+        <div className="mt-2 text-xs font-bold text-gray-700">0</div>
+      ))}
     </Card>,
 
-    <Card key="fs" i={5} title="Field Score" icon={GaugeIcon} tone="teal" badge={<SourceBadge rollup={R("fieldScore")} n={m.fieldScore.total} />} health={m.fieldScore.total ? (fsWeak > 0.35 ? "bad" : fsWeak > 0.2 ? "warn" : "good") : "none"} footer={`${m.fieldScore.total} plots scored${m.fieldScore.avg != null ? ` · avg ${fmt(m.fieldScore.avg, 0)}%` : ""}`}>
-      {loading ? <Spinner /> : (
+    <Card key="fs" i={5} title="Field Score" icon={GaugeIcon} tone="teal" badge={farmerScope ? undefined : <SourceBadge rollup={R("fieldScore")} n={m.fieldScore.total} />} health={m.fieldScore.total ? (fsWeak > 0.35 ? "bad" : fsWeak > 0.2 ? "warn" : "good") : "none"} footer={farmerScope ? "" : `${m.fieldScore.total} plots scored${m.fieldScore.avg != null ? ` · avg ${fmt(m.fieldScore.avg, 0)}%` : ""}`}>
+      {loading ? <Spinner /> : farmerScope ? (
+        <Big value={m.fieldScore.avg} digits={1} unit="%" tone="teal" />
+      ) : (
         <div className="space-y-1.5">
           <Bucket label="> 80%" value={m.fieldScore.above_80} total={m.fieldScore.total} color="#10b981" onClick={R("fieldScore") ? undefined : () => onFocus("Field score > 80%", (p) => (p.fieldScore ?? -1) > 80)} />
           <Bucket label="60 – 80%" value={m.fieldScore.b60_80} total={m.fieldScore.total} color="#84cc16" onClick={R("fieldScore") ? undefined : () => onFocus("Field score 60–80%", (p) => p.fieldScore != null && p.fieldScore >= 60 && p.fieldScore <= 80)} />
@@ -271,8 +298,10 @@ export const BirdEyeCards: React.FC<{
       )}
     </Card>,
 
-    <Card key="yd" i={6} title="Expected Yield" icon={BarChart3} tone="amber" badge={<SourceBadge rollup={R("yieldDist")} n={m.yieldDist.total} />} health={m.yieldDist.total ? (ylow > 0.4 ? "bad" : ylow > 0.2 ? "warn" : "good") : "none"} footer={`T/acre · avg ${fmt(m.yield.avg, 1)}`}>
-      {loading ? <Spinner /> : (
+    <Card key="yd" i={6} title="Expected Yield" icon={BarChart3} tone="amber" badge={farmerScope ? undefined : <SourceBadge rollup={R("yieldDist")} n={m.yieldDist.total} />} health={farmerScope ? (m.yield.avg == null ? "none" : m.yield.avg < 50 ? "bad" : m.yield.avg < 75 ? "warn" : "good") : m.yieldDist.total ? (ylow > 0.4 ? "bad" : ylow > 0.2 ? "warn" : "good") : "none"} footer={farmerScope ? "" : `T/acre · avg ${fmt(m.yield.avg, 1)}`}>
+      {loading ? <Spinner /> : farmerScope ? (
+        <Big value={m.yield.avg} digits={1} unit="T/acre" tone="amber" />
+      ) : (
         <div className="space-y-1.5">
           <Bucket label="> 100" value={m.yieldDist.above_100} total={m.yieldDist.total} color="#10b981" onClick={R("yieldDist") ? undefined : () => onFocus("Yield > 100 T/acre", (p) => (p.expectedYield ?? -1) > 100)} />
           <Bucket label="75 – 100" value={m.yieldDist.b75_100} total={m.yieldDist.total} color="#84cc16" onClick={R("yieldDist") ? undefined : () => onFocus("Yield 75–100 T/acre", (p) => p.expectedYield != null && p.expectedYield >= 75 && p.expectedYield <= 100)} />
@@ -282,26 +311,26 @@ export const BirdEyeCards: React.FC<{
       )}
     </Card>,
 
-    <Card key="cci" i={7} title="Crop Condition Index" icon={Sprout} tone="emerald" badge={<SourceBadge rollup={R("cci")} n={m.cci.n} />} health={m.cci.avg == null ? "none" : m.cci.avg >= 65 ? "good" : m.cci.avg >= 45 ? "warn" : "bad"} footer="0 – 100 · healthy above 65">
-      {loading ? <Spinner /> : <Big value={m.cci.avg} digits={1} unit="CCI avg" tone="emerald" />}
+    <Card key="cci" i={7} title="Crop Condition Index" icon={Sprout} tone="emerald" badge={farmerScope ? undefined : <SourceBadge rollup={R("cci")} n={m.cci.n} />} health={m.cci.avg == null ? "none" : m.cci.avg >= cciGood ? "good" : m.cci.avg >= cciWarn ? "warn" : "bad"} footer={farmerScope ? "" : "0 – 100 · healthy above 65"}>
+      {loading ? <Spinner /> : <Big value={m.cci.avg} digits={1} unit={farmerScope ? (cciLabel ?? "") : "CCI avg"} tone="emerald" />}
       {m.cci.avg != null && (
         <div className="mt-3 relative h-2 rounded-full bg-gradient-to-r from-rose-400 via-amber-300 to-emerald-500">
-          <motion.div className="absolute -top-1 w-1.5 h-4 rounded bg-gray-800" initial={{ left: 0 }} animate={{ left: `calc(${Math.min(100, Math.max(0, m.cci.avg))}% - 3px)` }} />
+          <motion.div className="absolute -top-1 w-1.5 h-4 rounded bg-gray-800" initial={{ left: 0 }} animate={{ left: `calc(${cciGaugePct}% - 3px)` }} />
         </div>
       )}
     </Card>,
 
-    <Card key="stress" i={8} title="Stress Events" icon={Activity} tone="rose" health={m.stress.events == null ? "none" : m.stress.events === 0 ? "good" : m.stress.events / Math.max(1, m.stress.plots) < 1 ? "warn" : "bad"} footer={m.stress.plots ? `NDRE < 0.15 · ${m.stress.plots} monitored plots` : "Loads with plot history"}>
+    <Card key="stress" i={8} title="Stress Events" icon={Activity} tone="rose" health={m.stress.events == null ? "none" : m.stress.events === 0 ? "good" : m.stress.events / Math.max(1, m.stress.plots) < 1 ? "warn" : "bad"} footer={farmerScope ? "" : m.stress.plots ? `NDRE < 0.15 · ${m.stress.plots} monitored plots` : "Loads with plot history"}>
       {stressLoading && m.stress.events == null ? <Spinner /> : <Big value={m.stress.events} digits={0} unit="events" tone="rose" />}
-      <div className="text-[11px] text-rose-500 font-semibold mt-1">{m.stress.days != null ? `${m.stress.days} total stress days` : ""}</div>
-      {(m.stress.events ?? 0) > 0 && (
+      <div className="text-[11px] text-rose-500 font-semibold mt-1">{m.stress.days != null ? `${m.stress.days} days` : ""}</div>
+      {!farmerScope && (m.stress.events ?? 0) > 0 && (
         <div className="mt-3 rounded-lg bg-sky-50 px-2 py-1.5 text-xs font-semibold text-sky-700">
           Low NDRE stress detected — verify water conditions in the field.
         </div>
       )}
     </Card>,
 
-    <Card key="bio" i={9} title="Avg Biomass" icon={Target} tone="indigo" badge={<SourceBadge rollup={R("biomass")} n={m.biomass.n} />} footer="T/acre (above-ground)">
+    <Card key="bio" i={9} title="Avg Biomass" icon={Target} tone="indigo" badge={farmerScope ? undefined : <SourceBadge rollup={R("biomass")} n={m.biomass.n} />} footer={farmerScope ? "" : "T/acre (above-ground)"}>
       {loading ? <Spinner /> : <Big value={m.biomass.avg} digits={1} unit="T/acre" tone="indigo" />}
       <MinMax min={m.biomass.min} max={m.biomass.max} />
     </Card>,

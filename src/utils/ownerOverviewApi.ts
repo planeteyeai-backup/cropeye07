@@ -7,6 +7,8 @@ import api, {
   encodePlotIdForEventsUrl,
   eventsApi,
   getFarmersByFieldOfficer,
+  getSinglePlotAgroStats,
+  isAnalyzeSinglePlotPlantationDateError,
   parseFarmersByFieldOfficerResponse,
 } from "../api";
 import { getCache, setCache } from "./cache";
@@ -19,8 +21,13 @@ import {
 } from "./factoryOwnerDashboard";
 import { resolveProgressOwnerId } from "../components/progressbar/useFactoryProgress";
 import { fetchFieldScoreForPlot } from "./fieldScore";
+import { getPlotNameCandidates } from "./plotName";
 import { fetchWaterStressAnalysis, parseWaterStressMetrics } from "./waterStressApi";
-import type { IndexPoint } from "./ownerOverview";
+import {
+  singlePlotCardMetrics,
+  type IndexPoint,
+  type SinglePlotCardMetrics,
+} from "./ownerOverview";
 
 const EVENTS_BASE = "https://events-cropeye.up.railway.app";
 const SLOW_TIMEOUT_MS = 90_000;
@@ -207,18 +214,67 @@ export async function fetchPlotFieldScore(plotKey: string): Promise<number | nul
   }
 }
 
-/** SAR water-stress → CCI (0–100) + stress counts — farmer / plot scope only (slow API). */
+/**
+ * Events `/plots/analyzeSinglePlot` — same cache key + mapping as OwnerFarmDash
+ * Farm Crop Status cards (area, Growing status, brix, recovery, yield, biomass).
+ */
+export async function fetchPlotAgroStats(plotKey: string): Promise<SinglePlotCardMetrics | null> {
+  const endDate = factoryDashboardEndDate();
+  const cacheKey = `agroSingle_v4_${plotKey}_${endDate}`;
+  const looksEmpty = (row: any) =>
+    !!row &&
+    typeof row === "object" &&
+    !row.area_acres &&
+    !row.brix_sugar &&
+    !row.Sugarcane_Status &&
+    !row.sugarcane_status;
+
+  let data: any = getCache(cacheKey);
+  if (looksEmpty(data)) data = null;
+  if (!data) {
+    const tryIds = getPlotNameCandidates(plotKey, null);
+    const ids = tryIds.length > 0 ? tryIds : [plotKey];
+    for (const tryId of ids) {
+      try {
+        data = await getSinglePlotAgroStats(tryId, {
+          timeout: SLOW_TIMEOUT_MS,
+          endDate,
+        });
+        if (data && !looksEmpty(data)) {
+          setCache(cacheKey, data);
+          break;
+        }
+        data = null;
+      } catch (err) {
+        if (isAnalyzeSinglePlotPlantationDateError(err)) return null;
+        const status = (err as { response?: { status?: number } })?.response?.status;
+        if (status === 404) continue;
+        console.warn(`analyzeSinglePlot failed for plot ${plotKey}.`, err);
+        return null;
+      }
+    }
+  }
+  if (!data || typeof data !== "object") return null;
+  return singlePlotCardMetrics(data);
+}
+
+/** SAR water-stress → CCI (0–10) + stress counts — same as Farm Crop Status. */
 export async function fetchPlotCondition(
   plotKey: string,
   plantationDate: string | null,
-): Promise<{ cci: number | null; stressEvents: number | null; stressDays: number | null } | null> {
+): Promise<{
+  cci: number | null;
+  cropConditionLabel: string | null;
+  stressEvents: number | null;
+  stressDays: number | null;
+} | null> {
   try {
     const data = await fetchWaterStressAnalysis(plotKey, { plantationDate });
     if (!data) return null;
     const m = parseWaterStressMetrics(data);
-    const pctVal = data.cci?.value_percent ?? data.average_cci?.value_percent;
     return {
-      cci: pctVal != null ? Number(pctVal) : m.cropConditionValue != null ? m.cropConditionValue * 10 : null,
+      cci: m.cropConditionValue,
+      cropConditionLabel: m.cropConditionLabel,
       stressEvents: m.stressCount,
       stressDays: m.stressTotalDays,
     };

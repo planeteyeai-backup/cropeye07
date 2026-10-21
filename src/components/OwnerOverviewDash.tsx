@@ -59,6 +59,7 @@ import {
 import {
   fetchAllFarmersByFieldOfficer,
   fetchManagerRollup,
+  fetchPlotAgroStats,
   fetchPlotCondition,
   fetchPlotFieldScore,
   fetchPlotIndices,
@@ -397,7 +398,30 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
     const rawScopedPlots = selectedPlotKey ? plotsInScope.filter((p) => p.key === selectedPlotKey) : plotsInScope;
     return { officers, scopedOfficers, farmersInScope, scopedFarmers, plotsInScope, rawScopedPlots };
   }, [selectedManager, selectedFoId, selectedFarmerId, selectedPlotKey]);
-  const scopedPlots = useMemo(() => withExtras(rawScopedPlots, extras), [rawScopedPlots, extras]);
+  const smallScope = !!selectedFarmerId || !!selectedPlotKey;
+  const scopedPlots = useMemo(() => {
+    const source = smallScope
+      ? rawScopedPlots.map((p) => ({
+          ...p,
+          areaAcres: null as number | null,
+          status: "",
+          daysToHarvest: null as number | null,
+          brix: null as number | null,
+          brixMin: null as number | null,
+          brixMax: null as number | null,
+          recovery: null as number | null,
+          expectedYield: null as number | null,
+          yieldMin: null as number | null,
+          yieldMax: null as number | null,
+          biomass: null as number | null,
+          biomassMin: null as number | null,
+          biomassMax: null as number | null,
+          fieldScore: null as number | null,
+          cci: null as number | null,
+        }))
+      : rawScopedPlots;
+    return withExtras(source, extras);
+  }, [rawScopedPlots, extras, smallScope]);
   const managerCardPlots = useMemo(() => {
     if (!selectedManager) return [];
     const plots = [
@@ -410,7 +434,6 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
   const managerScope = !selectedFoId && !selectedFarmerId && !selectedPlotKey;
   const showManagerCards =
     !!selectedFoId && !selectedFarmerId && !selectedPlotKey;
-  const smallScope = !!selectedFarmerId || !!selectedPlotKey;
   const rollup = selectedManagerId ? rollups[selectedManagerId] ?? null : null;
 
   const scopeLabel = selectedPlotKey
@@ -445,7 +468,10 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
     const historyJob = runQueue(
       todo,
       async (p) => {
-        const [indices, stress] = await Promise.all([fetchPlotIndices(p.key), fetchPlotStress(p.key)]);
+        const [indices, stress] = await Promise.all([
+          fetchPlotIndices(p.key),
+          smallScope ? Promise.resolve(null) : fetchPlotStress(p.key),
+        ]);
         return { indices, stress };
       },
       6,
@@ -458,23 +484,29 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
           [normKey(p.key)]: {
             ...prev[normKey(p.key)],
             indices: r.indices,
-            stressEvents: r.stress?.events ?? prev[normKey(p.key)]?.stressEvents ?? null,
-            stressDays: r.stress?.days ?? prev[normKey(p.key)]?.stressDays ?? null,
+            ...(smallScope
+              ? {}
+              : {
+                  stressEvents: r.stress?.events ?? prev[normKey(p.key)]?.stressEvents ?? null,
+                  stressDays: r.stress?.days ?? prev[normKey(p.key)]?.stressDays ?? null,
+                }),
           },
         }));
         bump();
       },
       () => cancelled,
     );
-    // Farmer / plot scope: SEF field score + SAR crop condition (slow APIs, few plots).
+    // Farmer / plot scope: same endpoints as Farm Crop Status —
+    // analyzeSinglePlot + SEF field score + SAR water-stress.
     const detailJob = runQueue(
       detailTodo,
       async (p) => {
-        const [score, cond] = await Promise.all([
-          p.fieldScore == null ? fetchPlotFieldScore(p.key) : Promise.resolve(p.fieldScore),
-          p.cci == null ? fetchPlotCondition(p.key, p.plantationDate) : Promise.resolve(null),
+        const [agro, score, cond] = await Promise.all([
+          fetchPlotAgroStats(p.key),
+          fetchPlotFieldScore(p.key),
+          fetchPlotCondition(p.key, p.plantationDate),
         ]);
-        return { score, cond };
+        return { agro, score, cond };
       },
       3,
       (p, r) => {
@@ -482,10 +514,14 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
           ...prev,
           [normKey(p.key)]: {
             ...prev[normKey(p.key)],
+            ...(r.agro ?? {}),
+            agroLoaded: true,
             fieldScore: r.score ?? prev[normKey(p.key)]?.fieldScore ?? null,
             cci: r.cond?.cci ?? prev[normKey(p.key)]?.cci ?? null,
-            stressEvents: prev[normKey(p.key)]?.stressEvents ?? r.cond?.stressEvents ?? null,
-            stressDays: prev[normKey(p.key)]?.stressDays ?? r.cond?.stressDays ?? null,
+            cciScale: r.cond?.cci != null ? 10 : prev[normKey(p.key)]?.cciScale,
+            cropConditionLabel: r.cond?.cropConditionLabel ?? prev[normKey(p.key)]?.cropConditionLabel ?? null,
+            stressEvents: r.cond?.stressEvents ?? prev[normKey(p.key)]?.stressEvents ?? null,
+            stressDays: r.cond?.stressDays ?? prev[normKey(p.key)]?.stressDays ?? null,
           },
         }));
         bump();
@@ -498,6 +534,11 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
       // Allow a retry if the scope changes before these finished.
       todo.forEach((p) => {
         if (!extrasRef.current[normKey(p.key)]?.indices) requestedRef.current.delete(normKey(p.key));
+      });
+      detailTodo.forEach((p) => {
+        if (!extrasRef.current[normKey(p.key)]?.agroLoaded) {
+          detailRequestedRef.current.delete(normKey(p.key));
+        }
       });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -910,9 +951,20 @@ const OwnerOverviewDash: React.FC<{ onMenuClick?: (menu: string) => void }> = ({
                   m={cardMetrics}
                   plots={cardPlots}
                   areaPlotCount={cardAreaPlotCount}
-                  top25Recovery={cardTop25Recovery}
-                  loading={agroLoading || rollupLoading}
-                  stressLoading={history.loading}
+                  top25Recovery={smallScope ? null : cardTop25Recovery}
+                  loading={
+                    smallScope
+                      ? rawScopedPlots.length > 0 &&
+                        !rawScopedPlots.every((p) => extras[normKey(p.key)]?.agroLoaded)
+                      : agroLoading || rollupLoading
+                  }
+                  stressLoading={
+                    smallScope
+                      ? rawScopedPlots.length > 0 &&
+                        !rawScopedPlots.every((p) => extras[normKey(p.key)]?.agroLoaded)
+                      : history.loading
+                  }
+                  farmerScope={smallScope}
                   onFocus={onFocusBucket}
                 />
               </section>
